@@ -2,13 +2,13 @@
 <rss version="2.0">
     <channel>
         <title>代码与量化</title>
-        <link>https://hkcode.eu.org</link>
+        <link>https://hkcode.eu.org/quant-blog</link>
         <description>分享Python量化回测、技术指标实战、自动化运维经验</description>
         <language>zh-CN</language>
         
         <item>
             <title>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</title>
-            <link>https://hkcode.eu.org/posts/1.html</link>
+            <link>https://hkcode.eu.org/quant-blog/posts/1.html</link>
             <description>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
 
 公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。我原本用 supervisord 挂着几个量化数据采集脚本，结果发现每天凌晨脚本都会神秘消失。...</description>
