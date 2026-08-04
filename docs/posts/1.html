@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本 - 代码与量化</title>
+    <meta name="description" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
+
+公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。...">
+    <meta name="keywords" content="Windows计划任务,守护进程,Python,自动化">
+    <meta name="author" content="mattleeee">
+    <meta property="og:title" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本">
+    <meta property="og:description" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
+
+公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <article class="post">
+            <h1>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-04</span>
+                <span class="category">分类: <a href="/category/定时任务.html">定时任务</a></span>
+            </div>
+            <div class="post-content">
+                <hr />
+<p>title: 为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
+date: 2026-08-04
+category: 定时任务
+keywords: Windows计划任务, 守护进程, Python, 自动化</p>
+<hr />
+<h2 id="windowspython">为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</h2>
+<p>公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。我原本用 <code>supervisord</code> 挂着几个量化数据采集脚本，结果发现每天凌晨脚本都会神秘消失。排查了三天，最后定位到是安全软件拦截了守护进程创建的子进程。这让我彻底放弃了在 Windows 上跑守护进程的想法，转而全面拥抱 Windows 任务计划程序（Task Scheduler）。</p>
+<h3 id="_1">问题现象：脚本莫名其妙消失</h3>
+<p>场景是这样的：我在一台 Windows 10 办公机上部署了三个 Python 脚本，分别负责：</p>
+<ul>
+<li>拉取分钟级 K 线数据并写入 SQLite</li>
+<li>计算技术指标并更新到 MySQL</li>
+<li>定时发送交易信号到企业微信</li>
+</ul>
+<p>我用了 <code>supervisord</code> 来管理这三个进程，配置了自动重启和日志输出。部署后前两周一切正常，但从第三周开始，每天凌晨 2 点到 4 点之间，<code>supervisord</code> 会报告子进程退出，但退出码是 0（正常退出），而且重启后依然会在同一时间段被杀掉。</p>
+<p>我一开始以为是代码问题，加了各种异常捕获和日志，但毫无收获。直到我手动在凌晨 2 点守着，才发现是深信服弹了一个拦截通知——它把 <code>python.exe</code> 创建的子进程当成了可疑行为，直接 kill 掉了。</p>
+<h3 id="_2">排查过程：从代码到系统安全策略</h3>
+<p>排查过程分了三步：</p>
+<ol>
+<li><strong>检查 Python 代码</strong>：确认没有 <code>sys.exit()</code> 或未捕获异常，日志显示正常执行到 <code>time.sleep()</code>。</li>
+<li><strong>检查系统事件日志</strong>：在“应用程序”日志里发现了 <code>Application Error</code> 和 <code>Windows Error Reporting</code>，但没具体信息。</li>
+<li><strong>检查安全软件日志</strong>：深信服控制台显示“进程行为拦截”，目标进程是 <code>python.exe</code>，动作是“创建子进程”。</li>
+</ol>
+<p>最后确认：深信服对“守护进程创建子进程”这一行为有默认拦截策略，尤其是当父进程是 <code>python.exe</code> 且子进程是 <code>cmd.exe</code> 或另一个 <code>python.exe</code> 时，命中概率极高。</p>
+<h3 id="vs">方案对比：守护进程 vs 任务计划程序</h3>
+<table>
+<thead>
+<tr>
+<th>对比项</th>
+<th>守护进程 (supervisord/nssm)</th>
+<th>Windows 任务计划程序</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>进程隔离</td>
+<td>父进程创建子进程，易被安全软件拦截</td>
+<td>每个任务独立运行，无父子进程关系</td>
+</tr>
+<tr>
+<td>自启动</td>
+<td>需要配置服务，依赖登录会话</td>
+<td>系统级任务，开机即启动</td>
+</tr>
+<tr>
+<td>定时触发</td>
+<td>需自己写循环或 cron 表达式</td>
+<td>原生支持分钟/小时/每天/事件触发</td>
+</tr>
+<tr>
+<td>日志输出</td>
+<td>统一日志文件</td>
+<td>任务历史记录 + 可自定义重定向</td>
+</tr>
+<tr>
+<td>失败重启</td>
+<td>自动重启</td>
+<td>可配置“失败后重新启动”策略</td>
+</tr>
+<tr>
+<td>资源占用</td>
+<td>常驻内存，约 50-100MB</td>
+<td>按需启动，运行完即退出</td>
+</tr>
+</tbody>
+</table>
+<p>对于量化脚本来说，任务计划程序有天然优势：脚本本来就是定时跑，不是常驻服务。用守护进程反而是一种资源浪费，还容易触发安全策略。</p>
+<h3 id="python">实战：用任务计划程序跑 Python 脚本</h3>
+<p>我最终用 <code>schtasks</code> 命令行和 PowerShell 脚本实现了一套完整的定时任务管理方案。</p>
+<h4 id="1">1. 创建基础定时任务</h4>
+<p>假设脚本路径是 <code>D:\scripts\market_data.py</code>，Python 环境是 <code>C:\Python39\python.exe</code>，每天 9:30 运行一次：</p>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantData&quot; /TR &quot;C:\Python39\python.exe D:\scripts\market_data.py&quot; /SC DAILY /ST 09:30 /RU SYSTEM /RL HIGHEST
+</code></pre>
+
+<p>注意点：
+- <code>/RU SYSTEM</code> 用系统账户运行，避免登录会话问题
+- <code>/RL HIGHEST</code> 提升权限，防止安全软件误判
+- 如果脚本需要网络访问，确保 SYSTEM 账户有网络权限</p>
+<h4 id="2">2. 配置失败重试和日志</h4>
+<p>任务计划程序默认失败后不重试，需要手动设置。用 PowerShell 修改任务设置：</p>
+<pre class="codehilite"><code class="language-powershell">$task = Get-ScheduledTask -TaskName &quot;QuantData&quot;
+$task.Settings.ExecutionTimeLimit = &quot;PT2H&quot;  # 最长运行2小时
+$task.Settings.RestartCount = 3              # 失败重试3次
+$task.Settings.RestartInterval = &quot;PT5M&quot;      # 每次间隔5分钟
+Set-ScheduledTask -InputObject $task
+</code></pre>
+
+<p>日志重定向可以写在命令里：</p>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantData&quot; /TR &quot;cmd /c C:\Python39\python.exe D:\scripts\market_data.py &gt;&gt; D:\logs\market_data.log 2&gt;&amp;1&quot; /SC DAILY /ST 09:30 /RU SYSTEM
+</code></pre>
+
+<h4 id="3">3. 动态传参和状态检查</h4>
+<p>如果脚本需要根据日期或参数运行，可以用环境变量或命令行参数。例如每天跑不同策略：</p>
+<pre class="codehilite"><code class="language-python"># market_data.py
+import sys
+import datetime
+
+strategy = sys.argv[1] if len(sys.argv) &gt; 1 else &quot;default&quot;
+today = datetime.date.today().isoformat()
+print(f&quot;[{today}] Running strategy: {strategy}&quot;)
+</code></pre>
+
+<p>任务命令里传参：</p>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantData&quot; /TR &quot;C:\Python39\python.exe D:\scripts\market_data.py momentum&quot; /SC DAILY /ST 09:30 /RU SYSTEM
+</code></pre>
+
+<p>检查任务运行状态：</p>
+<pre class="codehilite"><code class="language-powershell">schtasks /Query /TN &quot;QuantData&quot; /V /FO LIST
+</code></pre>
+
+<h4 id="4-python">4. 用 Python 管理任务</h4>
+<p>如果你有多个任务需要管理，可以用 <code>subprocess</code> 封装一个管理脚本：</p>
+<pre class="codehilite"><code class="language-python"># task_manager.py
+import subprocess
+
+def create_task(task_name, script_path, schedule_time, args=None):
+    python_path = r&quot;C:\Python39\python.exe&quot;
+    script_args = &quot; &quot;.join(args) if args else &quot;&quot;
+    cmd = f&quot;schtasks /Create /TN {task_name} /TR \&quot;{python_path} {script_path} {script_args}\&quot; /SC DAILY /ST {schedule_time} /RU SYSTEM /RL HIGHEST&quot;
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    print(result.stdout)
+    if result.returncode != 0:
+        print(f&quot;Error: {result.stderr}&quot;)
+
+def enable_task(task_name):
+    subprocess.run(f&quot;schtasks /Change /TN {task_name} /ENABLE&quot;, shell=True)
+
+if __name__ == &quot;__main__&quot;:
+    create_task(&quot;QuantData&quot;, r&quot;D:\scripts\market_data.py&quot;, &quot;09:30&quot;, [&quot;momentum&quot;])
+    create_task(&quot;QuantSignal&quot;, r&quot;D:\scripts\signal_generator.py&quot;, &quot;10:00&quot;)
+</code></pre>
+
+<h3 id="_3">踩过的坑</h3>
+<h4 id="1system">坑 1：SYSTEM 账户访问不了网络共享路径</h4>
+<p>如果你的脚本读取 <code>\\server\share\data.csv</code>，SYSTEM 账户可能没有权限。解决办法是改用 <code>/RU DOMAIN\username</code> 并指定密码：</p>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantData&quot; /TR &quot;...&quot; /SC DAILY /ST 09:30 /RU &quot;MYDOMAIN\zhangsan&quot; /RP &quot;password&quot;
+</code></pre>
+
+<h4 id="2_1">坑 2：任务计划程序不加载用户环境变量</h4>
+<p>脚本里用 <code>os.getenv("API_KEY")</code> 可能拿不到值。解决方式是在脚本里显式加载 <code>.env</code> 文件：</p>
+<pre class="codehilite"><code class="language-python">from dotenv import load_dotenv
+load_dotenv(r&quot;D:\config\secrets.env&quot;)
+</code></pre>
+
+<h4 id="3python">坑 3：Python 脚本闪退但任务显示“运行中”</h4>
+<p>如果脚本崩溃但进程没退出，任务会一直显示“正在运行”。需要设置 <code>ExecutionTimeLimit</code>（上面已经提到），同时脚本里加超时保护：</p>
+<pre class="codehilite"><code class="language-python">import signal
+
+def timeout_handler(signum, frame):
+    raise TimeoutError(&quot;Script timed out&quot;)
+
+signal.signal(signal.SIGALRM, timeout_handler)
+signal.alarm(3600)  # 1小时超时
+</code></pre>
+
+<h4 id="4">坑 4：多个任务同时跑导致资源竞争</h4>
+<p>比如两个脚本同时写同一个 SQLite 数据库。解决办法是加文件锁：</p>
+<pre class="codehilite"><code class="language-python">import filelock
+
+lock = filelock.FileLock(r&quot;D:\data\market_data.lock&quot;)
+with lock:
+    # 写数据库操作
+    pass
+</code></pre>
+
+<h4 id="5">坑 5：日志文件无限增长</h4>
+<p>重定向到日志文件后，如果不做轮转，磁盘会爆。用 Python 的 <code>logging.handlers.RotatingFileHandler</code> 解决：</p>
+<pre class="codehilite"><code class="language-python">import logging
+from logging.handlers import RotatingFileHandler
+
+handler = RotatingFileHandler(
+    r&quot;D:\logs\market_data.log&quot;,
+    maxBytes=10 * 1024 * 1024,  # 10MB
+    backupCount=5
+)
+logging.basicConfig(handlers=[handler], level=logging.INFO)
+</code></pre>
+
+<h3 id="_4">最终效果</h3>
+<p>切换后，脚本再也没有被安全软件拦截过。任务计划程序在系统层面运行，不依赖用户登录状态，即使我下班锁屏，脚本照样跑。而且资源占用比守护进程低得多——脚本跑完就退出，不占内存。</p>
+<p>如果你也在 Windows 上跑量化脚本，且遇到了类似的进程被拦截问题，强烈建议试试任务计划程序。它本身就是 Windows 原生的任务调度工具，稳定性和兼容性都比第三方守护进程好得多。</p>
+<p>更多内容请关注本站，后续会分享更多 Windows 环境下 Python 自动化的实战技巧。</p>
+            </div>
+            <div class="post-footer">
+                <p>本文首发于 <a href="https://hkcode.eu.org">代码与量化</a></p>
+                <p>更多内容请关注: <a href="https://github.com/mattleeee">GitHub</a></p>
+            </div>
+        </article>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. All rights reserved.</p>
+    </footer>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</body>
+</html>
