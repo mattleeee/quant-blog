@@ -1,0 +1,14 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 日志
+logs/
+
+# 已发布的HTML（由构建脚本生成）
+docs/
+
+# 临时文件
+*.tmp
+*.bak
