@@ -4,9 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>分类 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="代码与量化文章分类">
     <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
 </head>
 <body>
+<div class="reading-progress" id="readingProgress"></div>
     <header>
         <nav>
             <a href="/quant-blog/" class="logo">代码与量化</a>
@@ -18,10 +22,10 @@
         </nav>
     </header>
     <main>
-        <h1>文章分类</h1>
+        <h1 style="margin-bottom:1.5rem;font-size:1.5rem;font-weight:800;">文章分类</h1>
         
         <div class="category-section">
-            <h2>定时任务 (2篇)</h2>
+            <h2>定时任务 <span class="tag-badge">2篇</span></h2>
             <ul>
                 <li><a href="/quant-blog/posts/2.html">PowerShell调用Python脚本的编码踩坑全记录</a> <span>2026-08-05</span></li>
                 <li><a href="/quant-blog/posts/1.html">为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</a> <span>2026-08-04</span></li>
@@ -29,7 +33,27 @@
         </div>
     </main>
     <footer>
-        <p>&copy; 2026 代码与量化. All rights reserved.</p>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
     </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
 </body>
 </html>
