@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PowerShell调用Python脚本的编码踩坑全记录 - 代码与量化</title>
+    <meta name="description" content="PowerShell调用Python脚本的编码踩坑全记录
+
+在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。...">
+    <meta name="keywords" content="PowerShell,Python,编码,UTF-8,乱码">
+    <meta name="author" content="mattleeee">
+    <meta property="og:title" content="PowerShell调用Python脚本的编码踩坑全记录">
+    <meta property="og:description" content="PowerShell调用Python脚本的编码踩坑全记录
+
+在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/2.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <article class="post">
+            <h1>PowerShell调用Python脚本的编码踩坑全记录</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-05</span>
+                <span class="category">分类: 定时任务</span>
+            </div>
+            <div class="post-content">
+                <hr />
+<p>title: PowerShell调用Python脚本的编码踩坑全记录
+date: 2026-08-05
+category: 定时任务
+keywords: PowerShell, Python, 编码, UTF-8, 乱码</p>
+<hr />
+<h2 id="powershellpython">PowerShell调用Python脚本的编码踩坑全记录</h2>
+<p>在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。上个月我把一个数据清洗脚本挂到任务计划里，结果每天凌晨3点准时收到退出码<code>267009</code>的告警邮件。排查了一整天，最后发现是PowerShell调用Python时中文乱码惹的祸。</p>
+<p>这篇文章记录完整的踩坑过程和最终的解决方案，希望能帮你少走弯路。</p>
+<h3 id="267009">问题复现：退出码267009</h3>
+<p>先看一个典型的失败场景。假设我们有一个简单的Python脚本<code>quant_report.py</code>，功能是读取CSV文件并输出中文报告：</p>
+<pre class="codehilite"><code class="language-python"># quant_report.py
+import csv
+import sys
+
+def load_data():
+    &quot;&quot;&quot;模拟读取行情数据&quot;&quot;&quot;
+    data = [
+        {'symbol': '600519', 'name': '贵州茅台', 'close': 1685.0},
+        {'symbol': '000858', 'name': '五粮液', 'close': 152.3},
+    ]
+    return data
+
+def generate_report(data):
+    &quot;&quot;&quot;生成中文报告&quot;&quot;&quot;
+    report_lines = []
+    report_lines.append(&quot;=== 每日行情报告 ===&quot;)
+    report_lines.append(f&quot;日期: 2024-01-15&quot;)
+    report_lines.append(&quot;&quot;)
+    for item in data:
+        report_lines.append(f&quot;股票: {item['name']} ({item['symbol']})&quot;)
+        report_lines.append(f&quot;收盘价: {item['close']:.2f} 元&quot;)
+        report_lines.append(&quot;-&quot; * 30)
+    return &quot;\n&quot;.join(report_lines)
+
+if __name__ == &quot;__main__&quot;:
+    data = load_data()
+    report = generate_report(data)
+    print(report)
+
+    # 模拟一些业务逻辑
+    if len(data) &gt; 0:
+        sys.exit(0)
+    else:
+        sys.exit(1)
+</code></pre>
+
+<p>在PowerShell中直接调用这个脚本：</p>
+<pre class="codehilite"><code class="language-powershell"># 直接调用方式
+python C:\path\to\quant_report.py
+</code></pre>
+
+<p>如果脚本文件保存为UTF-8编码，而PowerShell默认使用GBK编码读取输出，就会出现乱码。更严重的是，当脚本输出包含中文字符且编码不匹配时，Python的<code>sys.stdout</code>可能会抛出<code>UnicodeEncodeError</code>，导致异常退出码。</p>
+<h3 id="_1">编码问题分析</h3>
+<p>Windows下编码混乱的根源在于三层编码不一致：</p>
+<ol>
+<li><strong>Python脚本文件的编码</strong>：通常保存为UTF-8</li>
+<li><strong>Python运行时输出编码</strong>：默认跟随系统区域设置（中文系统为GBK）</li>
+<li><strong>PowerShell的输入编码</strong>：默认使用系统代码页（GBK/CP936）</li>
+</ol>
+<p>当Python脚本包含中文字符串常量时，如果文件是UTF-8编码但Python解释器按GBK解析，就会产生<code>SyntaxError</code>。即使脚本能正常运行，<code>print()</code>输出中文时也会因<code>stdout</code>编码设置导致乱码或异常。</p>
+<h3 id="python">尝试方案一：修改Python环境变量</h3>
+<p>一开始我尝试在脚本开头强制设置UTF-8输出：</p>
+<pre class="codehilite"><code class="language-python"># 方案一：在Python代码中设置编码
+import sys
+import io
+
+# 强制stdout使用UTF-8
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+</code></pre>
+
+<p>这个方案在直接运行<code>python quant_report.py</code>时有效，但在PowerShell中调用仍然失败。原因是PowerShell的<code>$OutputEncoding</code>默认不是UTF-8，它会将Python的UTF-8输出再次转码为GBK，导致双重转码乱码。</p>
+<h3 id="powershell">尝试方案二：PowerShell设置编码</h3>
+<p>接着尝试修改PowerShell的编码设置：</p>
+<pre class="codehilite"><code class="language-powershell"># 方案二：在PowerShell中设置编码
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+python C:\path\to\quant_report.py
+</code></pre>
+
+<p>这个方案在交互式PowerShell中有效，但在任务计划程序中无效。因为任务计划程序启动的PowerShell进程是全新的，不会继承你手动设置的编码变量。</p>
+<h3 id="chcp">尝试方案三：使用chcp切换代码页</h3>
+<pre class="codehilite"><code class="language-powershell"># 方案三：切换代码页
+chcp 65001
+python C:\path\to\quant_report.py
+</code></pre>
+
+<p><code>chcp 65001</code>将控制台代码页切换为UTF-8。这个方法在手动运行时有效，但在任务计划程序中，PowerShell的<code>-Command</code>参数执行时，<code>chcp</code>的效果可能不会即时生效，而且会影响全局设置，不推荐在生产环境使用。</p>
+<h3 id="cmd">最终方案：cmd包装层</h3>
+<p>经过多次实验，最稳定可靠的方案是使用<code>cmd.exe</code>作为中间层，通过<code>cmd /c</code>调用Python，并显式设置编码：</p>
+<pre class="codehilite"><code class="language-python"># run_quant_report.py
+# 这是一个更健壮的版本，同时处理编码和错误捕获
+import sys
+import traceback
+from datetime import datetime
+
+def main():
+    try:
+        # 业务逻辑
+        data = load_data()
+        report = generate_report(data)
+
+        # 确保输出使用UTF-8
+        sys.stdout.reconfigure(encoding='utf-8')
+        print(report)
+
+        # 记录运行日志
+        with open('quant_report.log', 'a', encoding='utf-8') as f:
+            f.write(f&quot;[{datetime.now()}] 报告生成成功\n&quot;)
+
+        return 0
+    except Exception as e:
+        # 错误日志也要用UTF-8
+        with open('quant_report.log', 'a', encoding='utf-8') as f:
+            f.write(f&quot;[{datetime.now()}] 错误: {str(e)}\n&quot;)
+            f.write(traceback.format_exc())
+        return 1
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</code></pre>
+
+<p>对应的PowerShell调用脚本<code>run_task.ps1</code>：</p>
+<pre class="codehilite"><code class="language-powershell"># run_task.ps1
+# 使用cmd包装层解决编码问题
+
+$pythonPath = &quot;C:\Python39\python.exe&quot;
+$scriptPath = &quot;C:\quant\scripts\quant_report.py&quot;
+$logPath = &quot;C:\quant\logs\task_output.log&quot;
+
+# 核心：使用cmd /c调用，并设置代码页为UTF-8
+$cmdCommand = &quot;chcp 65001 &gt;nul &amp;&amp; $pythonPath $scriptPath 2&gt;&amp;1&quot;
+
+try {
+    # 执行命令并捕获输出
+    $output = cmd /c $cmdCommand
+
+    # 将输出写入日志文件（UTF-8编码）
+    $output | Out-File -FilePath $logPath -Encoding utf8 -Append
+
+    # 检查退出码
+    $exitCode = $LASTEXITCODE
+    Write-Host &quot;Task completed with exit code: $exitCode&quot;
+
+    if ($exitCode -ne 0) {
+        Write-Error &quot;Task failed with exit code $exitCode&quot;
+        exit $exitCode
+    }
+} catch {
+    $errorMsg = $_.Exception.Message
+    Write-Error &quot;PowerShell error: $errorMsg&quot;
+    exit 1
+}
+</code></pre>
+
+<p>在任务计划程序中配置时，只需要设置：</p>
+<pre class="codehilite"><code>程序或脚本: powershell.exe
+添加参数: -ExecutionPolicy Bypass -File &quot;C:\quant\scripts\run_task.ps1&quot;
+</code></pre>
+
+<h3 id="cmd_1">为什么cmd包装层有效</h3>
+<p>这个方案的核心原理：</p>
+<ol>
+<li><strong><code>chcp 65001</code></strong>：将代码页切换为UTF-8，确保Python输出被正确解析</li>
+<li><strong><code>cmd /c</code></strong>：创建一个干净的cmd进程，避免PowerShell的编码干扰</li>
+<li><strong><code>2&gt;&amp;1</code></strong>：合并标准错误和标准输出，确保所有信息都被捕获</li>
+<li><strong><code>Out-File -Encoding utf8</code></strong>：确保日志文件使用UTF-8编码，避免后续读取乱码</li>
+</ol>
+<h3 id="_2">完整示例：带错误处理的量化任务</h3>
+<p>下面是一个更完整的示例，包含数据获取、处理和错误报告：</p>
+<pre class="codehilite"><code class="language-python"># daily_market_task.py
+import sys
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+
+# 配置日志
+log_dir = Path(&quot;C:/quant/logs&quot;)
+log_dir.mkdir(exist_ok=True)
+log_file = log_dir / f&quot;task_{datetime.now().strftime('%Y%m%d')}.log&quot;
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)  # 同时输出到控制台
+    ]
+)
+
+def fetch_market_data():
+    &quot;&quot;&quot;模拟获取行情数据&quot;&quot;&quot;
+    # 实际项目中这里会调用交易接口或数据库
+    data = {
+        &quot;timestamp&quot;: datetime.now().isoformat(),
+        &quot;stocks&quot;: [
+            {&quot;code&quot;: &quot;600519&quot;, &quot;name&quot;: &quot;贵州茅台&quot;, &quot;price&quot;: 1685.0},
+            {&quot;code&quot;: &quot;000858&quot;, &quot;name&quot;: &quot;五粮液&quot;, &quot;price&quot;: 152.3}
+        ]
+    }
+    return data
+
+def process_data(data):
+    &quot;&quot;&quot;处理数据并生成报告&quot;&quot;&quot;
+    report = []
+    report.append(&quot;=&quot; * 50)
+    report.append(f&quot;市场数据报告 - {data['timestamp']}&quot;)
+    report.append(&quot;=&quot; * 50)
+
+    total_value = 0
+    for stock in data['stocks']:
+        report.append(f&quot;{stock['name']} ({stock['code']}): ¥{stock['price']:.2f}&quot;)
+        total_value += stock['price']
+
+    report.append(&quot;-&quot; * 50)
+    report.append(f&quot;总计: ¥{total_value:.2f}&quot;)
+    return &quot;\n&quot;.join(report)
+
+def main():
+    try:
+        logging.info(&quot;开始获取市场数据&quot;)
+        data = fetch_market_data()
+
+        logging.info(&quot;数据获取成功，开始处理&quot;)
+        report = process_data(data)
+
+        print(report)
+        logging.info(&quot;任务执行成功&quot;)
+        return 0
+
+    except Exception as e:
+        logging.error(f&quot;任务执行失败: {str(e)}&quot;, exc_info=True)
+        return 1
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</code></pre>
+
+<p>对应的PowerShell调用脚本<code>run_daily_task.ps1</code>：</p>
+<pre class="codehilite"><code class="language-powershell"># run_daily_task.ps1
+param(
+    [string]$PythonPath = &quot;C:\Python39\python.exe&quot;,
+    [string]$ScriptPath = &quot;C:\quant\scripts\daily_market_task.py&quot;,
+    [string]$LogPath = &quot;C:\quant\logs\ps_output.log&quot;
+)
+
+$timeStamp = Get-Date -Format &quot;yyyy-MM-dd HH:mm:ss&quot;
+Write-Host &quot;[$timeStamp] 开始执行量化任务...&quot;
+
+# 构建cmd命令
+$cmdCommand = &quot;chcp 65001 &gt;nul &amp;&amp; `&quot;$PythonPath`&quot; `&quot;$ScriptPath`&quot; 2&gt;&amp;1&quot;
+
+try {
+    # 执行并捕获输出
+    $output = cmd /c $cmdCommand
+    $exitCode = $LASTEXITCODE
+
+    # 记录输出
+    $output | Out-File -FilePath $LogPath -Encoding utf8 -Append
+
+    $timeStamp = Get-Date -Format &quot;yyyy-MM-dd HH:mm:ss&quot;
+    Write-Host &quot;[$timeStamp] 任务结束，退出码: $exitCode&quot;
+
+    if ($exitCode -ne 0) {
+        Write-Host &quot;错误详情: $output&quot; -ForegroundColor Red
+        exit $exitCode
+    }
+
+} catch {
+    $errorMsg = $_.Exception.Message
+    $timeStamp = Get-Date -Format &quot;yyyy-MM-dd HH:mm:ss&quot;
+    Write-Error &quot;[$timeStamp] PowerShell错误: $errorMsg&quot;
+    exit 1
+}
+</code></pre>
+
+<h3 id="_3">其他注意事项</h3>
+<ol>
+<li>
+<p><strong>文件编码一致性</strong>：确保Python脚本保存为UTF-8（无BOM），并添加<code># -*- coding: utf-8 -*-</code>声明（Python 3默认UTF-8，但加上更保险）</p>
+</li>
+<li>
+<p><strong>日志文件编码</strong>：所有日志文件统一使用UTF-8编码，避免后续用Python或其他工具读取时出现乱码</p>
+</li>
+<li>
+<p><strong>路径处理</strong>：在PowerShell中调用Python时，路径中的反斜杠需要转义，建议统一使用正斜杠或双反斜杠</p>
+</li>
+<li>
+<p><strong>环境变量</strong>：如果Python脚本依赖特定环境变量，在任务计划程序中需要额外设置</p>
+</li>
+</ol>
+<h3 id="_4">结语</h3>
+<p>编码问题看似小，但足以让定时任务在凌晨静默失败。通过<code>cmd</code>包装层，我们绕开了PowerShell的编码陷阱，让Python脚本能稳定输出中文报告。这个方案已经在我的量化环境中稳定运行了两个月，没有再出现过编码相关的退出码异常。</p>
+<p>如果你也遇到过类似问题，不妨试试这个方案。更多关于Python量化与自动化的实战技巧，欢迎继续关注本站。</p>
+            </div>
+            <div class="post-footer">
+                <p>更多内容请关注: <a href="https://github.com/mattleeee">GitHub</a></p>
+            </div>
+        </article>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. All rights reserved.</p>
+    </footer>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</body>
+</html>
