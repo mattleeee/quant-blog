@@ -21,8 +21,29 @@ def load_posts():
     return []
 
 
+def strip_frontmatter(md_text):
+    """剥离YAML frontmatter（--- ... ---包裹的元数据）和正文开头的重复标题"""
+    # 剥离 frontmatter
+    if md_text.strip().startswith("---"):
+        parts = md_text.split("---", 2)
+        if len(parts) >= 3:
+            md_text = parts[2].strip()
+    # 剥离正文开头的标题行（## 标题 / # 标题），避免和页面H1重复
+    lines = md_text.split("\n")
+    while lines and (lines[0].strip() == "" or
+                     lines[0].strip().startswith("# ") or
+                     lines[0].strip().startswith("## ")):
+        if lines[0].strip().startswith("# ") or lines[0].strip().startswith("## "):
+            lines.pop(0)
+            break
+        else:
+            lines.pop(0)
+    return "\n".join(lines)
+
+
 def render_markdown(md_text):
     """将markdown转换为HTML"""
+    md_text = strip_frontmatter(md_text)
     md = markdown.Markdown(extensions=["codehilite", "fenced_code", "tables", "toc"])
     return md.convert(md_text)
 
