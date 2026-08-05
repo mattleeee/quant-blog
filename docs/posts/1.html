@@ -40,13 +40,6 @@
                 <span class="category"><span class="tag-badge">定时任务</span></span>
             </div>
             <div class="post-content">
-<hr />
-<p>title: 为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
-date: 2026-08-04
-category: 定时任务
-keywords: Windows计划任务, 守护进程, Python, 自动化</p>
-<hr />
-<h2 id="windowspython">为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</h2>
 <p>公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。我原本用 <code>supervisord</code> 挂着几个量化数据采集脚本，结果发现每天凌晨脚本都会神秘消失。排查了三天，最后定位到是安全软件拦截了守护进程创建的子进程。这让我彻底放弃了在 Windows 上跑守护进程的想法，转而全面拥抱 Windows 任务计划程序（Task Scheduler）。</p>
 <h3 id="_1">问题现象：脚本莫名其妙消失</h3>
 <p>场景是这样的：我在一台 Windows 10 办公机上部署了三个 Python 脚本，分别负责：</p>
