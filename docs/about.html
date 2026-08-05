@@ -4,9 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>关于 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="关于代码与量化">
     <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
 </head>
 <body>
+<div class="reading-progress" id="readingProgress"></div>
     <header>
         <nav>
             <a href="/quant-blog/" class="logo">代码与量化</a>
@@ -18,26 +22,50 @@
         </nav>
     </header>
     <main>
+        <div class="article-wrapper">
         <article class="post">
             <h1>关于本站</h1>
-            <div class="post-content">
+            <div class="post-content about-content">
+                <h2>站点简介</h2>
                 <p>分享Python量化回测、技术指标实战、自动化运维经验</p>
                 <h2>作者简介</h2>
-                <p>Python开发者，专注于量化交易系统开发与自动化运维。</p>
+                <p>Python开发者，专注于量化交易系统开发与自动化运维。在这里分享实战经验，从技术指标到系统架构，从回测到实盘模拟。</p>
                 <h2>技术栈</h2>
                 <ul>
                     <li>Python 量化回测与策略开发</li>
                     <li>Windows 定时任务自动化</li>
                     <li>技术指标实战（均线、RSI、MACD）</li>
                     <li>系统架构设计与运维</li>
+                    <li>Hexo 静态博客搭建与自动化发布</li>
                 </ul>
                 <h2>联系方式</h2>
                 <p>GitHub: <a href="https://github.com/mattleeee">@mattleeee</a></p>
             </div>
         </article>
+        </div>
     </main>
     <footer>
-        <p>&copy; 2026 代码与量化. All rights reserved.</p>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
     </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
 </body>
 </html>
