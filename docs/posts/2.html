@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PowerShell调用Python脚本的编码踩坑全记录 - 代码与量化</title>
-    <meta name="description" content="PowerShell调用Python脚本的编码踩坑全记录
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="PowerShell调用Python脚本的编码踩坑全记录
 
 在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。...">
     <meta name="keywords" content="PowerShell,Python,编码,UTF-8,乱码">
-    <meta name="author" content="mattleeee">
     <meta property="og:title" content="PowerShell调用Python脚本的编码踩坑全记录">
     <meta property="og:description" content="PowerShell调用Python脚本的编码踩坑全记录
 
@@ -20,6 +20,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
 </head>
 <body>
+<div class="reading-progress" id="readingProgress"></div>
     <header>
         <nav>
             <a href="/quant-blog/" class="logo">代码与量化</a>
@@ -31,14 +32,15 @@
         </nav>
     </header>
     <main>
+        <div class="article-wrapper">
         <article class="post">
             <h1>PowerShell调用Python脚本的编码踩坑全记录</h1>
             <div class="post-meta">
                 <span class="date">2026-08-05</span>
-                <span class="category">分类: 定时任务</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
             </div>
             <div class="post-content">
-                <hr />
+<hr />
 <p>title: PowerShell调用Python脚本的编码踩坑全记录
 date: 2026-08-05
 category: 定时任务
@@ -333,15 +335,36 @@ try {
 <p>编码问题看似小，但足以让定时任务在凌晨静默失败。通过<code>cmd</code>包装层，我们绕开了PowerShell的编码陷阱，让Python脚本能稳定输出中文报告。这个方案已经在我的量化环境中稳定运行了两个月，没有再出现过编码相关的退出码异常。</p>
 <p>如果你也遇到过类似问题，不妨试试这个方案。更多关于Python量化与自动化的实战技巧，欢迎继续关注本站。</p>
             </div>
+            <div class="post-tags"><span class="tag-badge">PowerShell</span><span class="tag-badge">Python</span><span class="tag-badge">编码</span><span class="tag-badge">UTF-8</span><span class="tag-badge">乱码</span></div>
             <div class="post-footer">
-                <p>更多内容请关注: <a href="https://github.com/mattleeee">GitHub</a></p>
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
             </div>
         </article>
+        </div>
     </main>
     <footer>
-        <p>&copy; 2026 代码与量化. All rights reserved.</p>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
     </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
     <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
     <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
 </body>
 </html>
