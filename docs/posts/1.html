@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本 - 代码与量化</title>
-    <meta name="description" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
 
 公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。...">
     <meta name="keywords" content="Windows计划任务,守护进程,Python,自动化">
-    <meta name="author" content="mattleeee">
     <meta property="og:title" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本">
     <meta property="og:description" content="为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
 
@@ -20,6 +20,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
 </head>
 <body>
+<div class="reading-progress" id="readingProgress"></div>
     <header>
         <nav>
             <a href="/quant-blog/" class="logo">代码与量化</a>
@@ -31,14 +32,15 @@
         </nav>
     </header>
     <main>
+        <div class="article-wrapper">
         <article class="post">
             <h1>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</h1>
             <div class="post-meta">
                 <span class="date">2026-08-04</span>
-                <span class="category">分类: 定时任务</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
             </div>
             <div class="post-content">
-                <hr />
+<hr />
 <p>title: 为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
 date: 2026-08-04
 category: 定时任务
@@ -222,15 +224,36 @@ logging.basicConfig(handlers=[handler], level=logging.INFO)
 <p>如果你也在 Windows 上跑量化脚本，且遇到了类似的进程被拦截问题，强烈建议试试任务计划程序。它本身就是 Windows 原生的任务调度工具，稳定性和兼容性都比第三方守护进程好得多。</p>
 <p>更多内容请关注本站，后续会分享更多 Windows 环境下 Python 自动化的实战技巧。</p>
             </div>
+            <div class="post-tags"><span class="tag-badge">Windows计划任务</span><span class="tag-badge">守护进程</span><span class="tag-badge">Python</span><span class="tag-badge">自动化</span></div>
             <div class="post-footer">
-                <p>更多内容请关注: <a href="https://github.com/mattleeee">GitHub</a></p>
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
             </div>
         </article>
+        </div>
     </main>
     <footer>
-        <p>&copy; 2026 代码与量化. All rights reserved.</p>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
     </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
     <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
     <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
 </body>
 </html>
