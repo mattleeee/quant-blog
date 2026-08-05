@@ -15,6 +15,10 @@ DOMAIN = "hkcode.eu.org"
 # eu.org审核期间临时使用GitHub Pages域名
 TEMP_DOMAIN = "mattleeee.github.io"
 
+# 站点URL前缀
+# 自定义域名时为 ""（根路径），GitHub Pages项目站点时为 "/quant-blog"
+SITE_PREFIX = "/quant-blog"  # eu.org审核通过后改为 ""
+
 # DeepSeek API 配置
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")  # 从环境变量读取
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
