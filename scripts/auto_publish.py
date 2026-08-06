@@ -162,6 +162,20 @@ def main():
     else:
         log(">>> 第三步：跳过掘金（未配置cookie）")
     
+    # 第四步：同步到CSDN（如果配置了cookie）
+    if config.CSDN_COOKIE:
+        log(">>> 第四步：同步到CSDN")
+        from csdn_publisher import publish_to_csdn
+        content = get_post_content(latest_post["id"])
+        if content:
+            csdn_id = publish_to_csdn(latest_post, content)
+            if csdn_id:
+                log(f"CSDN发布成功: https://blog.csdn.net/m0_74899575/article/details/{csdn_id}")
+            else:
+                log("CSDN发布失败，但博客已发布")
+    else:
+        log(">>> 第四步：跳过CSDN（未配置cookie）")
+    
     log("=" * 60)
     log("自动发布完成")
     log("=" * 60)
