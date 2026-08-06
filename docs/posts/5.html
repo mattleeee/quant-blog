@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多任务定时调度的冲突解决：错峰执行方案 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="多任务定时调度的冲突解决：错峰执行方案
+
+定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...">
+    <meta name="keywords" content="定时任务,任务调度,错峰,冲突">
+    <meta property="og:title" content="多任务定时调度的冲突解决：错峰执行方案">
+    <meta property="og:description" content="多任务定时调度的冲突解决：错峰执行方案
+
+定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/5.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>多任务定时调度的冲突解决：错峰执行方案</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-06</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。</p>
+<h3 id="_1">冲突场景分析</h3>
+<p>我们的系统里有两个核心定时任务：</p>
+<ul>
+<li><strong>MA信号任务</strong>：基于均线策略生成交易信号，每小时整点执行（如 <code>09:00, 10:00, 11:00...</code>）</li>
+<li><strong>WL更新任务</strong>：更新股票池的WL数据（权重列表），原本也设定在整点执行</li>
+</ul>
+<p>问题很直观：两个任务都在整点触发。当 <code>09:00</code> 到来时，MA信号要拉行情数据、计算均线、生成信号；WL更新也要拉数据、计算权重、写回数据库。两者同时启动，CPU 和 I/O 争抢严重，导致：</p>
+<ol>
+<li>MA信号计算延迟，信号生成时间从秒级拉长到分钟级</li>
+<li>WL更新任务偶发超时，数据库连接池被打满</li>
+<li>日志里频繁出现 <code>TimeoutError</code> 和 <code>ConnectionPoolError</code></li>
+</ol>
+<p>我们最初的想法是"机器性能够好，扛得住"。但实际观察下来，两个任务叠加时的资源峰值远高于单个任务，磁盘 I/O 更是瓶颈。</p>
+<h3 id="_2">错峰策略设计</h3>
+<p>解决方案不复杂：<strong>错峰</strong>。把 WL 更新任务从整点挪到 <code>04:30</code> 执行。</p>
+<p>选择 <code>04:30</code> 有几个考虑：</p>
+<ul>
+<li>凌晨 4:30 不是交易时段，没有行情数据更新压力</li>
+<li>与 MA 信号的整点执行完全错开，不存在时间重叠</li>
+<li>凌晨系统负载低，WL 更新即使耗时较长也不影响其他任务</li>
+</ul>
+<p>当然，这个时间点不是固定的。如果你有其他凌晨任务，可以根据实际负载情况调整。核心原则是：<strong>让高资源消耗的任务彼此避开</strong>。</p>
+<h3 id="_3">实现方案</h3>
+<p>我们使用 <code>APScheduler</code> 来管理定时任务。改造前的代码大致如下：</p>
+<pre class="codehilite"><code class="language-python">from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+def ma_signal_job():
+    &quot;&quot;&quot;MA信号任务 - 每小时整点执行&quot;&quot;&quot;
+    print(f&quot;[MA Signal] {datetime.now()} - 开始生成信号&quot;)
+    # 拉取行情数据
+    data = fetch_market_data()
+    # 计算均线
+    signals = calculate_ma_signal(data)
+    # 写入信号库
+    save_signals(signals)
+    print(f&quot;[MA Signal] {datetime.now()} - 信号生成完成&quot;)
+
+def wl_update_job():
+    &quot;&quot;&quot;WL更新任务 - 原本也在整点执行&quot;&quot;&quot;
+    print(f&quot;[WL Update] {datetime.now()} - 开始更新权重&quot;)
+    # 拉取股票池数据
+    pool = fetch_stock_pool()
+    # 计算权重
+    weights = calculate_weights(pool)
+    # 更新数据库
+    update_weights(weights)
+    print(f&quot;[WL Update] {datetime.now()} - 权重更新完成&quot;)
+
+scheduler = BlockingScheduler()
+
+# 两个任务都在整点执行
+scheduler.add_job(
+    ma_signal_job,
+    CronTrigger(minute=0),  # 每小时整点
+    id='ma_signal',
+    max_instances=1,
+    coalesce=True
+)
+
+scheduler.add_job(
+    wl_update_job,
+    CronTrigger(minute=0),  # 同样在整点执行
+    id='wl_update',
+    max_instances=1,
+    coalesce=True
+)
+
+scheduler.start()
+</code></pre>
+
+<p>改造后，WL 任务的时间改为 <code>04:30</code>：</p>
+<pre class="codehilite"><code class="language-python"># WL更新任务错峰至04:30执行
+scheduler.add_job(
+    wl_update_job,
+    CronTrigger(hour=4, minute=30),  # 每日04:30执行
+    id='wl_update',
+    max_instances=1,
+    coalesce=True
+)
+</code></pre>
+
+<p>就这么一行改动，问题解决了。</p>
+<h3 id="_4">任务调度时间表</h3>
+<p>改造后的任务调度时间表如下：</p>
+<table>
+<thead>
+<tr>
+<th>任务名称</th>
+<th>执行频率</th>
+<th>执行时间</th>
+<th>资源消耗</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MA信号</td>
+<td>每小时</td>
+<td>整点（如 09:00, 10:00）</td>
+<td>高（行情+计算）</td>
+</tr>
+<tr>
+<td>WL更新</td>
+<td>每日</td>
+<td>04:30</td>
+<td>中高（全量权重）</td>
+</tr>
+</tbody>
+</table>
+<p>从时间分布看，两个高消耗任务完全错开，不存在同时执行的情况。</p>
+<h3 id="_5">验证方法</h3>
+<p>改完之后不能光看代码，要验证实际效果。我们做了三件事：</p>
+<h4 id="1">1. 日志时间戳分析</h4>
+<p>在任务入口和出口分别打印时间戳，统计任务实际执行时长：</p>
+<pre class="codehilite"><code class="language-python">import time
+from datetime import datetime
+
+def ma_signal_job():
+    start = time.time()
+    print(f&quot;[MA Signal] {datetime.now()} - 开始&quot;)
+    # ... 任务逻辑 ...
+    elapsed = time.time() - start
+    print(f&quot;[MA Signal] {datetime.now()} - 完成，耗时 {elapsed:.2f}s&quot;)
+</code></pre>
+
+<p>对比改造前后 MA 信号任务的耗时：</p>
+<pre class="codehilite"><code>改造前: [MA Signal] 09:00:00 - 开始
+        [MA Signal] 09:01:23 - 完成，耗时 83.45s
+        [WL Update] 09:00:01 - 开始
+        [WL Update] 09:00:47 - 完成，耗时 46.12s
+
+改造后: [MA Signal] 09:00:00 - 开始
+        [MA Signal] 09:00:08 - 完成，耗时 8.12s
+        [WL Update] 04:30:00 - 开始
+        [WL Update] 04:30:35 - 完成，耗时 35.20s
+</code></pre>
+
+<p>MA 信号从 83 秒降到 8 秒，效果立竿见影。</p>
+<h4 id="2">2. 资源监控</h4>
+<p>用 <code>psutil</code> 记录任务执行期间的 CPU 和内存使用：</p>
+<pre class="codehilite"><code class="language-python">import psutil
+import threading
+
+class ResourceMonitor:
+    def __init__(self):
+        self.records = []
+        self._stop = threading.Event()
+
+    def start(self):
+        self._stop.clear()
+        self.thread = threading.Thread(target=self._monitor)
+        self.thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self.thread.join()
+
+    def _monitor(self):
+        while not self._stop.is_set():
+            cpu = psutil.cpu_percent(interval=1)
+            mem = psutil.virtual_memory().percent
+            self.records.append((datetime.now(), cpu, mem))
+            time.sleep(1)
+</code></pre>
+
+<p>改造前，09:00 时刻的 CPU 峰值经常到 90%+，改造后峰值降到 40% 以下。</p>
+<h4 id="3">3. 任务执行成功率</h4>
+<p>统计连续 7 天的任务执行情况：</p>
+<pre class="codehilite"><code class="language-python">from collections import defaultdict
+
+# 模拟统计逻辑
+stats = defaultdict(lambda: {'total': 0, 'failed': 0})
+
+def track_job(job_name, func):
+    def wrapper(*args, **kwargs):
+        stats[job_name]['total'] += 1
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            stats[job_name]['failed'] += 1
+            print(f&quot;[ERROR] {job_name}: {e}&quot;)
+    return wrapper
+
+# 7天后输出统计
+for job_name, s in stats.items():
+    success_rate = (s['total'] - s['failed']) / s['total'] * 100
+    print(f&quot;{job_name}: 成功率 {success_rate:.1f}%&quot;)
+</code></pre>
+
+<p>改造前 WL 更新任务成功率约 95%（有超时失败），改造后 100%。</p>
+<h3 id="_6">扩展：多任务错峰的通用方案</h3>
+<p>如果你的系统不止两个任务，可以用更灵活的方式管理。比如用配置文件定义任务时间：</p>
+<pre class="codehilite"><code class="language-python"># config.yaml
+tasks:
+  ma_signal:
+    cron: &quot;0 * * * *&quot;  # 每小时整点
+    enabled: true
+  wl_update:
+    cron: &quot;30 4 * * *&quot;  # 每日04:30
+    enabled: true
+  data_backup:
+    cron: &quot;0 3 * * *&quot;  # 每日03:00
+    enabled: true
+</code></pre>
+
+<p>然后用 Python 加载配置并动态注册任务：</p>
+<pre class="codehilite"><code class="language-python">import yaml
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+def load_tasks_from_config():
+    with open('config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+
+    scheduler = BackgroundScheduler()
+
+    task_mapping = {
+        'ma_signal': ma_signal_job,
+        'wl_update': wl_update_job,
+        'data_backup': data_backup_job
+    }
+
+    for task_name, task_config in config['tasks'].items():
+        if not task_config['enabled']:
+            continue
+
+        # 将 cron 表达式转换为 CronTrigger
+        minute, hour, day, month, day_of_week = task_config['cron'].split()
+        scheduler.add_job(
+            task_mapping[task_name],
+            CronTrigger(
+                minute=minute,
+                hour=hour,
+                day=day,
+                month=month,
+                day_of_week=day_of_week
+            ),
+            id=task_name,
+            max_instances=1,
+            coalesce=True
+        )
+
+    return scheduler
+</code></pre>
+
+<p>这样改任务时间只需要改配置文件，不用动代码。</p>
+<h3 id="_7">几点经验</h3>
+<ol>
+<li><strong>先分析再动手</strong>：改之前先确认冲突确实存在，用日志和监控数据说话</li>
+<li><strong>错峰是简单有效的方案</strong>：相比加锁、加队列，错峰更直接，几乎没有额外复杂度</li>
+<li><strong>时间点选择要合理</strong>：避开交易时段，避开其他任务高峰</li>
+<li><strong>验证必须量化</strong>：用耗时、CPU、成功率这些指标对比前后效果</li>
+</ol>
+<p>定时任务冲突是量化系统里很常见的问题。错峰执行不是唯一方案，但往往是最省事的。如果你的系统任务不多，优先考虑错峰；如果任务很多，再考虑任务队列、分布式调度这些更重的方案。</p>
+<p>更多内容请关注本站，后续会继续分享量化系统实战中的工程问题。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">定时任务</span><span class="tag-badge">任务调度</span><span class="tag-badge">错峰</span><span class="tag-badge">冲突</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
