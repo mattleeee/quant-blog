@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python脚本超时重试机制设计：失败立即重试，最多3次 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Python脚本超时重试机制设计：失败立即重试，最多3次
+
+定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...">
+    <meta name="keywords" content="重试机制,超时,Python,容错">
+    <meta property="og:title" content="Python脚本超时重试机制设计：失败立即重试，最多3次">
+    <meta property="og:description" content="Python脚本超时重试机制设计：失败立即重试，最多3次
+
+定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/4.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Python脚本超时重试机制设计：失败立即重试，最多3次</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-06</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。</p>
+<p>本文给出一个可直接落地的Python超时重试方案，核心设计原则：<strong>失败立即重试、最多3次、指数退避、完整日志</strong>。</p>
+<h2 id="_1">为什么需要重试机制</h2>
+<p>量化场景下，脚本失败通常来自三类原因：</p>
+<ol>
+<li><strong>瞬时网络故障</strong>：DNS解析失败、TCP连接重置、SSL握手超时</li>
+<li><strong>API限频</strong>：交易所或数据源对请求频率的限制，返回429或超时</li>
+<li><strong>下游服务不稳定</strong>：数据库连接池耗尽、消息队列短暂不可用</li>
+</ol>
+<p>这些错误有一个共同特点：<strong>重试大概率能成功</strong>。但如果脚本直接退出，整个任务链就断了。</p>
+<h2 id="_2">基础版：简单的重试装饰器</h2>
+<p>先看一个最精简的实现，用装饰器包装任意函数，失败自动重试：</p>
+<pre class="codehilite"><code class="language-python">import functools
+import time
+import logging
+from typing import Callable, Type, Tuple
+
+logger = logging.getLogger(__name__)
+
+def retry(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    exceptions: Tuple[Type[Exception], ...] = (Exception,),
+    backoff_factor: float = 2.0,
+) -&gt; Callable:
+    &quot;&quot;&quot;
+    重试装饰器
+
+    Args:
+        max_retries: 最大重试次数（不含第一次尝试）
+        base_delay: 初始重试延迟（秒）
+        exceptions: 需要重试的异常类型
+        backoff_factor: 退避倍数，每次重试延迟 = base_delay * backoff_factor^(retry_count-1)
+    &quot;&quot;&quot;
+    def decorator(func: Callable) -&gt; Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            retry_count = 0
+            while retry_count &lt;= max_retries:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    retry_count += 1
+                    if retry_count &gt; max_retries:
+                        logger.error(f&quot;Function {func.__name__} failed after {max_retries} retries. Error: {e}&quot;)
+                        raise
+
+                    delay = base_delay * (backoff_factor ** (retry_count - 1))
+                    logger.warning(
+                        f&quot;Function {func.__name__} failed (attempt {retry_count}/{max_retries}). &quot;
+                        f&quot;Error: {e}. Retrying in {delay:.2f}s...&quot;
+                    )
+                    time.sleep(delay)
+            return None  # 实际不会执行到这里
+        return wrapper
+    return decorator
+</code></pre>
+
+<p><strong>使用方式：</strong></p>
+<pre class="codehilite"><code class="language-python">@retry(max_retries=3, base_delay=1.0, exceptions=(TimeoutError, ConnectionError))
+def fetch_kline_data(symbol: str, interval: str) -&gt; dict:
+    &quot;&quot;&quot;模拟获取K线数据&quot;&quot;&quot;
+    # 这里是实际的API调用
+    response = api_client.get_kline(symbol, interval)
+    return response.json()
+</code></pre>
+
+<p>这个版本解决了基本问题，但有几个明显的缺陷：</p>
+<ul>
+<li>没有超时控制（如果函数本身卡死不抛异常，重试永远不会触发）</li>
+<li>日志信息不够结构化</li>
+<li>无法区分"可重试错误"和"致命错误"</li>
+</ul>
+<h2 id="_3">进阶版：带超时控制和完整日志</h2>
+<p>引入 <code>signal</code> 模块实现函数级超时控制，同时增加结构化日志：</p>
+<pre class="codehilite"><code class="language-python">import signal
+import functools
+import time
+import logging
+import json
+from typing import Callable, Type, Tuple, Any, Dict
+
+logger = logging.getLogger(__name__)
+
+class TimeoutError(Exception):
+    &quot;&quot;&quot;自定义超时异常&quot;&quot;&quot;
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutError(f&quot;Function timed out after {signum} seconds&quot;)
+
+def with_timeout(seconds: int) -&gt; Callable:
+    &quot;&quot;&quot;
+    函数超时装饰器（仅适用于Unix/Linux/macOS）
+
+    Args:
+        seconds: 超时秒数
+    &quot;&quot;&quot;
+    def decorator(func: Callable) -&gt; Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # 设置信号处理器
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(seconds)
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                # 取消定时器
+                signal.alarm(0)
+            return result
+        return wrapper
+    return decorator
+
+
+class RetryConfig:
+    &quot;&quot;&quot;重试配置&quot;&quot;&quot;
+    def __init__(
+        self,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        backoff_factor: float = 2.0,
+        timeout: int = 30,
+        retry_exceptions: Tuple[Type[Exception], ...] = (TimeoutError, ConnectionError, OSError),
+        fatal_exceptions: Tuple[Type[Exception], ...] = (ValueError, KeyError, TypeError),
+    ):
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self.backoff_factor = backoff_factor
+        self.timeout = timeout
+        self.retry_exceptions = retry_exceptions
+        self.fatal_exceptions = fatal_exceptions
+
+
+def retry_with_config(config: RetryConfig) -&gt; Callable:
+    &quot;&quot;&quot;
+    带完整配置的重试装饰器
+    - 支持超时控制
+    - 区分可重试异常和致命异常
+    - 结构化日志输出
+    &quot;&quot;&quot;
+    def decorator(func: Callable) -&gt; Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            retry_count = 0
+            attempt_logs = []
+
+            while retry_count &lt;= config.max_retries:
+                attempt_start = time.time()
+                try:
+                    # 如果配置了超时，则包装函数
+                    if config.timeout &gt; 0:
+                        result = with_timeout(config.timeout)(func)(*args, **kwargs)
+                    else:
+                        result = func(*args, **kwargs)
+
+                    # 成功执行，记录日志
+                    log_entry = {
+                        &quot;event&quot;: &quot;success&quot;,
+                        &quot;function&quot;: func.__name__,
+                        &quot;attempt&quot;: retry_count + 1,
+                        &quot;duration_ms&quot;: round((time.time() - attempt_start) * 1000, 2),
+                    }
+                    logger.info(json.dumps(log_entry))
+                    return result
+
+                except config.fatal_exceptions as e:
+                    # 致命错误，不重试，直接抛出
+                    logger.error(
+                        json.dumps({
+                            &quot;event&quot;: &quot;fatal_error&quot;,
+                            &quot;function&quot;: func.__name__,
+                            &quot;error&quot;: str(e),
+                            &quot;attempt&quot;: retry_count + 1,
+                        })
+                    )
+                    raise
+
+                except config.retry_exceptions as e:
+                    retry_count += 1
+                    duration_ms = round((time.time() - attempt_start) * 1000, 2)
+
+                    log_entry = {
+                        &quot;event&quot;: &quot;retry&quot;,
+                        &quot;function&quot;: func.__name__,
+                        &quot;attempt&quot;: retry_count,
+                        &quot;max_retries&quot;: config.max_retries,
+                        &quot;error&quot;: str(e),
+                        &quot;error_type&quot;: type(e).__name__,
+                        &quot;duration_ms&quot;: duration_ms,
+                    }
+
+                    if retry_count &gt; config.max_retries:
+                        log_entry[&quot;event&quot;] = &quot;exhausted&quot;
+                        logger.error(json.dumps(log_entry))
+                        raise
+
+                    delay = config.base_delay * (config.backoff_factor ** (retry_count - 1))
+                    log_entry[&quot;next_retry_delay&quot;] = delay
+                    logger.warning(json.dumps(log_entry))
+
+                    time.sleep(delay)
+
+                except Exception as e:
+                    # 未知异常，按可重试处理
+                    retry_count += 1
+                    logger.warning(
+                        json.dumps({
+                            &quot;event&quot;: &quot;unknown_error&quot;,
+                            &quot;function&quot;: func.__name__,
+                            &quot;error&quot;: str(e),
+                            &quot;attempt&quot;: retry_count,
+                        })
+                    )
+                    if retry_count &gt; config.max_retries:
+                        raise
+                    time.sleep(config.base_delay * (config.backoff_factor ** (retry_count - 1)))
+
+            return None
+        return wrapper
+    return decorator
+</code></pre>
+
+<p><strong>使用示例：</strong></p>
+<pre class="codehilite"><code class="language-python"># 配置重试参数
+config = RetryConfig(
+    max_retries=3,
+    base_delay=1.0,
+    backoff_factor=2.0,
+    timeout=10,  # 10秒超时
+    retry_exceptions=(TimeoutError, ConnectionError, OSError),
+    fatal_exceptions=(ValueError, KeyError),
+)
+
+@retry_with_config(config)
+def fetch_order_book(symbol: str) -&gt; dict:
+    &quot;&quot;&quot;获取订单簿数据&quot;&quot;&quot;
+    # 模拟可能超时的API调用
+    import random
+    if random.random() &lt; 0.3:
+        raise ConnectionError(&quot;Simulated network failure&quot;)
+    return {&quot;symbol&quot;: symbol, &quot;bids&quot;: [], &quot;asks&quot;: []}
+
+# 测试
+for i in range(5):
+    try:
+        result = fetch_order_book(&quot;BTCUSDT&quot;)
+        print(f&quot;Success: {result}&quot;)
+    except Exception as e:
+        print(f&quot;Failed: {e}&quot;)
+</code></pre>
+
+<h2 id="windows">Windows兼容方案：线程超时</h2>
+<p>上面的 <code>signal</code> 方案在Windows上不可用。如果脚本需要在Windows环境运行（比如某些交易终端），改用线程实现超时：</p>
+<pre class="codehilite"><code class="language-python">import threading
+import functools
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+def with_timeout_thread(seconds: int) -&gt; Callable:
+    &quot;&quot;&quot;线程超时装饰器（跨平台）&quot;&quot;&quot;
+    def decorator(func: Callable) -&gt; Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func, *args, **kwargs)
+                try:
+                    return future.result(timeout=seconds)
+                except TimeoutError:
+                    raise TimeoutError(f&quot;Function {func.__name__} timed out after {seconds}s&quot;)
+        return wrapper
+    return decorator
+</code></pre>
+
+<p>注意：线程方案有局限性，超时后线程仍会在后台运行，可能产生僵尸线程。对于IO密集型任务（网络请求、数据库操作）适用，对于CPU密集型任务不推荐。</p>
+<h2 id="_4">实战：定时任务中的完整应用</h2>
+<p>下面是一个完整的定时任务示例，结合了重试机制和任务调度：</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time
+import logging
+from datetime import datetime
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('task_retry.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(&quot;scheduled_task&quot;)
+
+# 定义任务配置
+retry_config = RetryConfig(
+    max_retries=3,
+    base_delay=2.0,
+    backoff_factor=2.0,
+    timeout=15,
+    retry_exceptions=(TimeoutError, ConnectionError, OSError),
+    fatal_exceptions=(ValueError,)
+)
+
+@retry_with_config(retry_config)
+def sync_market_data():
+    &quot;&quot;&quot;同步市场数据到本地数据库&quot;&quot;&quot;
+    logger.info(&quot;Starting market data sync...&quot;)
+
+    # 模拟网络请求
+    time.sleep(2)
+
+    # 模拟随机失败
+    import random
+    if random.random() &lt; 0.4:
+        raise ConnectionError(&quot;API rate limit exceeded&quot;)
+
+    # 模拟数据处理
+    data = {&quot;timestamp&quot;: datetime.now().isoformat(), &quot;data&quot;: &quot;some_market_data&quot;}
+
+    # 写入数据库
+    # db.insert(data)
+
+    logger.info(&quot;Market data sync completed&quot;)
+    return True
+
+def run_scheduled_task():
+    &quot;&quot;&quot;定时任务入口&quot;&quot;&quot;
+    try:
+        sync_market_data()
+    except Exception as e:
+        logger.error(f&quot;Task failed permanently: {e}&quot;)
+        # 可以在这里发送告警通知
+        # send_alert(f&quot;Task failed: {e}&quot;)
+
+# 每5分钟执行一次
+schedule.every(5).minutes.do(run_scheduled_task)
+
+logger.info(&quot;Scheduler started. Press Ctrl+C to exit.&quot;)
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
+</code></pre>
+
+<h2 id="_5">设计要点总结</h2>
+<ol>
+<li>
+<p><strong>失败立即重试</strong>：第一次重试不等待，立即执行。上面的代码中 <code>base_delay=1.0</code>，实际第一次重试延迟1秒，如果希望立即重试，可以设置 <code>base_delay=0</code> 或单独处理第一次重试。</p>
+</li>
+<li>
+<p><strong>最多3次</strong>：<code>max_retries=3</code> 表示总共4次尝试（1次原始+3次重试）。根据经验，3次重试已经覆盖95%以上的瞬时故障。</p>
+</li>
+<li>
+<p><strong>指数退避</strong>：重试延迟为 <code>base_delay * backoff_factor^(n-1)</code>，即1s、2s、4s。避免在服务恢复前疯狂重试。</p>
+</li>
+<li>
+<p><strong>日志记录</strong>：每条重试记录包含函数名、尝试次数、错误类型、耗时、下次重试延迟。这些信息对排查问题至关重要。</p>
+</li>
+<li>
+<p><strong>区分异常类型</strong>：可重试异常（网络错误）和致命异常（参数错误）分开处理，避免无意义的重试。</p>
+</li>
+</ol>
+<h2 id="_6">进一步优化方向</h2>
+<ul>
+<li><strong>Jitter抖动</strong>：在退避延迟中加入随机抖动，避免多个任务同时重试造成雪崩</li>
+<li><strong>熔断机制</strong>：连续失败超过阈值后，暂时停止重试，进入冷却期</li>
+<li><strong>重试状态持久化</strong>：对于长任务，将重试状态保存到Redis，避免进程重启后丢失</li>
+<li><strong>异步重试</strong>：使用 <code>asyncio</code> 和 <code>aiohttp</code> 实现异步重试，不阻塞主线程</li>
+</ul>
+<p>重试机制是容错设计的第一道防线。在量化交易系统中，一个健壮的重试机制能省去大量人工运维时间。上面的代码可以直接复制到项目中使用，根据自己的业务场景调整超时时间和重试次数。</p>
+<p>更多关于Python定时任务、量化系统架构的内容，请继续关注本站更新。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">重试机制</span><span class="tag-badge">超时</span><span class="tag-badge">Python</span><span class="tag-badge">容错</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
