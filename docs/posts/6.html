@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQLite管理定时任务执行记录的最佳实践 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="SQLite管理定时任务执行记录的最佳实践
+
+定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...">
+    <meta name="keywords" content="SQLite,定时任务,任务记录,数据库">
+    <meta property="og:title" content="SQLite管理定时任务执行记录的最佳实践">
+    <meta property="og:description" content="SQLite管理定时任务执行记录的最佳实践
+
+定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/6.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>SQLite管理定时任务执行记录的最佳实践</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-06</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。</p>
+<p>本文分享一套基于SQLite的任务执行记录方案，包含表结构设计、写入、查询、清理和重试管理，代码可直接复用。</p>
+<h3 id="sqlite">为什么要用SQLite管理任务记录</h3>
+<ul>
+<li><strong>零依赖</strong>：Python标准库自带<code>sqlite3</code>，无需安装额外数据库</li>
+<li><strong>单文件</strong>：一个<code>.db</code>文件搞定，备份迁移方便</li>
+<li><strong>并发安全</strong>：SQLite支持多进程读写，配合WAL模式效果更好</li>
+<li><strong>结构化查询</strong>：比翻日志文件高效得多</li>
+</ul>
+<h3 id="_1">数据库表设计</h3>
+<p>核心表设计如下：</p>
+<pre class="codehilite"><code class="language-sql">CREATE TABLE IF NOT EXISTS task_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_name TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT,
+    status TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed', 'retry')),
+    exit_code INTEGER,
+    retry_count INTEGER DEFAULT 0,
+    error_msg TEXT,
+    log_path TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_name ON task_runs(task_name);
+CREATE INDEX IF NOT EXISTS idx_status ON task_runs(status);
+CREATE INDEX IF NOT EXISTS idx_start_time ON task_runs(start_time);
+</code></pre>
+
+<p>字段说明：</p>
+<ul>
+<li><code>task_name</code>：任务唯一标识，如<code>daily_data_update</code></li>
+<li><code>start_time</code>/<code>end_time</code>：任务起止时间，格式<code>YYYY-MM-DD HH:MM:SS</code></li>
+<li><code>status</code>：任务状态，<code>running</code>表示执行中，<code>success</code>成功，<code>failed</code>失败，<code>retry</code>重试中</li>
+<li><code>exit_code</code>：进程退出码，0为正常</li>
+<li><code>retry_count</code>：当前重试次数</li>
+<li><code>error_msg</code>：错误信息摘要，方便快速定位</li>
+<li><code>log_path</code>：完整日志文件路径，需要详细排查时查看</li>
+</ul>
+<h3 id="_2">核心操作封装</h3>
+<p>用一个类封装所有数据库操作，方便在多个任务中复用。</p>
+<pre class="codehilite"><code class="language-python">import sqlite3
+import json
+from datetime import datetime
+from pathlib import Path
+
+class TaskDB:
+    def __init__(self, db_path: str = &quot;tasks.db&quot;):
+        self.db_path = db_path
+        self._init_db()
+
+    def _get_conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        # 启用WAL模式，提高并发读写性能
+        conn.execute(&quot;PRAGMA journal_mode=WAL&quot;)
+        return conn
+
+    def _init_db(self):
+        with self._get_conn() as conn:
+            conn.execute(&quot;&quot;&quot;
+                CREATE TABLE IF NOT EXISTS task_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_name TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT,
+                    status TEXT NOT NULL,
+                    exit_code INTEGER,
+                    retry_count INTEGER DEFAULT 0,
+                    error_msg TEXT,
+                    log_path TEXT,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+                )
+            &quot;&quot;&quot;)
+            conn.execute(&quot;CREATE INDEX IF NOT EXISTS idx_task_name ON task_runs(task_name)&quot;)
+            conn.execute(&quot;CREATE INDEX IF NOT EXISTS idx_status ON task_runs(status)&quot;)
+            conn.execute(&quot;CREATE INDEX IF NOT EXISTS idx_start_time ON task_runs(start_time)&quot;)
+
+    def start_task(self, task_name: str, log_path: str = &quot;&quot;) -&gt; int:
+        &quot;&quot;&quot;记录任务开始，返回run_id&quot;&quot;&quot;
+        now = datetime.now().strftime(&quot;%Y-%m-%d %H:%M:%S&quot;)
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                &quot;INSERT INTO task_runs (task_name, start_time, status, log_path) VALUES (?, ?, 'running', ?)&quot;,
+                (task_name, now, log_path)
+            )
+            return cur.lastrowid
+
+    def finish_task(self, run_id: int, status: str, exit_code: int = 0, error_msg: str = &quot;&quot;):
+        &quot;&quot;&quot;记录任务结束&quot;&quot;&quot;
+        now = datetime.now().strftime(&quot;%Y-%m-%d %H:%M:%S&quot;)
+        with self._get_conn() as conn:
+            conn.execute(
+                &quot;UPDATE task_runs SET end_time=?, status=?, exit_code=?, error_msg=? WHERE id=?&quot;,
+                (now, status, exit_code, error_msg, run_id)
+            )
+
+    def mark_retry(self, run_id: int, error_msg: str = &quot;&quot;):
+        &quot;&quot;&quot;标记任务进入重试状态&quot;&quot;&quot;
+        with self._get_conn() as conn:
+            conn.execute(
+                &quot;UPDATE task_runs SET status='retry', error_msg=? WHERE id=?&quot;,
+                (error_msg, run_id)
+            )
+
+    def get_recent_runs(self, task_name: str = &quot;&quot;, limit: int = 20) -&gt; list:
+        &quot;&quot;&quot;查询最近的任务执行记录&quot;&quot;&quot;
+        sql = &quot;SELECT * FROM task_runs&quot;
+        params = []
+        if task_name:
+            sql += &quot; WHERE task_name = ?&quot;
+            params.append(task_name)
+        sql += &quot; ORDER BY start_time DESC LIMIT ?&quot;
+        params.append(limit)
+
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_task_stats(self, task_name: str, days: int = 7) -&gt; dict:
+        &quot;&quot;&quot;统计任务最近N天的执行情况&quot;&quot;&quot;
+        with self._get_conn() as conn:
+            row = conn.execute(&quot;&quot;&quot;
+                SELECT 
+                    COUNT(*) as total_runs,
+                    SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as success_count,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed_count,
+                    AVG(CASE WHEN status='success' 
+                        THEN (julianday(end_time) - julianday(start_time)) * 86400 
+                        ELSE NULL END) as avg_duration
+                FROM task_runs
+                WHERE task_name = ? 
+                AND start_time &gt;= datetime('now', ?)
+            &quot;&quot;&quot;, (task_name, f'-{days} days')).fetchone()
+
+            return {
+                'total_runs': row['total_runs'] or 0,
+                'success_count': row['success_count'] or 0,
+                'failed_count': row['failed_count'] or 0,
+                'avg_duration_sec': round(row['avg_duration'], 2) if row['avg_duration'] else 0
+            }
+</code></pre>
+
+<h3 id="_3">定时任务中的实际用法</h3>
+<p>结合<code>schedule</code>库演示一个完整流程：</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time
+import subprocess
+import sys
+from pathlib import Path
+
+# 初始化数据库
+db = TaskDB(&quot;task_records.db&quot;)
+
+def run_quant_task(task_name: str, script_path: str, max_retries: int = 3):
+    &quot;&quot;&quot;
+    执行量化任务并记录状态
+    :param task_name: 任务名称
+    :param script_path: 要执行的Python脚本路径
+    :param max_retries: 最大重试次数
+    &quot;&quot;&quot;
+    # 记录任务开始
+    log_dir = Path(&quot;logs&quot;)
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / f&quot;{task_name}_{time.strftime('%Y%m%d_%H%M%S')}.log&quot;
+
+    run_id = db.start_task(task_name, str(log_file))
+
+    retry_count = 0
+    while retry_count &lt;= max_retries:
+        try:
+            # 执行子进程任务
+            with open(log_file, 'w') as f:
+                result = subprocess.run(
+                    [sys.executable, script_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=3600  # 1小时超时
+                )
+                f.write(result.stdout)
+                if result.stderr:
+                    f.write(f&quot;\n[STDERR]\n{result.stderr}&quot;)
+
+            if result.returncode == 0:
+                db.finish_task(run_id, 'success', exit_code=0)
+                print(f&quot;[{task_name}] 执行成功&quot;)
+                return True
+            else:
+                error_msg = f&quot;exit_code: {result.returncode}, stderr: {result.stderr[:500]}&quot;
+                retry_count += 1
+
+                if retry_count &lt;= max_retries:
+                    db.mark_retry(run_id, error_msg)
+                    print(f&quot;[{task_name}] 失败，第{retry_count}次重试&quot;)
+                    time.sleep(30 * retry_count)  # 递增等待时间
+                else:
+                    db.finish_task(run_id, 'failed', exit_code=result.returncode, error_msg=error_msg)
+                    print(f&quot;[{task_name}] 重试{max_retries}次仍失败&quot;)
+                    return False
+
+        except subprocess.TimeoutExpired:
+            error_msg = &quot;任务执行超时(&gt;1h)&quot;
+            retry_count += 1
+            if retry_count &lt;= max_retries:
+                db.mark_retry(run_id, error_msg)
+                print(f&quot;[{task_name}] 超时，第{retry_count}次重试&quot;)
+                time.sleep(60)
+            else:
+                db.finish_task(run_id, 'failed', exit_code=-1, error_msg=error_msg)
+                print(f&quot;[{task_name}] 超时且重试完毕&quot;)
+                return False
+
+        except Exception as e:
+            error_msg = f&quot;未知异常: {str(e)[:500]}&quot;
+            db.finish_task(run_id, 'failed', exit_code=-1, error_msg=error_msg)
+            print(f&quot;[{task_name}] 异常: {error_msg}&quot;)
+            return False
+
+    return False
+
+# 定义定时任务
+def daily_data_update_job():
+    run_quant_task(&quot;daily_data_update&quot;, &quot;scripts/update_data.py&quot;)
+
+def weekly_strategy_backtest_job():
+    run_quant_task(&quot;weekly_backtest&quot;, &quot;scripts/backtest.py&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    # 每天早上8点更新数据
+    schedule.every().day.at(&quot;08:00&quot;).do(daily_data_update_job)
+    # 每周一早上9点跑回测
+    schedule.every().monday.at(&quot;09:00&quot;).do(weekly_strategy_backtest_job)
+
+    print(&quot;定时任务已启动...&quot;)
+    while True:
+        schedule.run_pending()
+        time.sleep(60)  # 每分钟检查一次
+</code></pre>
+
+<h3 id="_4">定期清理过期记录</h3>
+<p>任务记录会不断累积，需要定期清理。保留最近90天数据，同时清理超过30天的<code>retry</code>状态记录：</p>
+<pre class="codehilite"><code class="language-python">def cleanup_old_records(db_path: str = &quot;tasks.db&quot;, days: int = 90):
+    &quot;&quot;&quot;清理过期任务记录&quot;&quot;&quot;
+    db = TaskDB(db_path)
+
+    with db._get_conn() as conn:
+        # 删除超过90天的记录
+        cur = conn.execute(&quot;&quot;&quot;
+            DELETE FROM task_runs 
+            WHERE start_time &lt; datetime('now', ?)
+        &quot;&quot;&quot;, (f'-{days} days',))
+        print(f&quot;清理了{cur.rowcount}条过期记录&quot;)
+
+        # 清理超过30天仍处于retry状态的记录
+        cur = conn.execute(&quot;&quot;&quot;
+            DELETE FROM task_runs 
+            WHERE status = 'retry' 
+            AND start_time &lt; datetime('now', '-30 days')
+        &quot;&quot;&quot;)
+        print(f&quot;清理了{cur.rowcount}条陈旧重试记录&quot;)
+
+        # 可选：清理running状态但超过24小时的记录（可能是异常中断）
+        cur = conn.execute(&quot;&quot;&quot;
+            UPDATE task_runs 
+            SET status = 'failed', error_msg = '任务中断，超时未完成'
+            WHERE status = 'running' 
+            AND start_time &lt; datetime('now', '-24 hours')
+        &quot;&quot;&quot;)
+        print(f&quot;修复了{cur.rowcount}条异常中断记录&quot;)
+
+# 在任务启动时调用
+if __name__ == &quot;__main__&quot;:
+    cleanup_old_records()
+    # ... 其他启动逻辑
+</code></pre>
+
+<h3 id="_5">查询与可视化统计</h3>
+<pre class="codehilite"><code class="language-python">def generate_task_report(db_path: str = &quot;tasks.db&quot;):
+    &quot;&quot;&quot;生成任务执行报告&quot;&quot;&quot;
+    db = TaskDB(db_path)
+
+    print(&quot;=&quot; * 60)
+    print(&quot;定时任务执行报告&quot;)
+    print(&quot;=&quot; * 60)
+
+    # 获取所有任务名称
+    with db._get_conn() as conn:
+        tasks = conn.execute(&quot;SELECT DISTINCT task_name FROM task_runs&quot;).fetchall()
+
+    for task in tasks:
+        task_name = task['task_name']
+        stats_7d = db.get_task_stats(task_name, days=7)
+        stats_30d = db.get_task_stats(task_name, days=30)
+
+        print(f&quot;\n任务: {task_name}&quot;)
+        print(f&quot;  近7天: 总执行{stats_7d['total_runs']}次, &quot;
+              f&quot;成功{stats_7d['success_count']}次, &quot;
+              f&quot;失败{stats_7d['failed_count']}次, &quot;
+              f&quot;平均耗时{stats_7d['avg_duration_sec']}秒&quot;)
+        print(f&quot;  近30天: 总执行{stats_30d['total_runs']}次, &quot;
+              f&quot;成功{stats_30d['success_count']}次, &quot;
+              f&quot;失败{stats_30d['failed_count']}次&quot;)
+
+        # 显示最近3次执行记录
+        recent = db.get_recent_runs(task_name, limit=3)
+        for run in recent:
+            print(f&quot;    [{run['start_time']}] {run['status']} &quot;
+                  f&quot;耗时{(run.get('end_time') or '')} &quot;
+                  f&quot;错误:{run.get('error_msg') or '无'}&quot;)
+
+    print(&quot;\n&quot; + &quot;=&quot; * 60)
+
+# 使用示例
+if __name__ == &quot;__main__&quot;:
+    generate_task_report()
+</code></pre>
+
+<h3 id="_6">注意事项</h3>
+<ol>
+<li><strong>时区问题</strong>：示例中统一使用<code>localtime</code>，如果服务器是UTC时间，建议统一改为UTC，避免混淆</li>
+<li><strong>日志文件管理</strong>：<code>log_path</code>字段只存路径，日志文件本身需要另外的清理机制，可以按天压缩归档</li>
+<li><strong>并发写入</strong>：如果多个进程同时写数据库，务必开启WAL模式（代码中已包含）</li>
+<li><strong>索引优化</strong>：如果数据量超过10万条，建议增加<code>(task_name, start_time)</code>联合索引</li>
+</ol>
+<h3 id="_7">扩展建议</h3>
+<ul>
+<li>结合<code>APScheduler</code>替代<code>schedule</code>库，支持更复杂的调度策略</li>
+<li>增加<code>webhook</code>通知，任务失败时发送到钉钉或企业微信</li>
+<li>将统计结果输出为HTML报告，方便查看</li>
+</ul>
+<p>这套方案已经在我自己的量化项目中稳定运行了大半年，管理着十几个定时任务，排查问题基本不需要翻日志文件，直接查数据库就能定位。</p>
+<p>更多技术实战内容，欢迎继续关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">SQLite</span><span class="tag-badge">定时任务</span><span class="tag-badge">任务记录</span><span class="tag-badge">数据库</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
