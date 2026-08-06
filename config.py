@@ -26,7 +26,7 @@ DEEPSEEK_MODEL = "deepseek-chat"
 
 # PushPlus 推送配置
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "")  # 从环境变量读取
-PUSHPLUS_URL = "http://www.pushplus.plus/send"
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
 
 # 掘金平台配置
 JUEJIN_COOKIE = os.environ.get("JUEJIN_COOKIE", "")  # 从环境变量读取
