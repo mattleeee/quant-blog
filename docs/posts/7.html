@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从WPS灵犀迁移到Windows计划任务的全过程 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="从WPS灵犀迁移到Windows计划任务的全过程
+
+WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...">
+    <meta name="keywords" content="迁移,WPS灵犀,Windows计划任务,定时任务">
+    <meta property="og:title" content="从WPS灵犀迁移到Windows计划任务的全过程">
+    <meta property="og:description" content="从WPS灵犀迁移到Windows计划任务的全过程
+
+WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/7.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>从WPS灵犀迁移到Windows计划任务的全过程</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-07</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。与其和杀软斗智斗勇，不如直接把定时任务迁移到Windows计划任务（Task Scheduler）上——系统原生、无守护进程、稳定可靠。</p>
+<p>本文记录完整迁移过程，包括任务分析、PowerShell包装、计划任务创建、执行验证和历史数据迁移。</p>
+<h3 id="_1">迁移前的任务盘点</h3>
+<p>先摸清灵犀里到底跑了哪些定时任务。打开WPS灵犀的任务列表，逐条记录：</p>
+<table>
+<thead>
+<tr>
+<th>任务名</th>
+<th>触发频率</th>
+<th>执行内容</th>
+<th>依赖环境</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据备份</td>
+<td>每天 02:00</td>
+<td>backup.py</td>
+<td>Python 3.10 + 虚拟环境</td>
+</tr>
+<tr>
+<td>行情抓取</td>
+<td>每30分钟</td>
+<td>fetch_quotes.py</td>
+<td>Python + 数据库连接</td>
+</tr>
+<tr>
+<td>日志清理</td>
+<td>每周日 03:00</td>
+<td>cleanup_logs.py</td>
+<td>无特殊依赖</td>
+</tr>
+<tr>
+<td>报表生成</td>
+<td>每天 09:30</td>
+<td>report.py</td>
+<td>Python + pandas</td>
+</tr>
+</tbody>
+</table>
+<p>关键点：所有任务都是Python脚本，灵犀只是充当调度器。迁移的本质就是换掉调度器，脚本本身不需要改动。</p>
+<h3 id="powershell">编写PowerShell包装脚本</h3>
+<p>Windows计划任务直接执行Python脚本时，工作目录和日志输出容易出问题。统一用PowerShell脚本做包装，处理三件事：</p>
+<ol>
+<li>切换到脚本所在目录</li>
+<li>激活虚拟环境</li>
+<li>捕获输出和错误日志</li>
+</ol>
+<p>创建 <code>run_python_task.ps1</code>：</p>
+<pre class="codehilite"><code class="language-powershell">param(
+    [Parameter(Mandatory=$true)]
+    [string]$ScriptPath,
+
+    [string]$PythonEnv = &quot;C:\Users\quant\.venv\Scripts\python.exe&quot;,
+
+    [string]$LogDir = &quot;C:\logs\tasks&quot;
+)
+
+# 确保日志目录存在
+if (!(Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+}
+
+# 获取脚本所在目录
+$ScriptDir = Split-Path -Parent $ScriptPath
+$ScriptName = [System.IO.Path]::GetFileNameWithoutExtension($ScriptPath)
+$Timestamp = Get-Date -Format &quot;yyyyMMdd_HHmmss&quot;
+$LogFile = Join-Path $LogDir &quot;$ScriptName_$Timestamp.log&quot;
+
+# 切换到脚本目录
+Set-Location $ScriptDir
+
+# 执行Python脚本，记录输出
+try {
+    $Output = &amp; $PythonEnv $ScriptPath 2&gt;&amp;1
+    $ExitCode = $LASTEXITCODE
+
+    # 写入日志
+    $LogContent = @&quot;
+[$(Get-Date -Format &quot;yyyy-MM-dd HH:mm:ss&quot;)] Script: $ScriptPath
+[$(Get-Date -Format &quot;yyyy-MM-dd HH:mm:ss&quot;)] Exit Code: $ExitCode
+
+Output:
+$Output
+&quot;@
+
+    $LogContent | Out-File -FilePath $LogFile -Encoding utf8
+
+    if ($ExitCode -ne 0) {
+        Write-Error &quot;Script $ScriptName failed with exit code $ExitCode&quot;
+        exit $ExitCode
+    }
+
+    Write-Host &quot;Task $ScriptName completed successfully&quot;
+    exit 0
+}
+catch {
+    $ErrorMessage = $_.Exception.Message
+    $ErrorLog = @&quot;
+[$(Get-Date -Format &quot;yyyy-MM-dd HH:mm:ss&quot;)] Error executing $ScriptPath
+Error: $ErrorMessage
+&quot;@
+    $ErrorLog | Out-File -FilePath $LogFile -Encoding utf8
+    Write-Error $ErrorMessage
+    exit 1
+}
+</code></pre>
+
+<p>每个任务创建对应的调用脚本，比如 <code>backup_task.ps1</code>：</p>
+<pre class="codehilite"><code class="language-powershell"># 参数：脚本路径, Python环境, 日志目录
+.\run_python_task.ps1 -ScriptPath &quot;C:\scripts\backup.py&quot; -PythonEnv &quot;C:\Users\quant\.venv\Scripts\python.exe&quot; -LogDir &quot;C:\logs\tasks&quot;
+</code></pre>
+
+<p>这样设计的好处：所有任务共用一套日志和错误处理逻辑，后续加新任务只需创建一行调用脚本。</p>
+<h3 id="windows">创建Windows计划任务</h3>
+<p>用 <code>schtasks</code> 命令行工具创建计划任务，比图形界面更可控，也方便批量操作。</p>
+<h4 id="_2">创建每日任务（数据备份）</h4>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantTasks\DataBackup&quot; /TR &quot;powershell.exe -ExecutionPolicy Bypass -File C:\scripts\backup_task.ps1&quot; /SC DAILY /ST 02:00 /RU SYSTEM /RL HIGHEST
+</code></pre>
+
+<p>参数说明：
+- <code>/TN</code>：任务名称，用 <code>\</code> 分目录
+- <code>/TR</code>：要执行的命令，注意用引号包裹
+- <code>/SC DAILY /ST 02:00</code>：每天凌晨2点触发
+- <code>/RU SYSTEM</code>：以SYSTEM账户运行，避免权限问题
+- <code>/RL HIGHEST</code>：最高权限</p>
+<h4 id="_3">创建周期任务（行情抓取）</h4>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantTasks\FetchQuotes&quot; /TR &quot;powershell.exe -ExecutionPolicy Bypass -File C:\scripts\fetch_quotes_task.ps1&quot; /SC MINUTE /MO 30 /RU SYSTEM /RL HIGHEST
+</code></pre>
+
+<p><code>/SC MINUTE /MO 30</code> 表示每30分钟执行一次。</p>
+<h4 id="_4">创建每周任务（日志清理）</h4>
+<pre class="codehilite"><code class="language-powershell">schtasks /Create /TN &quot;QuantTasks\CleanupLogs&quot; /TR &quot;powershell.exe -ExecutionPolicy Bypass -File C:\scripts\cleanup_logs_task.ps1&quot; /SC WEEKLY /D SUN /ST 03:00 /RU SYSTEM /RL HIGHEST
+</code></pre>
+
+<p><code>/D SUN</code> 指定周日执行。</p>
+<h4 id="_5">批量创建脚本</h4>
+<p>如果任务多，写成PowerShell脚本批量操作：</p>
+<pre class="codehilite"><code class="language-powershell">$tasks = @(
+    @{
+        Name = &quot;QuantTasks\DataBackup&quot;
+        Script = &quot;C:\scripts\backup_task.ps1&quot;
+        Schedule = &quot;DAILY&quot;
+        Modifier = &quot;&quot;
+        Time = &quot;02:00&quot;
+        Days = &quot;&quot;
+    },
+    @{
+        Name = &quot;QuantTasks\FetchQuotes&quot;
+        Script = &quot;C:\scripts\fetch_quotes_task.ps1&quot;
+        Schedule = &quot;MINUTE&quot;
+        Modifier = &quot;/MO 30&quot;
+        Time = &quot;&quot;
+        Days = &quot;&quot;
+    },
+    @{
+        Name = &quot;QuantTasks\CleanupLogs&quot;
+        Script = &quot;C:\scripts\cleanup_logs_task.ps1&quot;
+        Schedule = &quot;WEEKLY&quot;
+        Modifier = &quot;/D SUN&quot;
+        Time = &quot;03:00&quot;
+        Days = &quot;&quot;
+    }
+)
+
+foreach ($task in $tasks) {
+    $cmd = &quot;schtasks /Create /TN `&quot;$($task.Name)`&quot; /TR `&quot;powershell.exe -ExecutionPolicy Bypass -File $($task.Script)`&quot; /SC $($task.Schedule) $($task.Modifier)&quot;
+
+    if ($task.Time) {
+        $cmd += &quot; /ST $($task.Time)&quot;
+    }
+
+    if ($task.Days) {
+        $cmd += &quot; /D $($task.Days)&quot;
+    }
+
+    $cmd += &quot; /RU SYSTEM /RL HIGHEST&quot;
+
+    Write-Host &quot;Creating task: $($task.Name)&quot;
+    Invoke-Expression $cmd
+}
+</code></pre>
+
+<h3 id="_6">验证执行结果</h3>
+<p>创建完任务后，不能干等触发时间，要主动验证。</p>
+<h4 id="_7">手动触发任务</h4>
+<pre class="codehilite"><code class="language-powershell">schtasks /Run /TN &quot;QuantTasks\DataBackup&quot;
+</code></pre>
+
+<p>然后查看任务状态：</p>
+<pre class="codehilite"><code class="language-powershell">schtasks /Query /TN &quot;QuantTasks\DataBackup&quot; /V /FO LIST
+</code></pre>
+
+<p>重点看 <code>上次运行时间</code>、<code>上次结果</code> 和 <code>状态</code> 字段。<code>上次结果</code> 为 <code>0x0</code> 表示成功。</p>
+<h4 id="_8">检查日志文件</h4>
+<p>每个任务执行后都会在 <code>C:\logs\tasks</code> 下生成日志文件，检查内容：</p>
+<pre class="codehilite"><code class="language-powershell">Get-ChildItem &quot;C:\logs\tasks&quot; | Sort-Object LastWriteTime -Descending | Select-Object -First 5
+</code></pre>
+
+<p>用PowerShell快速验证脚本执行结果：</p>
+<pre class="codehilite"><code class="language-powershell"># 检查最近一次执行是否成功
+$latestLog = Get-ChildItem &quot;C:\logs\tasks&quot; | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Select-String -Path $latestLog.FullName -Pattern &quot;Exit Code: 0&quot; -Quiet
+</code></pre>
+
+<h4 id="_9">处理失败场景</h4>
+<p>如果任务执行失败，排查顺序：</p>
+<ol>
+<li>任务计划程序里查看 <code>上次结果</code> 错误码</li>
+<li>手动运行PowerShell脚本，看是否能正常执行</li>
+<li>检查Python环境路径是否正确</li>
+<li>确认工作目录是否切换成功</li>
+</ol>
+<p>常见的 <code>0x2</code> 错误是系统找不到指定文件，多半是脚本路径或Python路径写错。</p>
+<h3 id="_10">历史数据迁移</h3>
+<p>灵犀的任务执行记录存在它的数据库里，迁移到新环境后，这些历史数据需要保留。</p>
+<h4 id="_11">导出灵犀任务记录</h4>
+<p>灵犀的数据存储位置不固定，一般在用户目录下的 <code>.wps</code> 文件夹。找到任务记录文件：</p>
+<pre class="codehilite"><code class="language-python">import json
+import os
+from datetime import datetime
+
+def export_lingxi_tasks(data_dir=&quot;C:\\Users\\quant\\AppData\\Roaming\\wps\\lingxi&quot;):
+    &quot;&quot;&quot;导出灵犀任务执行记录&quot;&quot;&quot;
+    tasks = []
+
+    # 遍历灵犀数据目录，找到任务记录文件
+    for root, dirs, files in os.walk(data_dir):
+        for file in files:
+            if file.endswith('.json'):
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if 'tasks' in data:
+                            tasks.extend(data['tasks'])
+                except Exception as e:
+                    print(f&quot;跳过文件 {file_path}: {e}&quot;)
+
+    # 导出到标准格式
+    export_data = {
+        'source': 'wps_lingxi',
+        'export_time': datetime.now().isoformat(),
+        'tasks': tasks
+    }
+
+    with open('lingxi_tasks_export.json', 'w', encoding='utf-8') as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+    print(f&quot;导出 {len(tasks)} 条任务记录&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    export_lingxi_tasks()
+</code></pre>
+
+<h4 id="_12">导入到新任务系统</h4>
+<p>将导出的JSON转成计划任务的记录格式：</p>
+<pre class="codehilite"><code class="language-python">import json
+import subprocess
+from datetime import datetime
+
+def import_to_scheduler(export_file='lingxi_tasks_export.json'):
+    &quot;&quot;&quot;将灵犀任务记录导入Windows计划任务&quot;&quot;&quot;
+    with open(export_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    for task in data['tasks']:
+        task_name = f&quot;QuantTasks\\{task['name']}&quot;
+        script_path = task.get('script_path', '')
+        schedule = task.get('schedule', {})
+
+        # 构建schtasks命令
+        cmd = [
+            'schtasks', '/Create', '/TN', task_name,
+            '/TR', f'powershell.exe -ExecutionPolicy Bypass -File {script_path}'
+        ]
+
+        if schedule.get('type') == 'daily':
+            cmd.extend(['/SC', 'DAILY', '/ST', schedule.get('time', '00:00')])
+        elif schedule.get('type') == 'interval':
+            cmd.extend(['/SC', 'MINUTE', '/MO', str(schedule.get('minutes', 30))])
+        elif schedule.get('type') == 'weekly':
+            cmd.extend(['/SC', 'WEEKLY', '/D', schedule.get('day', 'SUN')])
+
+        cmd.extend(['/RU', 'SYSTEM', '/RL', 'HIGHEST'])
+
+        print(f&quot;创建任务: {task_name}&quot;)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print(f&quot;成功: {task_name}&quot;)
+        else:
+            print(f&quot;失败: {task_name} - {result.stderr}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    import_to_scheduler()
+</code></pre>
+
+<h4 id="_13">保留执行历史</h4>
+<p>灵犀里的历史执行记录（比如每次任务执行的成功/失败状态）导出后，存储为CSV方便后续分析：</p>
+<pre class="codehilite"><code class="language-python">import csv
+import json
+
+def export_execution_history(export_file='lingxi_tasks_export.json', output_csv='task_history.csv'):
+    &quot;&quot;&quot;导出任务执行历史到CSV&quot;&quot;&quot;
+    with open(export_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    with open(output_csv, 'w', newline='', encoding='utf-8') as csvfile:
+        fieldnames = ['task_name', 'execution_time', 'status', 'duration_seconds', 'error_message']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for task in data['tasks']:
+            for execution in task.get('executions', []):
+                writer.writerow({
+                    'task_name': task['name'],
+                    'execution_time': execution.get('timestamp', ''),
+                    'status': execution.get('status', ''),
+                    'duration_seconds': execution.get('duration', 0),
+                    'error_message': execution.get('error', '')
+                })
+
+    print(f&quot;历史记录已导出到 {output_csv}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    export_execution_history()
+</code></pre>
+
+<h3 id="_14">迁移后的持续监控</h3>
+<p>迁移完成后，加一个监控任务定期检查所有计划任务是否正常运行：</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import datetime
+
+def monitor_tasks():
+    &quot;&quot;&quot;监控计划任务执行状态&quot;&quot;&quot;
+    tasks = [
+        &quot;QuantTasks\\DataBackup&quot;,
+        &quot;QuantTasks\\FetchQuotes&quot;,
+        &quot;QuantTasks\\CleanupLogs&quot;
+    ]
+
+    issues = []
+
+    for task in tasks:
+        # 查询任务状态
+        result = subprocess.run(
+            ['schtasks', '/Query', '/TN', task, '/V', '/FO', 'LIST'],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            issues.append(f&quot;任务 {task} 查询失败&quot;)
+            continue
+
+        # 解析上次执行结果
+        output = result.stdout
+        if &quot;上次结果: 0x0&quot; not in output:
+            issues.append(f&quot;任务 {task} 上次执行失败&quot;)
+
+    if issues:
+        # 发送通知（邮件/企业微信等）
+        print(f&quot;[{datetime.datetime.now()}] 任务异常: {issues}&quot;)
+    else:
+        print(f&quot;[{datetime.datetime.now()}] 所有任务正常&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    monitor_tasks()
+</code></pre>
+
+<p>把这个监控脚本也注册为计划任务，每10分钟跑一次，发现问题及时告警。</p>
+<h3 id="_15">注意事项</h3>
+<ol>
+<li><strong>PowerShell执行策略</strong>：<code>schtasks</code> 创建任务时用了 <code>-ExecutionPolicy Bypass</code>，确保脚本能执行</li>
+<li><strong>日志轮转</strong>：长时间运行后日志文件会很多，定期清理</li>
+<li><strong>时区问题</strong>：计划任务按系统本地时间触发，注意服务器时区设置</li>
+<li><strong>杀软兼容</strong>：Windows计划任务本身不会被拦截，但如果脚本有敏感操作，可能仍需杀软白名单</li>
+</ol>
+<p>迁移完成后，灵犀的定时任务全部在Windows计划任务里运行，不再依赖常驻进程，稳定性明显提升。后续加新任务只需两步：写PowerShell调用脚本 + 执行一条 <code>schtasks</code> 命令。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">迁移</span><span class="tag-badge">WPS灵犀</span><span class="tag-badge">Windows计划任务</span><span class="tag-badge">定时任务</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
