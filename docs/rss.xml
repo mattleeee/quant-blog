@@ -2,13 +2,31 @@
 <rss version="2.0">
     <channel>
         <title>代码与量化</title>
-        <link>https://hkcode.eu.org/quant-blog</link>
+        <link>https://mattleeee.github.io/quant-blog</link>
         <description>分享Python量化回测、技术指标实战、自动化运维经验</description>
         <language>zh-CN</language>
         
         <item>
+            <title>Python环境变量优化：OPENBLAS、MKL、OMP线程控制</title>
+            <link>https://mattleeee.github.io/quant-blog/posts/9.html</link>
+            <description>Python环境变量优化：OPENBLAS、MKL、OMP线程控制
+
+在量化回测和实盘信号计算中，我们经常遇到一个诡异的现象：numpy 的矩阵运算在单次调用时很快，但放到循环里整体跑下来却越来越慢，甚至CPU占用飙满但吞吐量下降。这背后十有八九是BLAS库的线程争抢问题。...</description>
+            <pubDate>2026-08-09</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>Windows定时任务执行监控：退出码排查指南</title>
+            <link>https://mattleeee.github.io/quant-blog/posts/8.html</link>
+            <description>Windows定时任务执行监控：退出码排查指南
+
+定时任务在量化交易和自动化运维中扮演着“无人值守”的角色。Windows 任务计划程序（Task Scheduler）虽然稳定，但脚本执行失败时，你往往只能在“上次运行结果”里看到一串冰冷的数字，比如 0x1 或 267009。...</description>
+            <pubDate>2026-08-08</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
             <title>从WPS灵犀迁移到Windows计划任务的全过程</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/7.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/7.html</link>
             <description>从WPS灵犀迁移到Windows计划任务的全过程
 
 WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...</description>
@@ -17,7 +35,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
         </item>
         <item>
             <title>Windows批处理文件中文乱码导致267009错误的解决方案</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/3.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/3.html</link>
             <description>Windows批处理文件中文乱码导致267009错误的解决方案
 
 在Windows定时任务（Task Scheduler）中运行Python脚本时，退出码267009是一个典型的“任务启动失败”信号。...</description>
@@ -26,7 +44,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
         </item>
         <item>
             <title>Python脚本超时重试机制设计：失败立即重试，最多3次</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/4.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/4.html</link>
             <description>Python脚本超时重试机制设计：失败立即重试，最多3次
 
 定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...</description>
@@ -35,7 +53,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
         </item>
         <item>
             <title>多任务定时调度的冲突解决：错峰执行方案</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/5.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/5.html</link>
             <description>多任务定时调度的冲突解决：错峰执行方案
 
 定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...</description>
@@ -44,7 +62,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
         </item>
         <item>
             <title>SQLite管理定时任务执行记录的最佳实践</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/6.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/6.html</link>
             <description>SQLite管理定时任务执行记录的最佳实践
 
 定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...</description>
@@ -53,7 +71,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
         </item>
         <item>
             <title>PowerShell调用Python脚本的编码踩坑全记录</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/2.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/2.html</link>
             <description>PowerShell调用Python脚本的编码踩坑全记录
 
 在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。上个月我把一个数据清洗脚本挂到任务计划里，结果每天凌晨3点准时收到退出码267009的告警邮件。...</description>
@@ -62,7 +80,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
         </item>
         <item>
             <title>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/1.html</link>
+            <link>https://mattleeee.github.io/quant-blog/posts/1.html</link>
             <description>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
 
 公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。我原本用 supervisord 挂着几个量化数据采集脚本，结果发现每天凌晨脚本都会神秘消失。...</description>
