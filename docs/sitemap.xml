@@ -1,49 +1,61 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/</loc>
+    <loc>https://mattleeee.github.io/quant-blog/</loc>
     <changefreq>daily</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/1.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/1.html</loc>
     <lastmod>2026-08-04</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/2.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/2.html</loc>
     <lastmod>2026-08-05</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/3.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/3.html</loc>
     <lastmod>2026-08-06</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/4.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/4.html</loc>
     <lastmod>2026-08-06</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/5.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/5.html</loc>
     <lastmod>2026-08-06</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/6.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/6.html</loc>
     <lastmod>2026-08-06</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://hkcode.eu.org/quant-blog/posts/7.html</loc>
+    <loc>https://mattleeee.github.io/quant-blog/posts/7.html</loc>
     <lastmod>2026-08-07</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://mattleeee.github.io/quant-blog/posts/8.html</loc>
+    <lastmod>2026-08-08</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://mattleeee.github.io/quant-blog/posts/9.html</loc>
+    <lastmod>2026-08-09</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
