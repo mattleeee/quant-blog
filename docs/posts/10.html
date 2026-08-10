@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Windows完全磁盘访问权限配置指南 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Windows完全磁盘访问权限配置指南：让定时任务顺利读写D盘
+
+在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。...">
+    <meta name="keywords" content="磁盘访问权限,Windows,定时任务,权限">
+    <meta property="og:title" content="Windows完全磁盘访问权限配置指南">
+    <meta property="og:description" content="Windows完全磁盘访问权限配置指南：让定时任务顺利读写D盘
+
+在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://mattleeee.github.io/quant-blog/posts/10.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Windows完全磁盘访问权限配置指南</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-10</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。尤其是当你的脚本需要访问D盘、E盘等非系统盘的数据文件时，经常莫名其妙地报<code>PermissionError</code>或<code>Access is denied</code>。今天直接分享如何为定时任务配置完全磁盘访问权限，确保脚本能正常读写。</p>
+<h3 id="1">1. 问题现象与根因</h3>
+<p><strong>典型报错场景：</strong></p>
+<pre class="codehilite"><code class="language-python"># 定时任务执行的脚本，尝试读取D盘数据
+import pandas as pd
+
+df = pd.read_csv(r'D:\quant_data\daily\stock_data.csv')
+# PermissionError: [Errno 13] Permission denied: 'D:\\quant_data\\daily\\stock_data.csv'
+</code></pre>
+
+<p><strong>根因分析：</strong></p>
+<ol>
+<li><strong>服务账户权限受限</strong>：Windows定时任务默认以SYSTEM或当前用户运行，但SYSTEM账户对非系统盘的访问可能被UAC（用户账户控制）或组策略限制。</li>
+<li><strong>文件夹ACL（访问控制列表）配置</strong>：即使你手动运行脚本没问题，定时任务调度器（Task Scheduler）运行时的安全上下文可能与手动执行不同。</li>
+<li><strong>BitLocker或加密文件系统</strong>：如果D盘启用了BitLocker，定时任务运行时可能无法自动解锁。</li>
+</ol>
+<h3 id="2">2. 配置步骤</h3>
+<h4 id="21">2.1 确定定时任务运行账户</h4>
+<p>打开任务计划程序（Win+R输入<code>taskschd.msc</code>），找到你的任务，右键→属性→"常规"选项卡。</p>
+<p>检查"安全选项"：</p>
+<ul>
+<li><strong>不管用户是否登录都要运行</strong>：默认使用SYSTEM账户，但SYSTEM对D盘的权限可能不足。</li>
+<li><strong>只在用户登录时运行</strong>：使用当前用户权限，但必须保证该用户对D盘有完全控制权。</li>
+</ul>
+<p><strong>推荐方案</strong>：使用一个专用账户（如<code>QuantService</code>）运行任务，并赋予该账户对D盘的完全控制权。</p>
+<pre class="codehilite"><code class="language-powershell"># 以管理员身份在PowerShell中创建服务账户并加入Users组
+net user QuantService YourStrongPassword123! /add
+net localgroup Users QuantService /add
+</code></pre>
+
+<h4 id="22-acl">2.2 修改磁盘访问权限（ACL）</h4>
+<p><strong>方法一：图形界面（适合单次配置）</strong></p>
+<ol>
+<li>打开"D盘"属性 → "安全"选项卡。</li>
+<li>点击"编辑" → "添加"。</li>
+<li>输入账户名<code>QuantService</code>，点击"检查名称"。</li>
+<li>在权限列表中勾选"完全控制"。</li>
+<li>点击"应用" → "确定"。</li>
+</ol>
+<p><strong>方法二：命令行（适合脚本化部署）</strong></p>
+<pre class="codehilite"><code class="language-powershell"># 以管理员身份运行
+icacls D:\ /grant QuantService:(OI)(CI)F /T
+</code></pre>
+
+<p>参数说明：
+- <code>(OI)</code>：对象继承，子文件继承权限。
+- <code>(CI)</code>：容器继承，子目录继承权限。
+- <code>F</code>：完全控制。
+- <code>/T</code>：递归应用到所有子目录和文件。</p>
+<p>如果只想给特定文件夹授权，比如<code>D:\quant_data</code>：</p>
+<pre class="codehilite"><code class="language-powershell">icacls D:\quant_data /grant QuantService:(OI)(CI)F /T
+</code></pre>
+
+<h4 id="23">2.3 修改定时任务的安全选项</h4>
+<p>回到任务计划程序，修改任务属性：</p>
+<ol>
+<li><strong>常规</strong>选项卡：</li>
+<li>勾选"使用最高权限运行"。</li>
+<li>
+<p>在"安全选项"中选择"更改用户或组"，输入<code>QuantService</code>。</p>
+</li>
+<li>
+<p><strong>条件</strong>选项卡：</p>
+</li>
+<li>取消勾选"只有在计算机使用交流电源时才启动此任务"（如果是台式机）。</li>
+<li>
+<p>确保"唤醒计算机以运行此任务"按需勾选。</p>
+</li>
+<li>
+<p><strong>设置</strong>选项卡：</p>
+</li>
+<li>勾选"如果任务失败，重新启动"并设置间隔。</li>
+</ol>
+<h4 id="24">2.4 验证权限配置</h4>
+<p>用<code>QuantService</code>账户手动执行一次脚本，确认无权限错误。</p>
+<pre class="codehilite"><code class="language-powershell"># 以QuantService身份运行PowerShell命令
+runas /user:QuantService &quot;powershell -Command python D:\quant_scripts\daily_job.py&quot;
+</code></pre>
+
+<h3 id="3-python">3. Python代码中的权限检查与处理</h3>
+<h4 id="31">3.1 启动时检查权限</h4>
+<p>在脚本开头加入权限检查，避免运行到一半才报错：</p>
+<pre class="codehilite"><code class="language-python">import os
+import sys
+import tempfile
+from pathlib import Path
+
+def check_disk_access(path: str) -&gt; bool:
+    &quot;&quot;&quot;检查指定路径是否可读写&quot;&quot;&quot;
+    test_file = Path(path) / f&quot;.perm_test_{os.getpid()}.tmp&quot;
+    try:
+        # 写入测试
+        test_file.write_text(&quot;test&quot;, encoding=&quot;utf-8&quot;)
+        # 读取测试
+        _ = test_file.read_text(encoding=&quot;utf-8&quot;)
+        # 删除测试
+        test_file.unlink()
+        return True
+    except PermissionError:
+        return False
+    except Exception as e:
+        print(f&quot;权限检查异常: {e}&quot;)
+        return False
+
+def main():
+    data_dir = r&quot;D:\quant_data&quot;
+    if not check_disk_access(data_dir):
+        print(f&quot;[FATAL] 无法访问 {data_dir}，请检查磁盘权限配置&quot;)
+        sys.exit(1)
+
+    # 正常业务逻辑
+    print(&quot;权限检查通过，开始执行任务...&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+
+<h4 id="32">3.2 处理临时文件权限问题</h4>
+<p>定时任务经常需要写临时文件，建议使用系统临时目录而非项目目录：</p>
+<pre class="codehilite"><code class="language-python">import tempfile
+import os
+
+def write_temp_data(data: bytes) -&gt; str:
+    &quot;&quot;&quot;写入临时文件并返回路径&quot;&quot;&quot;
+    # 使用系统临时目录，避免权限问题
+    with tempfile.NamedTemporaryFile(delete=False, suffix=&quot;.tmp&quot;) as f:
+        f.write(data)
+        return f.name
+
+# 使用示例
+temp_path = write_temp_data(b&quot;some data&quot;)
+print(f&quot;临时文件写入: {temp_path}&quot;)
+# 处理完毕后删除
+os.unlink(temp_path)
+</code></pre>
+
+<h4 id="33-unc">3.3 使用UNC路径或映射驱动器</h4>
+<p>如果你的数据在NAS或另一台机器上，建议使用UNC路径（<code>\\server\share</code>）而非映射驱动器。映射驱动器（如Z盘）在服务会话中通常不可用。</p>
+<pre class="codehilite"><code class="language-python"># 推荐：使用UNC路径
+data_path = r&quot;\\192.168.1.100\quant_data&quot;
+
+# 不推荐：映射驱动器在服务中可能失效
+# data_path = r&quot;Z:\quant_data&quot;
+</code></pre>
+
+<h3 id="4">4. 常见问题排查</h3>
+<h4 id="41">4.1 任务运行但脚本无输出</h4>
+<p><strong>可能原因</strong>：脚本路径错误或工作目录不对。</p>
+<p><strong>解决</strong>：在任务属性→"操作"→"起始于"中设置为脚本所在目录。</p>
+<pre class="codehilite"><code class="language-xml">&lt;Actions&gt;
+  &lt;Exec&gt;
+    &lt;Command&gt;python&lt;/Command&gt;
+    &lt;Arguments&gt;D:\quant_scripts\daily_job.py&lt;/Arguments&gt;
+    &lt;WorkingDirectory&gt;D:\quant_scripts&lt;/WorkingDirectory&gt;
+  &lt;/Exec&gt;
+&lt;/Actions&gt;
+</code></pre>
+
+<h4 id="42">4.2 提示"拒绝访问"但手动运行正常</h4>
+<p><strong>原因</strong>：任务计划程序运行时使用不同的安全令牌。</p>
+<p><strong>解决</strong>：在任务属性→"常规"中勾选"使用最高权限运行"，并确保账户有"作为批处理作业登录"的权限。</p>
+<pre class="codehilite"><code class="language-powershell"># 授予QuantService作为批处理作业登录的权限
+secedit /export /cfg C:\secpol.cfg
+# 编辑C:\secpol.cfg，在[Privilege Rights]中添加
+# SeBatchLogonRight = QuantService
+secedit /configure /db secedit.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+</code></pre>
+
+<h4 id="43-dbitlocker">4.3 D盘是BitLocker加密的</h4>
+<p>定时任务在系统启动时可能无法自动解锁BitLocker盘。</p>
+<p><strong>解决</strong>：使用<code>manage-bde</code>命令自动解锁：</p>
+<pre class="codehilite"><code class="language-powershell"># 在任务计划程序中添加一个开机任务
+# 操作：manage-bde -unlock D: -recoverypassword &lt;你的恢复密码&gt;
+</code></pre>
+
+<h4 id="44">4.4 日志文件权限</h4>
+<p>如果脚本需要写日志到D盘，建议将日志目录和权限独立配置：</p>
+<pre class="codehilite"><code class="language-python">import logging
+from logging.handlers import RotatingFileHandler
+
+def setup_logger(log_dir: str = r&quot;D:\quant_logs&quot;):
+    &quot;&quot;&quot;配置日志，确保目录存在且有权限&quot;&quot;&quot;
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger(&quot;quant_job&quot;)
+    logger.setLevel(logging.INFO)
+
+    # 按大小轮转日志，保留7天
+    handler = RotatingFileHandler(
+        os.path.join(log_dir, &quot;job.log&quot;),
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=7,
+        encoding=&quot;utf-8&quot;
+    )
+    formatter = logging.Formatter(
+        &quot;%(asctime)s - %(name)s - %(levelname)s - %(message)s&quot;
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
+</code></pre>
+
+<h3 id="5">5. 自动化部署脚本</h3>
+<p>将以下PowerShell脚本保存为<code>setup_quant_task.ps1</code>，在管理员PowerShell中执行：</p>
+<pre class="codehilite"><code class="language-powershell"># 参数配置
+$TaskName = &quot;QuantDailyJob&quot;
+$ServiceAccount = &quot;QuantService&quot;
+$ServicePassword = &quot;YourStrongPassword123!&quot;
+$DataDir = &quot;D:\quant_data&quot;
+$ScriptPath = &quot;D:\quant_scripts\daily_job.py&quot;
+$PythonPath = &quot;C:\Python311\python.exe&quot;  # 根据实际路径修改
+
+# 1. 创建服务账户
+if (-not (Get-LocalUser -Name $ServiceAccount -ErrorAction SilentlyContinue)) {
+    New-LocalUser -Name $ServiceAccount -Password (ConvertTo-SecureString $ServicePassword -AsPlainText -Force) -FullName &quot;Quant Service Account&quot;
+    Add-LocalGroupMember -Group &quot;Users&quot; -Member $ServiceAccount
+    Write-Host &quot;账户创建成功: $ServiceAccount&quot;
+}
+
+# 2. 授予磁盘权限
+icacls $DataDir /grant &quot;$($ServiceAccount):(OI)(CI)F&quot; /T
+Write-Host &quot;磁盘权限配置完成: $DataDir&quot;
+
+# 3. 注册定时任务
+$Action = New-ScheduledTaskAction -Execute $PythonPath -Argument &quot;`&quot;$ScriptPath`&quot;&quot; -WorkingDirectory (Split-Path $ScriptPath)
+$Trigger = New-ScheduledTaskTrigger -Daily -At &quot;09:00AM&quot;
+$Principal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType Password -RunLevel Highest
+$Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
+
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings -Force
+Write-Host &quot;定时任务创建完成: $TaskName&quot;
+
+# 4. 立即运行一次测试
+Start-ScheduledTask -TaskName $TaskName
+Write-Host &quot;任务已触发，请检查执行日志&quot;
+</code></pre>
+
+<h3 id="6">6. 最佳实践总结</h3>
+<ol>
+<li><strong>使用专用账户</strong>：不要用SYSTEM或Administrator跑定时任务，创建专用低权限账户。</li>
+<li><strong>最小权限原则</strong>：只给任务需要的目录授权，不要整个D盘完全控制。</li>
+<li><strong>日志分离</strong>：业务数据和日志分开存储，避免日志写入失败影响主流程。</li>
+<li><strong>启动自检</strong>：脚本启动时先做权限检查，快速失败优于运行中崩溃。</li>
+<li><strong>监控告警</strong>：在任务失败时发送通知，推荐使用<code>taskkill</code>配合邮件或企业微信机器人。</li>
+</ol>
+<hr />
+<p><strong>最后提醒</strong>：权限配置完成后，记得重启一次任务计划程序服务（<code>net stop schedule &amp;&amp; net start schedule</code>），确保所有设置生效。</p>
+<p>更多内容请关注本站，后续会分享定时任务监控、失败重试机制、多任务并发调度等实战技巧。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">磁盘访问权限</span><span class="tag-badge">Windows</span><span class="tag-badge">定时任务</span><span class="tag-badge">权限</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
