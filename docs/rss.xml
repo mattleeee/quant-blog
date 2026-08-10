@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Windows完全磁盘访问权限配置指南</title>
+            <link>https://mattleeee.github.io/quant-blog/posts/10.html</link>
+            <description>Windows完全磁盘访问权限配置指南：让定时任务顺利读写D盘
+
+在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。尤其是当你的脚本需要访问D盘、E盘等非系统盘的数据文件时，经常莫名其妙地报PermissionError或Access is denied。...</description>
+            <pubDate>2026-08-10</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
             <title>Python环境变量优化：OPENBLAS、MKL、OMP线程控制</title>
             <link>https://mattleeee.github.io/quant-blog/posts/9.html</link>
             <description>Python环境变量优化：OPENBLAS、MKL、OMP线程控制
