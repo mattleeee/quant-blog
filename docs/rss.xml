@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>定时任务推送去重机制：5分钟内相同标题跳过</title>
+            <link>https://mattleeee.github.io/quant-blog/posts/11.html</link>
+            <description>定时任务推送去重机制：5分钟内相同标题跳过
+
+定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。今天直接分享一个轻量级的去重方案：5分钟内标题相同则跳过推送。...</description>
+            <pubDate>2026-08-11</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
             <title>Windows完全磁盘访问权限配置指南</title>
             <link>https://mattleeee.github.io/quant-blog/posts/10.html</link>
             <description>Windows完全磁盘访问权限配置指南：让定时任务顺利读写D盘
