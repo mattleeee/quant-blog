@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>定时任务推送去重机制：5分钟内相同标题跳过 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="定时任务推送去重机制：5分钟内相同标题跳过
+
+定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。...">
+    <meta name="keywords" content="推送去重,PushPlus,微信推送,定时任务">
+    <meta property="og:title" content="定时任务推送去重机制：5分钟内相同标题跳过">
+    <meta property="og:description" content="定时任务推送去重机制：5分钟内相同标题跳过
+
+定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://mattleeee.github.io/quant-blog/posts/11.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>定时任务推送去重机制：5分钟内相同标题跳过</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-11</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。今天直接分享一个轻量级的去重方案：<strong>5分钟内标题相同则跳过推送</strong>。</p>
+<h2 id="_1">为什么需要去重</h2>
+<p>先看个实际场景。假设你有个定时任务每5分钟检查一次行情，条件满足时推送一条信号。某次任务执行到一半网络超时，重试机制触发，同一信号被推送了3次。用户手机上一连收到3条一模一样的微信消息——这体验基本等于骚扰。</p>
+<p>更隐蔽的情况是任务本身有延迟。比如某个任务原定10:00执行，但调度器繁忙拖到10:03，期间另一个实例又跑了一次，两条相同信号先后到达。去重机制能直接过滤掉这种重复。</p>
+<h2 id="_2">去重逻辑设计</h2>
+<p>核心思路不复杂：<strong>记录每次推送的标题和推送时间，新推送来临时检查相同标题是否在时间窗口内出现过</strong>。</p>
+<p>设计要点：</p>
+<ol>
+<li><strong>去重键</strong>：用标题作为去重键，简单直接。如果需要更细粒度，可以拼接标题+关键参数，但标题通常已经能表达消息类型。</li>
+<li><strong>时间窗口</strong>：固定5分钟。窗口大小根据业务调整，信号类任务5分钟够用，告警类可以缩短到1分钟。</li>
+<li><strong>存储方式</strong>：内存dict就够了，不需要Redis。定时任务进程是常驻的，dict生命周期和进程一致。</li>
+<li><strong>过期清理</strong>：时间窗口外的记录要及时清理，防止dict无限膨胀。</li>
+</ol>
+<h2 id="python">Python代码实现</h2>
+<p>直接上代码，一个可用的去重推送模块。</p>
+<pre class="codehilite"><code class="language-python">import time
+import hashlib
+import requests
+from datetime import datetime, timedelta
+
+class PushDeDuplicator:
+    &quot;&quot;&quot;推送去重器，5分钟内相同标题跳过推送&quot;&quot;&quot;
+
+    def __init__(self, window_seconds=300):
+        self.window_seconds = window_seconds  # 时间窗口，默认5分钟
+        self._records = {}  # 标题 -&gt; 最近推送时间戳
+
+    def _cleanup(self):
+        &quot;&quot;&quot;清理过期记录&quot;&quot;&quot;
+        now = time.time()
+        expired_keys = [
+            title for title, ts in self._records.items()
+            if now - ts &gt; self.window_seconds
+        ]
+        for key in expired_keys:
+            del self._records[key]
+
+    def should_push(self, title):
+        &quot;&quot;&quot;
+        判断是否应该推送
+        返回 True 表示可以推送，False 表示重复需要跳过
+        &quot;&quot;&quot;
+        self._cleanup()
+        now = time.time()
+
+        if title in self._records:
+            # 标题存在且未过期，说明是重复推送
+            return False
+
+        # 记录本次推送时间
+        self._records[title] = now
+        return True
+
+    def push_wechat(self, title, content, pushplus_token):
+        &quot;&quot;&quot;带去重的微信推送&quot;&quot;&quot;
+        if not self.should_push(title):
+            print(f&quot;[去重] 跳过重复推送: {title}&quot;)
+            return False
+
+        # 实际推送逻辑
+        url = &quot;http://www.pushplus.plus/send&quot;
+        payload = {
+            &quot;token&quot;: pushplus_token,
+            &quot;title&quot;: title,
+            &quot;content&quot;: content,
+            &quot;template&quot;: &quot;html&quot;
+        }
+
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            result = resp.json()
+            if result.get(&quot;code&quot;) == 200:
+                print(f&quot;[推送成功] {title}&quot;)
+                return True
+            else:
+                print(f&quot;[推送失败] {title}: {result.get('msg')}&quot;)
+                return False
+        except Exception as e:
+            print(f&quot;[推送异常] {title}: {str(e)}&quot;)
+            return False
+
+
+# 使用示例
+if __name__ == &quot;__main__&quot;:
+    # 初始化去重器，窗口5分钟
+    dedup = PushDeDuplicator(window_seconds=300)
+
+    # 模拟推送
+    token = &quot;your_pushplus_token_here&quot;
+
+    # 第一次推送，应该成功
+    dedup.push_wechat(&quot;BTC突破压力位&quot;, &quot;价格突破关键阻力，当前价格 50000&quot;, token)
+
+    # 1秒后再次推送相同标题，应该被跳过
+    time.sleep(1)
+    dedup.push_wechat(&quot;BTC突破压力位&quot;, &quot;价格突破关键阻力，当前价格 50100&quot;, token)
+
+    # 不同标题，应该成功
+    dedup.push_wechat(&quot;ETH放量上涨&quot;, &quot;以太坊出现放量突破&quot;, token)
+</code></pre>
+
+<h2 id="_3">时间窗口判断细节</h2>
+<p>时间窗口的判断逻辑在 <code>should_push</code> 方法里。每次调用先清理过期记录，再检查当前标题是否在记录中。</p>
+<p>这里有个细节要注意：<strong>清理操作放在判断之前</strong>。如果先判断再清理，一个5分钟前的旧记录会导致推送被错误跳过。先清理再判断，保证窗口外的旧记录不会影响新推送。</p>
+<p>窗口大小的选择：</p>
+<ul>
+<li><strong>5分钟</strong>：适合大多数定时任务场景，既能过滤重试导致的重复，又不会因为窗口太长错过新信号。</li>
+<li><strong>1分钟</strong>：适合高频告警，比如价格异动监控。</li>
+<li><strong>10分钟</strong>：适合低频策略信号，比如日线级别的突破信号。</li>
+</ul>
+<p>实际使用中，把窗口参数化，通过配置调整，不要硬编码。</p>
+<h2 id="_4">处理推送失败的情况</h2>
+<p>上面的代码有个问题：如果推送失败，记录已经写入了，下次相同标题会被跳过。这可能导致消息丢失。</p>
+<p>改进方案：</p>
+<pre class="codehilite"><code class="language-python">def push_wechat_with_retry(self, title, content, pushplus_token, max_retry=3):
+    &quot;&quot;&quot;推送失败时允许重试，但记录写入延后&quot;&quot;&quot;
+    for attempt in range(max_retry):
+        # 先检查是否重复
+        if not self.should_push(title):
+            print(f&quot;[去重] 跳过重复推送: {title}&quot;)
+            return False
+
+        # 执行推送
+        success = self._do_push(title, content, pushplus_token)
+        if success:
+            return True
+
+        # 推送失败，删除记录，允许下次重试
+        self._records.pop(title, None)
+        print(f&quot;[重试] 第{attempt + 1}次推送失败，准备重试&quot;)
+        time.sleep(2)
+
+    return False
+</code></pre>
+
+<p>这样处理的核心逻辑：<strong>推送成功才记录时间戳，失败就删除记录</strong>。重试时不会因为上次失败而误判为重复。</p>
+<h2 id="_5">完整示例：定时任务集成</h2>
+<p>把去重机制集成到定时任务里，用 <code>schedule</code> 库做个完整示例：</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time
+from datetime import datetime
+
+# 模拟行情数据
+def get_market_data():
+    &quot;&quot;&quot;模拟获取行情，实际场景替换为真实数据源&quot;&quot;&quot;
+    import random
+    return {
+        &quot;symbol&quot;: &quot;BTC/USDT&quot;,
+        &quot;price&quot;: random.uniform(48000, 52000),
+        &quot;change_pct&quot;: random.uniform(-3, 3)
+    }
+
+def check_and_push():
+    &quot;&quot;&quot;定时检查任务&quot;&quot;&quot;
+    data = get_market_data()
+
+    # 设置推送阈值
+    if data[&quot;change_pct&quot;] &gt; 2:
+        title = f&quot;{data['symbol']} 涨幅超过2%&quot;
+        content = f&quot;&quot;&quot;
+        &lt;h3&gt;行情异动提醒&lt;/h3&gt;
+        &lt;p&gt;交易对: {data['symbol']}&lt;/p&gt;
+        &lt;p&gt;当前价格: {data['price']:.2f}&lt;/p&gt;
+        &lt;p&gt;涨跌幅: {data['change_pct']:.2f}%&lt;/p&gt;
+        &lt;p&gt;时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}&lt;/p&gt;
+        &quot;&quot;&quot;
+
+        # 使用去重推送
+        dedup.push_wechat(title, content, token)
+    else:
+        print(f&quot;[正常] {data['symbol']} 涨跌幅 {data['change_pct']:.2f}%，不触发推送&quot;)
+
+# 初始化去重器
+dedup = PushDeDuplicator(window_seconds=300)
+token = &quot;your_pushplus_token_here&quot;
+
+# 每5分钟执行一次检查
+schedule.every(5).minutes.do(check_and_push)
+
+# 也可以设置多个任务
+# schedule.every().hour.at(&quot;:00&quot;).do(check_and_push)
+
+if __name__ == &quot;__main__&quot;:
+    print(&quot;定时任务启动，按 Ctrl+C 退出&quot;)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+</code></pre>
+
+<p>这个示例里，如果行情连续两次触发推送条件，第二次会因为标题相同被去重器拦截。只有行情变化产生新标题（比如涨幅从2.1%变成3.5%，标题可能不变但内容不同），或者5分钟窗口过后，才会再次推送。</p>
+<h2 id="_6">实际效果</h2>
+<p>用这个方案跑了一段时间，效果很明显：</p>
+<ol>
+<li><strong>重试导致的重复推送归零</strong>。之前网络抖动时经常连续推3-4条相同消息，现在最多推1条。</li>
+<li><strong>消息可读性提升</strong>。用户收到的都是有效信息，不会因为重复消息取消关注。</li>
+<li><strong>代码侵入性小</strong>。只需要在原有推送调用处替换成 <code>dedup.push_wechat()</code>，改动量极小。</li>
+</ol>
+<p>需要注意的坑：</p>
+<ul>
+<li><strong>标题设计要合理</strong>。如果标题每次都包含价格数字，去重就失效了。建议标题用固定描述，价格等动态信息放content里。</li>
+<li><strong>进程重启会清空记录</strong>。内存存储的局限，重启后5分钟内可能重复推送。对大多数场景影响不大，如果要求严格可以持久化到SQLite或文件。</li>
+</ul>
+<h2 id="_7">扩展思路</h2>
+<p>这个去重机制可以进一步扩展：</p>
+<ul>
+<li><strong>按用户去重</strong>：多个用户订阅相同信号时，每个用户独立去重。</li>
+<li><strong>多级窗口</strong>：不同重要级别的消息使用不同窗口，比如紧急告警1分钟，普通信号10分钟。</li>
+<li><strong>去重计数</strong>：记录相同标题被拦截的次数，统计重复率，帮助优化任务逻辑。</li>
+</ul>
+<p>去重只是推送环节的一个细节，但直接影响用户体验。定时任务越复杂，这种细节越重要。把基础机制做好，后面加新功能就省心得多。</p>
+<hr />
+<p>更多内容请关注本站，后续会继续分享定时任务、量化交易相关的实战经验。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">推送去重</span><span class="tag-badge">PushPlus</span><span class="tag-badge">微信推送</span><span class="tag-badge">定时任务</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
