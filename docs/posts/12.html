@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>任务执行成功后自动推送微信通知的方案 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="任务执行成功后自动推送微信通知的方案
+
+定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...">
+    <meta name="keywords" content="PushPlus,微信推送,定时任务,通知">
+    <meta property="og:title" content="任务执行成功后自动推送微信通知的方案">
+    <meta property="og:description" content="任务执行成功后自动推送微信通知的方案
+
+定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://mattleeee.github.io/quant-blog/posts/12.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>任务执行成功后自动推送微信通知的方案</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-12</span>
+                <span class="category"><span class="tag-badge">定时任务</span></span>
+            </div>
+            <div class="post-content">
+<p>定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。</p>
+<h3 id="pushplus">PushPlus 是什么</h3>
+<p>PushPlus 是一个微信推送服务，通过 HTTP 请求就能把消息推送到你的微信。不需要装 App，不需要自建微信机器人，注册后拿一个 token，调接口即可。</p>
+<p>核心流程：</p>
+<pre class="codehilite"><code>你的脚本 -&gt; HTTP POST -&gt; PushPlus 服务器 -&gt; 微信模板消息
+</code></pre>
+
+<p>免费版每天 200 条，个人用完全够。注册地址官网搜一下就有，登录后在"一对一推送"页面复制你的 token。</p>
+<h3 id="token">获取 Token</h3>
+<p>登录 PushPlus 后，在用户中心找到 token，是一串 32 位左右的十六进制字符串。把它配置到环境变量里，别硬编码在代码中。</p>
+<pre class="codehilite"><code class="language-bash">export PUSHPLUS_TOKEN=&quot;你的token&quot;
+</code></pre>
+
+<h3 id="python">Python 推送代码封装</h3>
+<p>封装一个推送函数，支持标题和内容，返回推送结果。直接用 <code>requests</code> 库，没有就装一下。</p>
+<pre class="codehilite"><code class="language-python">import os
+import requests
+import json
+
+def push_wechat(title, content, token=None):
+    &quot;&quot;&quot;
+    通过 PushPlus 推送消息到微信
+    :param title: 消息标题，最长 100 字符
+    :param content: 消息内容，支持 HTML，最长 30KB
+    :param token: PushPlus token，默认从环境变量读取
+    :return: bool 是否推送成功
+    &quot;&quot;&quot;
+    if token is None:
+        token = os.environ.get(&quot;PUSHPLUS_TOKEN&quot;)
+        if not token:
+            print(&quot;[PushPlus] 未配置 token，跳过推送&quot;)
+            return False
+
+    url = &quot;http://www.pushplus.plus/send&quot;
+    payload = {
+        &quot;token&quot;: token,
+        &quot;title&quot;: title,
+        &quot;content&quot;: content,
+        &quot;template&quot;: &quot;html&quot;  # 可选 html, txt, json, markdown
+    }
+    headers = {&quot;Content-Type&quot;: &quot;application/json&quot;}
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        result = resp.json()
+        if result.get(&quot;code&quot;) == 200:
+            print(f&quot;[PushPlus] 推送成功: {title}&quot;)
+            return True
+        else:
+            print(f&quot;[PushPlus] 推送失败: {result.get('msg')}&quot;)
+            return False
+    except Exception as e:
+        print(f&quot;[PushPlus] 请求异常: {e}&quot;)
+        return False
+</code></pre>
+
+<p>注意几个点：</p>
+<ul>
+<li>超时设 10 秒，避免推送服务挂掉拖死主任务</li>
+<li>返回 code 为 200 才算成功，其他都是失败</li>
+<li>token 从环境变量读，方便多机器部署</li>
+</ul>
+<h3 id="_1">标题命名规范</h3>
+<p>推送标题是你在微信上第一眼看到的东西，必须包含足够信息。建议统一格式：</p>
+<pre class="codehilite"><code>[项目名] 任务状态 - 时间
+</code></pre>
+
+<p>比如：</p>
+<pre class="codehilite"><code>[量化策略] 日线信号计算完成 - 2024-06-15 15:30
+[数据备份] 执行失败 - 2024-06-15 02:00
+</code></pre>
+
+<p>加前缀的好处：</p>
+<ol>
+<li>微信通知列表里一眼区分来源</li>
+<li>多个任务共用手机时不混淆</li>
+<li>失败信息更醒目，可以加 emoji 强化</li>
+</ol>
+<p>封装一个标题生成函数：</p>
+<pre class="codehilite"><code class="language-python">from datetime import datetime
+
+def build_title(project, status=&quot;成功&quot;, with_time=True):
+    &quot;&quot;&quot;
+    生成统一格式的推送标题
+    :param project: 项目名，如 &quot;量化策略&quot;
+    :param status: 状态，成功/失败/警告
+    :param with_time: 是否附加时间
+    &quot;&quot;&quot;
+    if with_time:
+        now = datetime.now().strftime(&quot;%Y-%m-%d %H:%M&quot;)
+        return f&quot;[{project}] {status} - {now}&quot;
+    return f&quot;[{project}] {status}&quot;
+</code></pre>
+
+<h3 id="_2">推送内容格式设计</h3>
+<p>内容是 HTML 格式，可以排版。别发一大段纯文本，微信上阅读体验差。推荐用表格 + 关键字段。</p>
+<pre class="codehilite"><code class="language-python">def build_content(items):
+    &quot;&quot;&quot;
+    构建 HTML 格式推送内容
+    :param items: dict, 键值对展示在表格中
+    :return: HTML 字符串
+    &quot;&quot;&quot;
+    rows = &quot;&quot;.join(
+        f&quot;&lt;tr&gt;&lt;td style='padding:6px 12px;border:1px solid #eee'&gt;{k}&lt;/td&gt;&quot;
+        f&quot;&lt;td style='padding:6px 12px;border:1px solid #eee'&gt;{v}&lt;/td&gt;&lt;/tr&gt;&quot;
+        for k, v in items.items()
+    )
+    return f&quot;&quot;&quot;
+    &lt;table style='border-collapse:collapse;font-size:14px'&gt;
+        {rows}
+    &lt;/table&gt;
+    &lt;p style='color:#999;font-size:12px'&gt;发送时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}&lt;/p&gt;
+    &quot;&quot;&quot;
+</code></pre>
+
+<p>对于量化任务，内容里至少包含：</p>
+<ul>
+<li>运行时长</li>
+<li>处理数据量</li>
+<li>关键结果指标</li>
+<li>异常信息（如果有）</li>
+</ul>
+<p>示例：</p>
+<pre class="codehilite"><code class="language-python">content = build_content({
+    &quot;运行环境&quot;: &quot;生产服务器&quot;,
+    &quot;数据范围&quot;: &quot;2024-01-01 ~ 2024-06-14&quot;,
+    &quot;信号数量&quot;: 12,
+    &quot;多头信号&quot;: 7,
+    &quot;空头信号&quot;: 5,
+    &quot;运行耗时&quot;: &quot;3分25秒&quot;,
+})
+</code></pre>
+
+<h3 id="_3">成功 / 失败不同推送策略</h3>
+<p>任务成功和失败，推送策略应该不一样。核心原则：</p>
+<p><strong>成功：</strong> 推送简略信息，确认任务正常即可
+<strong>失败：</strong> 推送详细错误信息，附带堆栈或关键日志</p>
+<p>因为失败时你需要更多信息来定位问题，而成功时只需要确认"它跑了"。</p>
+<pre class="codehilite"><code class="language-python">import traceback
+
+def run_task_with_push(task_func, project, *args, **kwargs):
+    &quot;&quot;&quot;
+    包装任务函数，自动推送执行结果
+    :param task_func: 任务函数
+    :param project: 项目名，用于标题
+    :return: 任务返回值
+    &quot;&quot;&quot;
+    start_time = datetime.now()
+
+    try:
+        # 执行任务
+        result = task_func(*args, **kwargs)
+        elapsed = (datetime.now() - start_time).total_seconds()
+
+        # 成功推送
+        title = build_title(project, &quot;✅ 执行成功&quot;)
+        content = build_content({
+            &quot;状态&quot;: &quot;成功&quot;,
+            &quot;耗时&quot;: f&quot;{elapsed:.1f} 秒&quot;,
+            &quot;结果摘要&quot;: str(result)[:500] if result else &quot;无返回值&quot;,
+        })
+        push_wechat(title, content)
+        return result
+
+    except Exception as e:
+        elapsed = (datetime.now() - start_time).total_seconds()
+        error_detail = traceback.format_exc()
+
+        # 失败推送，带完整堆栈
+        title = build_title(project, &quot;❌ 执行失败&quot;)
+        content = build_content({
+            &quot;状态&quot;: &quot;失败&quot;,
+            &quot;耗时&quot;: f&quot;{elapsed:.1f} 秒&quot;,
+            &quot;错误类型&quot;: type(e).__name__,
+            &quot;错误信息&quot;: str(e),
+        })
+        # 堆栈信息放表格后面，用代码块展示
+        content += f&quot;&lt;pre style='background:#f5f5f5;padding:10px;font-size:12px;overflow-x:auto'&gt;{error_detail}&lt;/pre&gt;&quot;
+        push_wechat(title, content)
+
+        # 重新抛出异常，让上层逻辑决定是否重试
+        raise
+</code></pre>
+
+<p>用起来很简单：</p>
+<pre class="codehilite"><code class="language-python">def my_daily_task():
+    # 你的实际任务逻辑
+    df = load_data()
+    signals = generate_signals(df)
+    save_to_db(signals)
+    return f&quot;生成 {len(signals)} 条信号&quot;
+
+# 执行并自动推送
+run_task_with_push(my_daily_task, &quot;日线策略&quot;)
+</code></pre>
+
+<h3 id="_4">实战：定时任务集成</h3>
+<p>配合 <code>schedule</code> 库或系统 crontab 使用。这里用 <code>schedule</code> 举例，适合脚本内自调度：</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time
+
+def job_wrapper():
+    # 每天 15:30 执行策略计算
+    run_task_with_push(calculate_daily_signals, &quot;日线策略&quot;)
+
+# 周一到周五 15:30 执行
+schedule.every().monday.at(&quot;15:30&quot;).do(job_wrapper)
+schedule.every().tuesday.at(&quot;15:30&quot;).do(job_wrapper)
+schedule.every().wednesday.at(&quot;15:30&quot;).do(job_wrapper)
+schedule.every().thursday.at(&quot;15:30&quot;).do(job_wrapper)
+schedule.every().friday.at(&quot;15:30&quot;).do(job_wrapper)
+
+while True:
+    schedule.run_pending()
+    time.sleep(30)
+</code></pre>
+
+<p>如果用 crontab，直接写：</p>
+<pre class="codehilite"><code class="language-bash">30 15 * * 1-5 cd /path/to/project &amp;&amp; python main.py &gt;&gt; logs/cron.log 2&gt;&amp;1
+</code></pre>
+
+<p>然后在 <code>main.py</code> 里同样调用 <code>run_task_with_push</code> 即可。</p>
+<h3 id="_5">进阶：限流与重试</h3>
+<p>PushPlus 免费版有频率限制，短时间大量推送可能被限流。如果你的任务频繁执行（比如分钟级），建议加个简单限流：</p>
+<pre class="codehilite"><code class="language-python">import time
+
+_last_push_time = 0
+_min_interval = 5  # 两次推送最小间隔 5 秒
+
+def push_wechat_rate_limited(title, content, **kwargs):
+    global _last_push_time
+    now = time.time()
+    wait = _min_interval - (now - _last_push_time)
+    if wait &gt; 0:
+        time.sleep(wait)
+    result = push_wechat(title, content, **kwargs)
+    _last_push_time = time.time()
+    return result
+</code></pre>
+
+<p>另外，推送失败时（比如网络抖动），可以重试一次：</p>
+<pre class="codehilite"><code class="language-python">def push_with_retry(title, content, retries=2):
+    for i in range(retries):
+        if push_wechat(title, content):
+            return True
+        time.sleep(2)
+    return False
+</code></pre>
+
+<h3 id="_6">总结</h3>
+<p>这套方案的核心价值：</p>
+<ol>
+<li><strong>零成本</strong>：PushPlus 免费额度够个人用</li>
+<li><strong>零依赖</strong>：只需要 requests 库，不需要额外服务</li>
+<li><strong>即插即用</strong>：封装好函数后，任何任务包一层就能推送</li>
+</ol>
+<p>把 <code>push_wechat</code>、<code>build_title</code>、<code>build_content</code>、<code>run_task_with_push</code> 这几个函数放到一个 <code>notify.py</code> 模块里，所有脚本共用，维护成本极低。</p>
+<p>推送通知不是目的，让任务结果真正被看到才是。定时任务 + 微信通知组合起来，你的策略运行状态就尽在掌握了。</p>
+<p>更多内容请关注本站，后续会分享更多量化自动化实战方案。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">PushPlus</span><span class="tag-badge">微信推送</span><span class="tag-badge">定时任务</span><span class="tag-badge">通知</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
