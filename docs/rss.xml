@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>任务执行成功后自动推送微信通知的方案</title>
+            <link>https://mattleeee.github.io/quant-blog/posts/12.html</link>
+            <description>任务执行成功后自动推送微信通知的方案
+
+定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...</description>
+            <pubDate>2026-08-12</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
             <title>定时任务推送去重机制：5分钟内相同标题跳过</title>
             <link>https://mattleeee.github.io/quant-blog/posts/11.html</link>
             <description>定时任务推送去重机制：5分钟内相同标题跳过
