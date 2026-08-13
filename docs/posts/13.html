@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>K线数据缓存机制：避免重复API调用的设计 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="K线数据缓存机制：避免重复API调用的设计
+
+量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。...">
+    <meta name="keywords" content="K线,缓存,API,数据请求">
+    <meta property="og:title" content="K线数据缓存机制：避免重复API调用的设计">
+    <meta property="og:description" content="K线数据缓存机制：避免重复API调用的设计
+
+量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://mattleeee.github.io/quant-blog/posts/13.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>K线数据缓存机制：避免重复API调用的设计</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-13</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。如果每次请求都直接打到交易所API，不仅浪费额度，还会触发限频，甚至在行情剧烈波动时被临时封IP。今天分享一套内存缓存机制，解决这个问题。</p>
+<h2 id="k">为什么需要K线缓存</h2>
+<p>先看一个典型场景。你的策略每分钟跑一次，每次需要最近200根5分钟K线。如果你直接调API，一天就是1440次请求。如果同时监控10个交易对，就是14400次/天。大多数交易所的公开API限频是每分钟60次左右，这显然不够用。</p>
+<p>更关键的是，K线数据是<strong>追加式</strong>的。新K线生成后，旧K线不会变。所以你完全可以在本地维护一份K线列表，每次只请求增量部分，而不是全量拉取。这不仅是缓存，更是数据同步策略。</p>
+<h2 id="_1">缓存数据结构设计</h2>
+<p>缓存的核心是 <code>key-value</code> 结构。key 是交易对+周期，value 是K线列表。但直接存list有个问题：你无法快速判断缓存是否过期，也无法知道上次同步的时间点。</p>
+<p>我设计了一个 <code>KLineCache</code> 类，内部用 <code>dict</code> 存储，每个条目包含：</p>
+<ul>
+<li><code>data</code>：K线列表（按时间升序）</li>
+<li><code>last_update</code>：上次同步时间戳</li>
+<li><code>last_request_time</code>：上次请求API的时间（用于限频控制）</li>
+</ul>
+<pre class="codehilite"><code class="language-python">import time
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+
+@dataclass
+class CacheEntry:
+    symbol: str
+    interval: str
+    data: List[dict] = field(default_factory=list)
+    last_update: float = 0.0
+    last_request_time: float = 0.0
+
+    @property
+    def key(self) -&gt; str:
+        return f&quot;{self.symbol}_{self.interval}&quot;
+</code></pre>
+
+<h2 id="_2">缓存命中率统计</h2>
+<p>缓存有没有效果，不能靠感觉，要有数据。我加了一个简单的计数器，记录命中次数和总请求次数。命中率 = 命中次数 / 总请求次数。</p>
+<p>这个统计有什么用？如果命中率长期低于50%，说明你的缓存策略有问题——可能缓存时间太短，或者key设计不合理。如果命中率接近100%，说明你的策略对实时性要求不高，可以进一步降低同步频率。</p>
+<pre class="codehilite"><code class="language-python">@dataclass
+class CacheStats:
+    hits: int = 0
+    misses: int = 0
+    total_requests: int = 0
+
+    @property
+    def hit_rate(self) -&gt; float:
+        if self.total_requests == 0:
+            return 0.0
+        return self.hits / self.total_requests
+
+    def record_hit(self):
+        self.hits += 1
+        self.total_requests += 1
+
+    def record_miss(self):
+        self.misses += 1
+        self.total_requests += 1
+</code></pre>
+
+<h2 id="_3">过期清理机制</h2>
+<p>缓存不能无限增长。虽然K线数据量不大（几百根K线也就几十KB），但如果你监控几十个交易对，长期运行后内存占用会累积。更重要的是，过期的缓存条目会干扰逻辑——比如你缓存了某个下架交易对的K线，永远不会再更新，白白占内存。</p>
+<p>清理策略有两种：</p>
+<ol>
+<li><strong>惰性清理</strong>：每次访问时检查是否过期，过期则删除或更新。简单，但过期条目会一直占内存直到被访问。</li>
+<li><strong>定期清理</strong>：后台线程定时扫描整个缓存，删除过期条目。复杂度稍高，但内存控制更好。</li>
+</ol>
+<p>我倾向于两者结合：访问时检查+定时清理兜底。下面实现一个带 <code>TTL</code>（Time-To-Live）的清理机制。</p>
+<h2 id="python">Python代码实现</h2>
+<p>下面是完整的缓存类实现。它封装了API调用，对外只暴露 <code>get_kline</code> 方法。调用方不需要关心缓存逻辑，只管拿数据。</p>
+<pre class="codehilite"><code class="language-python">import threading
+import time
+from typing import Dict, List, Optional, Callable
+
+class KLineCache:
+    def __init__(self, api_func: Callable, ttl: int = 60, max_entries: int = 100):
+        &quot;&quot;&quot;
+        :param api_func: 实际的API调用函数，签名: (symbol, interval, limit) -&gt; List[dict]
+        :param ttl: 缓存有效期（秒），默认60秒
+        :param max_entries: 最大缓存条目数，防止内存无限增长
+        &quot;&quot;&quot;
+        self._cache: Dict[str, CacheEntry] = {}
+        self._api_func = api_func
+        self._ttl = ttl
+        self._max_entries = max_entries
+        self._stats = CacheStats()
+        self._lock = threading.Lock()  # 线程安全
+
+        # 启动后台清理线程
+        self._cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+        self._cleanup_thread.start()
+
+    def get_kline(self, symbol: str, interval: str, limit: int = 200) -&gt; List[dict]:
+        &quot;&quot;&quot;
+        获取K线数据。优先从缓存读取，缓存未命中或过期则调用API。
+        &quot;&quot;&quot;
+        key = f&quot;{symbol}_{interval}&quot;
+
+        with self._lock:
+            entry = self._cache.get(key)
+
+            if entry and not self._is_expired(entry):
+                # 缓存命中，检查数据量是否足够
+                if len(entry.data) &gt;= limit:
+                    self._stats.record_hit()
+                    return entry.data[-limit:]  # 返回最近limit根
+                else:
+                    # 数据量不够，需要增量同步
+                    self._stats.record_miss()
+                    return self._sync_kline(entry, symbol, interval, limit)
+            else:
+                self._stats.record_miss()
+                # 缓存不存在或过期，全量拉取
+                return self._fetch_and_cache(symbol, interval, limit)
+
+    def _is_expired(self, entry: CacheEntry) -&gt; bool:
+        &quot;&quot;&quot;检查条目是否过期&quot;&quot;&quot;
+        return (time.time() - entry.last_update) &gt; self._ttl
+
+    def _fetch_and_cache(self, symbol: str, interval: str, limit: int) -&gt; List[dict]:
+        &quot;&quot;&quot;全量拉取并缓存&quot;&quot;&quot;
+        data = self._api_func(symbol, interval, limit)
+
+        if len(self._cache) &gt;= self._max_entries:
+            self._evict_oldest()
+
+        entry = CacheEntry(symbol=symbol, interval=interval, data=data, last_update=time.time())
+        self._cache[entry.key] = entry
+        return data
+
+    def _sync_kline(self, entry: CacheEntry, symbol: str, interval: str, limit: int) -&gt; List[dict]:
+        &quot;&quot;&quot;
+        增量同步：只拉取缺失的部分。
+        这里简化处理，实际可以传入 start_time 参数，只请求最新K线。
+        &quot;&quot;&quot;
+        # 假设API支持 start_time 参数
+        start_time = entry.data[-1]['timestamp'] + 1 if entry.data else None
+        new_data = self._api_func(symbol, interval, limit, start_time=start_time)
+
+        # 合并数据，去重
+        existing_ts = {k['timestamp'] for k in entry.data}
+        merged = entry.data + [k for k in new_data if k['timestamp'] not in existing_ts]
+        merged.sort(key=lambda x: x['timestamp'])
+
+        # 只保留最近 limit 根
+        entry.data = merged[-limit:]
+        entry.last_update = time.time()
+
+        return entry.data
+
+    def _evict_oldest(self):
+        &quot;&quot;&quot;淘汰最久未更新的条目&quot;&quot;&quot;
+        if not self._cache:
+            return
+        oldest_key = min(self._cache, key=lambda k: self._cache[k].last_update)
+        del self._cache[oldest_key]
+
+    def _cleanup_loop(self):
+        &quot;&quot;&quot;后台清理线程，每30秒运行一次&quot;&quot;&quot;
+        while True:
+            time.sleep(30)
+            with self._lock:
+                expired_keys = [
+                    k for k, entry in self._cache.items() 
+                    if self._is_expired(entry)
+                ]
+                for k in expired_keys:
+                    del self._cache[k]
+
+    @property
+    def stats(self) -&gt; CacheStats:
+        return self._stats
+
+    def clear(self):
+        &quot;&quot;&quot;清空缓存&quot;&quot;&quot;
+        with self._lock:
+            self._cache.clear()
+</code></pre>
+
+<h3 id="_4">使用示例</h3>
+<p>假设你用的是 <code>ccxt</code> 库，可以这样接入：</p>
+<pre class="codehilite"><code class="language-python">import ccxt
+
+# 实际的API调用函数
+def fetch_kline_from_exchange(symbol: str, interval: str, limit: int, start_time: Optional[int] = None) -&gt; List[dict]:
+    exchange = ccxt.binance()
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit, since=start_time)
+    # 转换成统一格式
+    return [
+        {
+            'timestamp': item[0],
+            'open': item[1],
+            'high': item[2],
+            'low': item[3],
+            'close': item[4],
+            'volume': item[5]
+        }
+        for item in ohlcv
+    ]
+
+# 创建缓存实例
+cache = KLineCache(api_func=fetch_kline_from_exchange, ttl=120, max_entries=50)
+
+# 第一次调用，触发API请求
+data1 = cache.get_kline('BTC/USDT', '5m', limit=200)
+print(f&quot;第一次请求，缓存命中率: {cache.stats.hit_rate:.2%}&quot;)
+
+# 第二次调用，直接命中缓存
+data2 = cache.get_kline('BTC/USDT', '5m', limit=200)
+print(f&quot;第二次请求，缓存命中率: {cache.stats.hit_rate:.2%}&quot;)
+
+# 查看统计
+print(f&quot;总请求次数: {cache.stats.total_requests}&quot;)
+print(f&quot;命中次数: {cache.stats.hits}&quot;)
+print(f&quot;未命中次数: {cache.stats.misses}&quot;)
+</code></pre>
+
+<h2 id="_5">关键设计细节</h2>
+<h3 id="1-vs">1. 增量同步 vs 全量拉取</h3>
+<p>上面的代码里，<code>_sync_kline</code> 做了增量同步。它只请求缺失的部分，然后合并到缓存里。这在K线数据量大时非常有用。比如你缓存了1000根1分钟K线，每次同步只需要拉最新几根，而不是全部1000根。</p>
+<p>注意 <code>start_time</code> 参数——大多数交易所API都支持这个参数，返回指定时间之后的K线。如果你的API不支持，可以退化为全量拉取。</p>
+<h3 id="2">2. 线程安全</h3>
+<p>量化交易系统往往是多线程的。策略线程、UI线程、信号计算线程可能同时请求K线。所以 <code>get_kline</code> 里用了 <code>with self._lock</code> 保证线程安全。后台清理线程也受同一把锁保护，避免并发修改字典。</p>
+<h3 id="3">3. 淘汰策略</h3>
+<p><code>max_entries=100</code> 限制了缓存的最大条目数。当超出时，淘汰最久未更新的条目。这个策略适合K线场景——你大概率只关注有限的几个交易对，长期不用的可以清掉。</p>
+<h3 id="4-ttl">4. TTL的选择</h3>
+<p>TTL设多久取决于你的策略实时性要求：
+- 高频交易：TTL=5~10秒
+- 中低频策略：TTL=60~120秒
+- 回测/分析：TTL=300秒以上</p>
+<p>注意，TTL不是“K线数据本身的有效期”，而是“允许缓存数据的最大年龄”。K线数据本身是历史数据，不会“过期”，但你的策略可能需要较新的K线来判断当前趋势。</p>
+<h2 id="_6">效果对比</h2>
+<p>用一个简单的测试验证缓存效果。假设你的策略每10秒请求一次5分钟K线，TTL设为60秒。那么：</p>
+<ul>
+<li>无缓存：每小时请求360次，每天8640次</li>
+<li>有缓存（TTL=60秒）：每小时最多请求60次（每分钟一次），每天1440次</li>
+</ul>
+<p>实际命中率取决于你的请求频率和TTL的比值。请求越频繁、TTL越长，命中率越高。</p>
+<h2 id="_7">扩展：持久化缓存</h2>
+<p>上面的实现是纯内存缓存。如果你希望重启程序后还能复用缓存，可以加一层磁盘持久化。用 <code>pickle</code> 或 <code>sqlite3</code> 把缓存序列化到本地文件。启动时加载，退出时保存。</p>
+<pre class="codehilite"><code class="language-python">import pickle
+
+def save_to_disk(self, filepath: str):
+    with open(filepath, 'wb') as f:
+        pickle.dump(self._cache, f)
+
+def load_from_disk(self, filepath: str):
+    with open(filepath, 'rb') as f:
+        self._cache = pickle.load(f)
+</code></pre>
+
+<p>这特别适合回测场景——你前一天跑过的历史K线，第二天回测时不需要重新拉取。</p>
+<h2 id="_8">总结</h2>
+<p>K线缓存机制的核心就三件事：<strong>数据结构设计</strong>、<strong>命中率统计</strong>、<strong>过期清理</strong>。数据结构用 <code>dict</code> + <code>CacheEntry</code> 即可，命中率统计帮你评估缓存效果，过期清理防止内存膨胀。</p>
+<p>这套代码可以直接复制到你的量化项目里，替换 <code>api_func</code> 为你自己的数据源。如果你用的是 <code>ccxt</code>、<code>vnpy</code> 或者自建的数据接口，改动量都不大。</p>
+<p>实际使用中，你还可以根据需求扩展：比如支持多个数据源自动切换、缓存预热（启动时就拉取常用交易对的K线）、或者把统计指标接入监控面板。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">K线</span><span class="tag-badge">缓存</span><span class="tag-badge">API</span><span class="tag-badge">数据请求</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
