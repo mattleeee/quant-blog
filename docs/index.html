@@ -7,18 +7,18 @@
     <meta name="author" content="mattleeee">
         <meta name="description" content="分享Python量化回测、技术指标实战、自动化运维经验">
     <meta name="keywords" content="Python,量化交易,自动化,技术指标,回测,定时任务,系统运维">
-    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
 </head>
 <body>
 <div class="reading-progress" id="readingProgress"></div>
     <header>
         <nav>
-            <a href="/" class="logo">代码与量化</a>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
             <div class="nav-links">
-                <a href="/">首页</a>
-                <a href="/categories.html">分类</a>
-                <a href="/about.html">关于</a>
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
             </div>
         </nav>
     </header>
@@ -31,7 +31,7 @@
             <h2>最新文章</h2>
             
         <article class="post-card">
-            <h2><a href="/posts/13.html">K线数据缓存机制：避免重复API调用的设计</a></h2>
+            <h2><a href="/quant-blog/posts/13.html">K线数据缓存机制：避免重复API调用的设计</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-13</span>
                 <span class="tag-badge">Python自动化</span>
@@ -40,10 +40,10 @@
 
 量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。如果每次请求都直接打到交易所API，不仅浪费额度，还会触发限频，甚至在行情剧烈波动时被临时封IP。...</p>
             <div class="post-tags"><span class="tag-badge">K线</span><span class="tag-badge">缓存</span><span class="tag-badge">API</span></div>
-            <a href="/posts/13.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/13.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/12.html">任务执行成功后自动推送微信通知的方案</a></h2>
+            <h2><a href="/quant-blog/posts/12.html">任务执行成功后自动推送微信通知的方案</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-12</span>
                 <span class="tag-badge">定时任务</span>
@@ -52,10 +52,10 @@
 
 定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...</p>
             <div class="post-tags"><span class="tag-badge">PushPlus</span><span class="tag-badge">微信推送</span><span class="tag-badge">定时任务</span></div>
-            <a href="/posts/12.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/12.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/11.html">定时任务推送去重机制：5分钟内相同标题跳过</a></h2>
+            <h2><a href="/quant-blog/posts/11.html">定时任务推送去重机制：5分钟内相同标题跳过</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-11</span>
                 <span class="tag-badge">定时任务</span>
@@ -64,10 +64,10 @@
 
 定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。今天直接分享一个轻量级的去重方案：5分钟内标题相同则跳过推送。...</p>
             <div class="post-tags"><span class="tag-badge">推送去重</span><span class="tag-badge">PushPlus</span><span class="tag-badge">微信推送</span></div>
-            <a href="/posts/11.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/11.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/10.html">Windows完全磁盘访问权限配置指南</a></h2>
+            <h2><a href="/quant-blog/posts/10.html">Windows完全磁盘访问权限配置指南</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-10</span>
                 <span class="tag-badge">定时任务</span>
@@ -76,10 +76,10 @@
 
 在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。尤其是当你的脚本需要访问D盘、E盘等非系统盘的数据文件时，经常莫名其妙地报PermissionError或Access is denied。...</p>
             <div class="post-tags"><span class="tag-badge">磁盘访问权限</span><span class="tag-badge">Windows</span><span class="tag-badge">定时任务</span></div>
-            <a href="/posts/10.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/10.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/9.html">Python环境变量优化：OPENBLAS、MKL、OMP线程控制</a></h2>
+            <h2><a href="/quant-blog/posts/9.html">Python环境变量优化：OPENBLAS、MKL、OMP线程控制</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-09</span>
                 <span class="tag-badge">定时任务</span>
@@ -88,10 +88,10 @@
 
 在量化回测和实盘信号计算中，我们经常遇到一个诡异的现象：numpy 的矩阵运算在单次调用时很快，但放到循环里整体跑下来却越来越慢，甚至CPU占用飙满但吞吐量下降。这背后十有八九是BLAS库的线程争抢问题。...</p>
             <div class="post-tags"><span class="tag-badge">环境变量</span><span class="tag-badge">OPENBLAS</span><span class="tag-badge">MKL</span></div>
-            <a href="/posts/9.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/9.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/8.html">Windows定时任务执行监控：退出码排查指南</a></h2>
+            <h2><a href="/quant-blog/posts/8.html">Windows定时任务执行监控：退出码排查指南</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-08</span>
                 <span class="tag-badge">定时任务</span>
@@ -100,10 +100,10 @@
 
 定时任务在量化交易和自动化运维中扮演着“无人值守”的角色。Windows 任务计划程序（Task Scheduler）虽然稳定，但脚本执行失败时，你往往只能在“上次运行结果”里看到一串冰冷的数字，比如 0x1 或 267009。...</p>
             <div class="post-tags"><span class="tag-badge">退出码</span><span class="tag-badge">任务监控</span><span class="tag-badge">Windows</span></div>
-            <a href="/posts/8.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/8.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/7.html">从WPS灵犀迁移到Windows计划任务的全过程</a></h2>
+            <h2><a href="/quant-blog/posts/7.html">从WPS灵犀迁移到Windows计划任务的全过程</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-07</span>
                 <span class="tag-badge">定时任务</span>
@@ -112,10 +112,10 @@
 
 WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...</p>
             <div class="post-tags"><span class="tag-badge">迁移</span><span class="tag-badge">WPS灵犀</span><span class="tag-badge">Windows计划任务</span></div>
-            <a href="/posts/7.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/7.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/3.html">Windows批处理文件中文乱码导致267009错误的解决方案</a></h2>
+            <h2><a href="/quant-blog/posts/3.html">Windows批处理文件中文乱码导致267009错误的解决方案</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-06</span>
                 <span class="tag-badge">定时任务</span>
@@ -124,10 +124,10 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 在Windows定时任务（Task Scheduler）中运行Python脚本时，退出码267009是一个典型的“任务启动失败”信号。...</p>
             <div class="post-tags"><span class="tag-badge">bat文件</span><span class="tag-badge">中文乱码</span><span class="tag-badge">267009</span></div>
-            <a href="/posts/3.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/3.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/4.html">Python脚本超时重试机制设计：失败立即重试，最多3次</a></h2>
+            <h2><a href="/quant-blog/posts/4.html">Python脚本超时重试机制设计：失败立即重试，最多3次</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-06</span>
                 <span class="tag-badge">定时任务</span>
@@ -136,10 +136,10 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...</p>
             <div class="post-tags"><span class="tag-badge">重试机制</span><span class="tag-badge">超时</span><span class="tag-badge">Python</span></div>
-            <a href="/posts/4.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/4.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/5.html">多任务定时调度的冲突解决：错峰执行方案</a></h2>
+            <h2><a href="/quant-blog/posts/5.html">多任务定时调度的冲突解决：错峰执行方案</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-06</span>
                 <span class="tag-badge">定时任务</span>
@@ -148,10 +148,10 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...</p>
             <div class="post-tags"><span class="tag-badge">定时任务</span><span class="tag-badge">任务调度</span><span class="tag-badge">错峰</span></div>
-            <a href="/posts/5.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/5.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/6.html">SQLite管理定时任务执行记录的最佳实践</a></h2>
+            <h2><a href="/quant-blog/posts/6.html">SQLite管理定时任务执行记录的最佳实践</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-06</span>
                 <span class="tag-badge">定时任务</span>
@@ -160,10 +160,10 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...</p>
             <div class="post-tags"><span class="tag-badge">SQLite</span><span class="tag-badge">定时任务</span><span class="tag-badge">任务记录</span></div>
-            <a href="/posts/6.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/6.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/2.html">PowerShell调用Python脚本的编码踩坑全记录</a></h2>
+            <h2><a href="/quant-blog/posts/2.html">PowerShell调用Python脚本的编码踩坑全记录</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-05</span>
                 <span class="tag-badge">定时任务</span>
@@ -172,10 +172,10 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。上个月我把一个数据清洗脚本挂到任务计划里，结果每天凌晨3点准时收到退出码267009的告警邮件。...</p>
             <div class="post-tags"><span class="tag-badge">PowerShell</span><span class="tag-badge">Python</span><span class="tag-badge">编码</span></div>
-            <a href="/posts/2.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/2.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
-            <h2><a href="/posts/1.html">为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</a></h2>
+            <h2><a href="/quant-blog/posts/1.html">为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-04</span>
                 <span class="tag-badge">定时任务</span>
@@ -184,7 +184,7 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。我原本用 supervisord 挂着几个量化数据采集脚本，结果发现每天凌晨脚本都会神秘消失。...</p>
             <div class="post-tags"><span class="tag-badge">Windows计划任务</span><span class="tag-badge">守护进程</span><span class="tag-badge">Python</span></div>
-            <a href="/posts/1.html" class="read-more">阅读更多</a>
+            <a href="/quant-blog/posts/1.html" class="read-more">阅读更多</a>
         </article>
         </section>
     </main>
