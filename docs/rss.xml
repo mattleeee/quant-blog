@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Python多线程扫描实战：5线程ThreadPoolExecutor并行处理</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/14.html</link>
+            <description>Python多线程扫描实战：5线程ThreadPoolExecutor并行处理
+
+量化策略的运维中，扫描全市场币种的技术指标是高频操作。假设你有200个交易对，每个需要计算RSI、MACD、布林带等指标，串行跑一遍可能要几分钟。这个速度在实盘信号触发场景下不可接受。...</description>
+            <pubDate>2026-08-14</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>K线数据缓存机制：避免重复API调用的设计</title>
             <link>https://hkcode.eu.org/quant-blog/posts/13.html</link>
             <description>K线数据缓存机制：避免重复API调用的设计
