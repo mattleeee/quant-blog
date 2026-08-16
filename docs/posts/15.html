@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON原子写入：用tempfile+os.replace防止数据损坏 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="JSON原子写入：用tempfile+os.replace防止数据损坏
+
+量化交易系统里，最怕的不是策略亏钱，而是数据文件损坏。策略亏钱还能复盘，数据文件坏了，整个回测和实盘环境直接瘫痪。...">
+    <meta name="keywords" content="JSON,原子写入,tempfile,os.replace,数据安全">
+    <meta property="og:title" content="JSON原子写入：用tempfile+os.replace防止数据损坏">
+    <meta property="og:description" content="JSON原子写入：用tempfile+os.replace防止数据损坏
+
+量化交易系统里，最怕的不是策略亏钱，而是数据文件损坏。策略亏钱还能复盘，数据文件坏了，整个回测和实盘环境直接瘫痪。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/15.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>JSON原子写入：用tempfile+os.replace防止数据损坏</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-16</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>量化交易系统里，最怕的不是策略亏钱，而是数据文件损坏。策略亏钱还能复盘，数据文件坏了，整个回测和实盘环境直接瘫痪。今天聊一个看似简单但极其关键的问题：如何安全地写入JSON文件。</p>
+<h3 id="_1">数据损坏的典型场景</h3>
+<p>先看一个最常见的写法：</p>
+<pre class="codehilite"><code class="language-python">import json
+
+def save_data(data, filepath):
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+</code></pre>
+
+<p>这段代码在99%的情况下没问题。但剩下的1%会要命：</p>
+<ul>
+<li><strong>程序崩溃</strong>：<code>json.dump</code> 执行到一半，进程被kill或抛出未捕获异常，文件只写入了一半</li>
+<li><strong>断电</strong>：数据还在操作系统的page cache里，没来得及落盘，断电后文件变成空文件或乱码</li>
+<li><strong>磁盘空间不足</strong>：写了一半，磁盘满了，文件截断</li>
+<li><strong>并发写入</strong>：两个进程同时写同一个文件，互相覆盖</li>
+</ul>
+<p>结果就是：你辛辛苦苦跑了几天的回测数据，或者实盘策略的状态文件，一夜之间变成一堆乱码。而且这种损坏是静默的——程序下次启动读取JSON时，<code>json.load</code> 直接抛 <code>JSONDecodeError</code>，你才知道数据没了。</p>
+<h3 id="_2">原子操作原理：要么成功，要么保持原样</h3>
+<p>解决思路很简单：<strong>先写临时文件，再原子替换</strong>。</p>
+<p>核心是 <code>os.replace()</code>（Python 3.3+）。它在POSIX系统上对应 <code>rename()</code> 系统调用，在Windows上对应 <code>MoveFileEx</code>。这个操作是原子的——操作系统保证要么替换成功，要么原文件不变，不存在中间状态。</p>
+<p>流程如下：</p>
+<ol>
+<li>把数据写入同一个目录下的临时文件</li>
+<li>调用 <code>os.replace(tmp_path, target_path)</code>，一次性替换目标文件</li>
+<li>如果写入失败，临时文件还在，目标文件完好无损</li>
+</ol>
+<p>为什么临时文件必须放在<strong>同一个目录</strong>？因为 <code>rename</code> 在同一个文件系统内是原子操作，跨文件系统（比如 <code>/tmp</code> 和 <code>/data</code> 不在一个挂载点）会退化成复制+删除，失去原子性。</p>
+<h3 id="_3">代码实现：一个健壮的原子写入函数</h3>
+<p>直接上代码：</p>
+<pre class="codehilite"><code class="language-python">import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Union
+
+def atomic_write_json(
+    data: Any,
+    filepath: Union[str, Path],
+    *,
+    encoding: str = 'utf-8',
+    indent: int = 2,
+    ensure_ascii: bool = False,
+    fsync: bool = True,
+) -&gt; None:
+    &quot;&quot;&quot;
+    原子写入JSON文件。
+
+    Args:
+        data: 要写入的数据，必须是JSON可序列化的
+        filepath: 目标文件路径
+        encoding: 文件编码
+        indent: JSON缩进
+        ensure_ascii: 是否转义非ASCII字符
+        fsync: 是否调用fsync强制落盘（更安全但更慢）
+    &quot;&quot;&quot;
+    filepath = Path(filepath)
+    # 确保目标目录存在
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    # 在目标文件同目录下创建临时文件
+    # delete=False: 不自动删除，我们需要手动控制
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(filepath.parent),
+        prefix=f'.{filepath.name}.',
+        suffix='.tmp'
+    )
+
+    try:
+        # 将JSON写入临时文件
+        with os.fdopen(fd, 'w', encoding=encoding) as f:
+            json.dump(data, f, ensure_ascii=ensure_ascii, indent=indent)
+            f.flush()
+
+            # 强制将数据从用户态缓冲区刷到内核
+            if fsync:
+                os.fsync(f.fileno())
+
+        # 原子替换目标文件
+        os.replace(tmp_path, filepath)
+
+        # 可选：fsync目录，确保目录项也落盘
+        # 对极端数据安全场景（如数据库WAL）有必要
+        if fsync:
+            dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+    except Exception:
+        # 任何异常，清理临时文件
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+</code></pre>
+
+<h3 id="_4">关键点解析</h3>
+<p><strong><code>tempfile.mkstemp</code> 的 <code>dir</code> 参数</strong>：必须指定为目标文件所在目录。这样 <code>os.replace</code> 才能保证原子性。临时文件名用了 <code>.{filename}.xxx.tmp</code> 格式，隐藏文件，避免被其他工具误扫。</p>
+<p><strong><code>os.fdopen(fd, 'w')</code></strong>：<code>mkstemp</code> 返回的是文件描述符，用 <code>os.fdopen</code> 包装成文件对象，方便用 <code>json.dump</code>。注意用完必须关闭，<code>with</code> 语句会处理。</p>
+<p><strong><code>f.flush()</code> + <code>os.fsync()</code></strong>：<code>flush()</code> 把Python缓冲区数据推到操作系统，<code>fsync()</code> 强制操作系统把数据写入磁盘。如果不开 <code>fsync</code>，断电时数据可能还在page cache里，文件虽然替换了，但内容是旧的。量化交易场景，数据就是钱，建议默认开启。</p>
+<p><strong>异常处理</strong>：写入过程中任何异常，临时文件都会被删除，目标文件保持原样。<code>os.replace</code> 本身几乎不会失败，唯一的例外是权限问题或目标路径是目录。</p>
+<p><strong>目录fsync</strong>：这是很多人忽略的细节。<code>os.replace</code> 成功只代表数据写入了，但目录项（文件名到inode的映射）可能还没落盘。极端情况下（系统崩溃），文件可能"消失"。对普通应用没必要，但对关键交易数据，值得加上。</p>
+<h3 id="_5">读取时的防御性处理</h3>
+<p>原子写入解决了写入端的问题，但读取端也要有防御意识。即使写入是原子的，读取时也可能遇到文件被外部程序修改、磁盘坏道等问题。</p>
+<pre class="codehilite"><code class="language-python">import json
+from pathlib import Path
+from typing import Any, Optional
+
+def read_json_safe(
+    filepath: Path,
+    default: Optional[Any] = None,
+    *,
+    encoding: str = 'utf-8'
+) -&gt; Any:
+    &quot;&quot;&quot;
+    安全读取JSON文件，失败时返回默认值。
+
+    注意：返回默认值可能导致静默数据丢失。
+    生产环境建议记录日志并告警。
+    &quot;&quot;&quot;
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return default
+
+    try:
+        with open(filepath, 'r', encoding=encoding) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        # 这里应该打日志，而不是静默处理
+        # logger.error(f&quot;Failed to read {filepath}: {e}&quot;)
+        return default
+</code></pre>
+
+<p>还有一个进阶技巧：<strong>写入前备份</strong>。对特别重要的文件，可以在原子替换前把原文件复制一份带时间戳的备份：</p>
+<pre class="codehilite"><code class="language-python">import shutil
+from datetime import datetime
+
+def write_json_with_backup(data: Any, filepath: Path, backup_count: int = 5):
+    &quot;&quot;&quot;写入JSON，并保留最近N份备份。&quot;&quot;&quot;
+    filepath = Path(filepath)
+
+    # 如果原文件存在，先备份
+    if filepath.exists():
+        backup_dir = filepath.parent / '.backups'
+        backup_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_path = backup_dir / f'{filepath.name}.{timestamp}.bak'
+        shutil.copy2(filepath, backup_path)
+
+        # 清理旧备份，只保留最近backup_count份
+        backups = sorted(backup_dir.glob(f'{filepath.name}.*.bak'))
+        for old_backup in backups[:-backup_count]:
+            old_backup.unlink()
+
+    atomic_write_json(data, filepath)
+</code></pre>
+
+<h3 id="_6">性能考量</h3>
+<p>原子写入比直接写入慢，主要开销在 <code>fsync</code>。如果数据文件很大（几MB以上），每次全量写入都会产生磁盘I/O。优化方向：</p>
+<ol>
+<li><strong>分批写入</strong>：如果数据是append-only的日志，不要用JSON文件，改用SQLite或专门的日志格式</li>
+<li><strong>降低fsync频率</strong>：对非关键数据，<code>fsync=False</code> 可以大幅提升性能</li>
+<li><strong>内存缓存</strong>：高频更新的状态文件，先在内存里聚合，定期落盘</li>
+</ol>
+<p>一个实用的取舍：<strong>策略状态文件</strong>（比如持仓、订单状态）每次更新都原子写入，因为数据量小但极其关键；<strong>市场数据缓存</strong>（比如日线行情）可以批量写入，丢一点还能重新下载。</p>
+<h3 id="_7">实战：交易状态文件的原子保存</h3>
+<p>拿一个简单的实盘策略状态管理举例：</p>
+<pre class="codehilite"><code class="language-python">import json
+import time
+from pathlib import Path
+
+class StrategyState:
+    &quot;&quot;&quot;策略状态管理器，保证每次保存都是原子的。&quot;&quot;&quot;
+
+    def __init__(self, state_file: Path):
+        self.state_file = Path(state_file)
+        self.state = self._load()
+
+    def _load(self) -&gt; dict:
+        &quot;&quot;&quot;加载状态，文件不存在时返回空状态。&quot;&quot;&quot;
+        if self.state_file.exists():
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {
+            'positions': {},
+            'orders': {},
+            'last_sync': None,
+            'version': 1
+        }
+
+    def update_position(self, symbol: str, qty: float, price: float):
+        &quot;&quot;&quot;更新持仓，立即持久化。&quot;&quot;&quot;
+        self.state['positions'][symbol] = {
+            'qty': qty,
+            'price': price,
+            'updated_at': time.time()
+        }
+        # 每次更新都原子保存
+        atomic_write_json(self.state, self.state_file)
+
+    def save(self):
+        &quot;&quot;&quot;手动保存。&quot;&quot;&quot;
+        atomic_write_json(self.state, self.state_file)
+</code></pre>
+
+<p>这个类保证：任何一次 <code>update_position</code> 要么完整写入，要么保持上一次的状态。即使程序在写入过程中崩溃，重启后加载的也是最近一次完整保存的状态，不会出现半截JSON。</p>
+<h3 id="_8">总结</h3>
+<ul>
+<li><code>os.replace</code> 是原子操作，配合临时文件可以实现安全的JSON写入</li>
+<li>临时文件必须和目标文件在<strong>同一个目录</strong>，否则失去原子性</li>
+<li><code>fsync</code> 决定数据是否真正落盘，关键数据建议开启</li>
+<li>读取端也要防御，JSON解析失败时要有降级方案</li>
+<li>对高频更新的状态文件，保持"写入即原子"的习惯</li>
+</ul>
+<p>这套方案不局限于JSON，任何文本文件、配置文件、模型参数文件都可以用同样的模式。把它封装成一个通用工具函数，放进你的工具库里，以后写文件就再也不用担心数据损坏了。</p>
+<hr />
+<p>更多内容请关注本站，后续会分享更多Python量化交易和自动化实战技巧。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">JSON</span><span class="tag-badge">原子写入</span><span class="tag-badge">tempfile</span><span class="tag-badge">os.replace</span><span class="tag-badge">数据安全</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
