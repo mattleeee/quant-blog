@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>PushPlus微信推送系统搭建：从零到自动通知</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/16.html</link>
+            <description>PushPlus微信推送系统搭建：从零到自动通知
+
+量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。今天直接讲PushPlus——一个能把消息推到微信的HTTP API服务，配合Python，五分钟搭完整个推送链路。...</description>
+            <pubDate>2026-08-17</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>JSON原子写入：用tempfile+os.replace防止数据损坏</title>
             <link>https://hkcode.eu.org/quant-blog/posts/15.html</link>
             <description>JSON原子写入：用tempfile+os.replace防止数据损坏
