@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PushPlus微信推送系统搭建：从零到自动通知 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="PushPlus微信推送系统搭建：从零到自动通知
+
+量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。...">
+    <meta name="keywords" content="PushPlus,微信推送,通知系统,Python">
+    <meta property="og:title" content="PushPlus微信推送系统搭建：从零到自动通知">
+    <meta property="og:description" content="PushPlus微信推送系统搭建：从零到自动通知
+
+量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/16.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>PushPlus微信推送系统搭建：从零到自动通知</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-17</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。今天直接讲PushPlus——一个能把消息推到微信的HTTP API服务，配合Python，五分钟搭完整个推送链路。</p>
+<h3 id="pushplus">为什么选PushPlus</h3>
+<p>先摆事实：PushPlus支持文本、Markdown、HTML、JSON等格式，免费额度足够个人量化用，而且不需要装App、不需要公众号认证，只要扫码关注一个服务号就能收消息。对比Server酱，PushPlus的模板消息和批量推送功能更灵活；对比Telegram Bot，国内网络环境友好得多。</p>
+<h3 id="token">第一步：注册并获取Token</h3>
+<p>打开PushPlus官网（pushplus.plus），用微信扫码登录，登录后在首页就能看到你的<code>token</code>，一串32位的十六进制字符串。这串token就是你的身份凭证，所有推送请求都靠它。</p>
+<p><strong>注意</strong>：token等同于你的微信接收权限，别提交到公开仓库。建议存到环境变量或本地配置文件里。</p>
+<h3 id="_1">第二步：写第一个推送函数</h3>
+<p>PushPlus的API极其简单，一个<code>POST</code>请求搞定。先看最基础的文本推送：</p>
+<pre class="codehilite"><code class="language-python">import requests
+
+def send_text(token: str, title: str, content: str) -&gt; dict:
+    &quot;&quot;&quot;
+    发送文本消息到微信
+
+    Args:
+        token: PushPlus的token
+        title: 消息标题，最长100字符
+        content: 消息内容，最长5000字符
+
+    Returns:
+        API返回的JSON字典
+    &quot;&quot;&quot;
+    url = &quot;https://www.pushplus.plus/send&quot;
+    payload = {
+        &quot;token&quot;: token,
+        &quot;title&quot;: title,
+        &quot;content&quot;: content,
+        &quot;template&quot;: &quot;txt&quot;
+    }
+
+    resp = requests.post(url, json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+# 使用示例
+if __name__ == &quot;__main__&quot;:
+    TOKEN = &quot;你的token&quot;
+    result = send_text(TOKEN, &quot;测试消息&quot;, &quot;这是第一条Python推送&quot;)
+    print(result)
+    # 正常返回: {'code': 200, 'msg': '请求成功', 'data': '发送成功'}
+</code></pre>
+
+<p>注意<code>resp.raise_for_status()</code>，HTTP层面错误直接抛异常。而PushPlus业务层面的错误（比如token无效）会返回<code>code</code>非200的JSON，后面统一处理。</p>
+<h3 id="_2">第三步：消息类型详解</h3>
+<p>PushPlus支持多种<code>template</code>参数，不同模板决定了<code>content</code>的渲染方式。</p>
+<h4 id="31-txt">3.1 文本模板（txt）</h4>
+<p>上面已经演示过，纯文本，适合短通知。</p>
+<h4 id="32-markdownmarkdown">3.2 Markdown模板（markdown）</h4>
+<p>这是量化场景最常用的。收益曲线、持仓变动、策略信号，用Markdown排版后，微信里直接渲染成富文本。</p>
+<pre class="codehilite"><code class="language-python">def send_markdown(token: str, title: str, content_md: str) -&gt; dict:
+    &quot;&quot;&quot;
+    发送Markdown格式消息
+    &quot;&quot;&quot;
+    url = &quot;https://www.pushplus.plus/send&quot;
+    payload = {
+        &quot;token&quot;: token,
+        &quot;title&quot;: title,
+        &quot;content&quot;: content_md,
+        &quot;template&quot;: &quot;markdown&quot;
+    }
+
+    resp = requests.post(url, json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+# 实战示例：推送策略信号
+md_content = &quot;&quot;&quot;
+### 交易信号
+
+**品种**: BTC/USDT  
+**方向**: 做多  
+**入场价**: 65000  
+**止损价**: 64000  
+**止盈价**: 68000  
+
+&gt; 信号时间: 2024-01-15 14:30:00  
+&gt; 信号强度: 强（RSI超卖+MACD金叉）
+&quot;&quot;&quot;
+
+send_markdown(TOKEN, &quot;【策略信号】BTC做多&quot;, md_content)
+</code></pre>
+
+<h4 id="33-htmlhtml">3.3 HTML模板（html）</h4>
+<p>如果要更复杂的排版，比如表格、颜色标注，用HTML模板。注意PushPlus的HTML模板不支持外部CSS，只能用内联样式。</p>
+<h4 id="34-jsonjson">3.4 JSON模板（json）</h4>
+<p>这个很有用——配合微信小程序的"推送Plus"插件，可以把结构化数据渲染成卡片。不过日常量化通知，Markdown已经够用了。</p>
+<h3 id="_3">第四步：标题命名规范</h3>
+<p>标题是用户第一眼看到的东西，直接影响打开率。做量化推送，我总结三条铁律：</p>
+<ol>
+<li><strong>前缀标明系统</strong>：<code>【策略A】</code>、<code>【风控】</code>、<code>【交易】</code>，微信通知栏只显示前几个字，前缀必须一眼识别。</li>
+<li><strong>时间放结尾</strong>：<code>【策略A】BTC做多信号 - 14:30</code>，方便回溯。</li>
+<li><strong>紧急度分级</strong>：风控类加<code>【紧急】</code>，普通信号不加。PushPlus本身没有级别区分，靠标题约定。</li>
+</ol>
+<h3 id="_4">第五步：错误处理</h3>
+<p>推送失败是常态，网络抖动、API限流、token过期。写一个健壮的推送函数，必须考虑这些。</p>
+<pre class="codehilite"><code class="language-python">import time
+import logging
+from typing import Optional
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class PushPlusError(Exception):
+    &quot;&quot;&quot;PushPlus推送异常&quot;&quot;&quot;
+    pass
+
+def send_with_retry(token: str, title: str, content: str, 
+                    template: str = &quot;txt&quot;, max_retries: int = 3) -&gt; Optional[dict]:
+    &quot;&quot;&quot;
+    带重试机制的推送函数
+
+    Args:
+        token: PushPlus token
+        title: 标题
+        content: 内容
+        template: 消息模板
+        max_retries: 最大重试次数
+
+    Returns:
+        成功返回响应dict，失败返回None
+    &quot;&quot;&quot;
+    url = &quot;https://www.pushplus.plus/send&quot;
+    payload = {
+        &quot;token&quot;: token,
+        &quot;title&quot;: title,
+        &quot;content&quot;: content,
+        &quot;template&quot;: template
+    }
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+
+            result = resp.json()
+            if result.get(&quot;code&quot;) != 200:
+                # 业务错误，比如token无效，重试也没用
+                if result.get(&quot;code&quot;) in (401, 403):
+                    raise PushPlusError(f&quot;认证失败: {result.get('msg')}&quot;)
+                # 其他业务错误，可能是内容超长，重试也无意义
+                logger.error(f&quot;推送业务错误: {result}&quot;)
+                return None
+
+            logger.info(f&quot;推送成功: {title}&quot;)
+            return result
+
+        except requests.RequestException as e:
+            logger.warning(f&quot;网络错误 (尝试 {attempt + 1}/{max_retries}): {e}&quot;)
+            if attempt &lt; max_retries - 1:
+                time.sleep(2 ** attempt)  # 指数退避
+            else:
+                logger.error(f&quot;推送最终失败: {title}&quot;)
+                return None
+
+    return None
+</code></pre>
+
+<p>这个函数做了三件事：
+- HTTP异常重试，指数退避（1s、2s、4s）
+- 认证错误直接抛出异常，不浪费重试次数
+- 记录完整日志，方便事后排查</p>
+<h3 id="_5">第六步：消息模板设计</h3>
+<p>模板的意义在于统一格式、减少重复代码。用Python的<code>str.format</code>或<code>f-string</code>做简单模板，复杂场景用<code>jinja2</code>。</p>
+<pre class="codehilite"><code class="language-python">from string import Template
+
+# 用string.Template做简单模板
+SIGNAL_TEMPLATE = Template(&quot;&quot;&quot;
+### $strategy_name 交易信号
+
+**品种**: $symbol  
+**方向**: $direction  
+**入场价**: $entry_price  
+**止损价**: $stop_loss  
+**止盈价**: $take_profit  
+
+&gt; 信号时间: $signal_time  
+&gt; 信号强度: $strength
+&quot;&quot;&quot;)
+
+def format_signal_message(signal: dict) -&gt; str:
+    &quot;&quot;&quot;将信号字典格式化为Markdown字符串&quot;&quot;&quot;
+    return SIGNAL_TEMPLATE.substitute(
+        strategy_name=signal.get(&quot;strategy&quot;, &quot;未知策略&quot;),
+        symbol=signal.get(&quot;symbol&quot;, &quot;未知品种&quot;),
+        direction=signal.get(&quot;direction&quot;, &quot;观望&quot;),
+        entry_price=signal.get(&quot;entry&quot;, &quot;-&quot;),
+        stop_loss=signal.get(&quot;stop&quot;, &quot;-&quot;),
+        take_profit=signal.get(&quot;target&quot;, &quot;-&quot;),
+        signal_time=signal.get(&quot;time&quot;, &quot;-&quot;),
+        strength=signal.get(&quot;strength&quot;, &quot;-&quot;)
+    )
+</code></pre>
+
+<p>用<code>Template.substitute</code>比<code>f-string</code>好在：字段缺失时不会崩溃，而是报<code>KeyError</code>，方便排查数据源问题。</p>
+<h3 id="_6">第七步：完整实战——策略信号自动推送</h3>
+<p>把上面的模块串起来，做一个完整的推送服务。假设你有一个策略信号生成函数<code>get_signal()</code>，返回一个dict。</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time as time_module
+
+class QuantNotifier:
+    &quot;&quot;&quot;量化信号推送器&quot;&quot;&quot;
+
+    def __init__(self, token: str):
+        self.token = token
+        self.last_signal_time = None
+        self.signal_count = 0
+
+    def push_signal(self, signal: dict) -&gt; bool:
+        &quot;&quot;&quot;
+        推送交易信号，带去重逻辑
+
+        Args:
+            signal: 信号字典
+
+        Returns:
+            是否推送成功
+        &quot;&quot;&quot;
+        # 简单去重：同一分钟内的相同信号不重复推送
+        current_time = signal.get(&quot;time&quot;)
+        if current_time == self.last_signal_time:
+            logger.info(&quot;重复信号，跳过推送&quot;)
+            return False
+
+        content_md = format_signal_message(signal)
+        title = f&quot;【{signal['strategy']}】{signal['symbol']} {signal['direction']}&quot;
+
+        result = send_with_retry(
+            self.token,
+            title,
+            content_md,
+            template=&quot;markdown&quot;
+        )
+
+        if result:
+            self.last_signal_time = current_time
+            self.signal_count += 1
+            logger.info(f&quot;已推送第 {self.signal_count} 条信号&quot;)
+            return True
+
+        return False
+
+    def push_daily_report(self, stats: dict):
+        &quot;&quot;&quot;每日收盘统计推送&quot;&quot;&quot;
+        report_md = f&quot;&quot;&quot;
+### 今日交易统计
+
+**总交易次数**: {stats.get('total_trades', 0)}  
+**盈利次数**: {stats.get('win_trades', 0)}  
+**胜率**: {stats.get('win_rate', 0):.2%}  
+**累计盈亏**: {stats.get('pnl', 0):+.4f} USDT  
+
+---
+*报表生成时间: {time_module.strftime('%Y-%m-%d %H:%M:%S')}*
+        &quot;&quot;&quot;
+        send_with_retry(
+            self.token,
+            &quot;【日报】交易统计&quot;,
+            report_md,
+            template=&quot;markdown&quot;
+        )
+
+# 使用示例
+if __name__ == &quot;__main__&quot;:
+    notifier = QuantNotifier(TOKEN)
+
+    # 模拟一个信号
+    demo_signal = {
+        &quot;strategy&quot;: &quot;双均线&quot;,
+        &quot;symbol&quot;: &quot;ETH/USDT&quot;,
+        &quot;direction&quot;: &quot;做空&quot;,
+        &quot;entry&quot;: 3200,
+        &quot;stop&quot;: 3300,
+        &quot;target&quot;: 3000,
+        &quot;time&quot;: &quot;2024-01-15 14:30:00&quot;,
+        &quot;strength&quot;: &quot;中等&quot;
+    }
+
+    notifier.push_signal(demo_signal)
+
+    # 每天下午4点推送日报
+    schedule.every().day.at(&quot;16:00&quot;).do(notifier.push_daily_report, {&quot;total_trades&quot;: 5, &quot;win_trades&quot;: 3, &quot;win_rate&quot;: 0.6, &quot;pnl&quot;: 120.5})
+
+    while True:
+        schedule.run_pending()
+        time_module.sleep(60)
+</code></pre>
+
+<h3 id="_7">常见坑与优化</h3>
+<p><strong>1. 频率限制</strong>：PushPlus免费版有每分钟推送次数限制，实测约30次/分钟。高频策略建议做本地聚合，比如每分钟汇总一次信号再推。</p>
+<p><strong>2. 内容长度</strong>：文本模板上限5000字符，Markdown模板建议控制在3000字符内，微信渲染长文本会卡顿。</p>
+<p><strong>3. 时区问题</strong>：PushPlus服务器在UTC+8，如果你的策略服务器在UTC，时间字段要显式转换，否则推送记录的时间会差8小时。</p>
+<p><strong>4. 消息丢失</strong>：极端情况下API可能不返回任何响应（超时），<code>send_with_retry</code>里<code>timeout=10</code>设短一点，配合重试机制基本能保证送达。</p>
+<p><strong>5. 多策略管理</strong>：推荐每个策略一个独立token，这样在微信里可以按token归档，也可以单独屏蔽某个策略的通知。</p>
+<hr />
+<p>整套系统搭下来，核心代码不超过100行。从信号产生到微信弹出通知，延迟在1-2秒内。后续可以扩展的方向：把推送封装成装饰器、接入消息队列做异步推送、或者用WebSocket实时推送行情异动。</p>
+<p>更多内容请关注本站，后续会拆解如何把这套通知系统接入回测框架和实盘交易接口。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">PushPlus</span><span class="tag-badge">微信推送</span><span class="tag-badge">通知系统</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
