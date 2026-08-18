@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>异常处理精确化：避免bare except的三个坑 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="异常处理精确化：避免bare except的三个坑
+
+写量化策略的时候，我见过太多这样的代码：
+
+
+
+跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...">
+    <meta name="keywords" content="异常处理,bare except,Python,最佳实践">
+    <meta property="og:title" content="异常处理精确化：避免bare except的三个坑">
+    <meta property="og:description" content="异常处理精确化：避免bare except的三个坑
+
+写量化策略的时候，我见过太多这样的代码：
+
+
+
+跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/17.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>异常处理精确化：避免bare except的三个坑</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-18</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>写量化策略的时候，我见过太多这样的代码：</p>
+<pre class="codehilite"><code class="language-python">try:
+    result = get_price_data(symbol)
+except:
+    result = None
+</code></pre>
+
+<p>跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是<code>bare except</code>埋的雷。</p>
+<h3 id="systemexitkeyboardinterrupt">第一个坑：吞掉SystemExit和KeyboardInterrupt</h3>
+<p><code>bare except</code>会捕获所有异常，包括<code>SystemExit</code>和<code>KeyboardInterrupt</code>。这意味着你的程序无法被正常终止。</p>
+<p>看这个例子：</p>
+<pre class="codehilite"><code class="language-python">import time
+
+def run_strategy():
+    while True:
+        try:
+            # 模拟策略主循环
+            time.sleep(1)
+            print(&quot;策略运行中...&quot;)
+        except:
+            # 这里把KeyboardInterrupt也吞了
+            print(&quot;捕获到异常，继续运行&quot;)
+            continue
+
+if __name__ == &quot;__main__&quot;:
+    run_strategy()
+</code></pre>
+
+<p>你按<code>Ctrl+C</code>，程序根本不响应。<code>KeyboardInterrupt</code>被<code>except:</code>捕获了，<code>continue</code>让它继续跑。在实盘环境里，这意味着你无法通过常规方式停止策略进程，只能<code>kill -9</code>强杀。</p>
+<p>正确的做法：</p>
+<pre class="codehilite"><code class="language-python">import time
+
+def run_strategy():
+    while True:
+        try:
+            time.sleep(1)
+            print(&quot;策略运行中...&quot;)
+        except KeyboardInterrupt:
+            print(&quot;\n收到停止信号，保存状态并退出&quot;)
+            # 在这里保存策略状态
+            break
+        except Exception as e:
+            print(f&quot;运行异常: {e}&quot;)
+            # 记录日志，继续运行
+            continue
+</code></pre>
+
+<h3 id="_1">第二个坑：掩盖真实错误</h3>
+<p><code>bare except</code>让你看不到错误是什么。量化策略出错时，你需要知道是数据获取失败、计算溢出还是API调用报错。用<code>bare except</code>，所有错误都变成<code>None</code>，你根本不知道哪里出了问题。</p>
+<pre class="codehilite"><code class="language-python"># 错误示范：所有错误都变成None
+def fetch_price(symbol):
+    try:
+        data = api.get_price(symbol)
+        return data
+    except:
+        return None
+
+# 正确示范：精确捕获，保留错误信息
+def fetch_price(symbol):
+    try:
+        data = api.get_price(symbol)
+        return data
+    except ConnectionError:
+        # 网络问题，可以重试
+        logger.error(f&quot;连接失败: {symbol}&quot;)
+        return None
+    except TimeoutError:
+        # 超时，可以调整参数
+        logger.error(f&quot;请求超时: {symbol}&quot;)
+        return None
+    except ValueError as e:
+        # 数据格式不对，需要检查API返回
+        logger.error(f&quot;数据格式错误: {symbol}, {e}&quot;)
+        raise
+</code></pre>
+
+<h3 id="_2">第三个坑：无法区分业务逻辑错误</h3>
+<p>在量化系统里，业务逻辑错误和系统错误需要分开处理。比如：</p>
+<ul>
+<li>系统错误：数据库连接失败、网络断开——需要重试或报警</li>
+<li>业务错误：资金不足、持仓不足——需要停止该策略或通知用户</li>
+</ul>
+<p>用<code>bare except</code>，这两类错误混在一起，你没法针对性地处理。</p>
+<pre class="codehilite"><code class="language-python">class InsufficientCapital(Exception):
+    &quot;&quot;&quot;资金不足异常&quot;&quot;&quot;
+    pass
+
+class PositionNotFound(Exception):
+    &quot;&quot;&quot;持仓不存在异常&quot;&quot;&quot;
+    pass
+
+def execute_order(order):
+    try:
+        account = get_account()
+        if account.available &lt; order.amount:
+            raise InsufficientCapital(f&quot;可用资金不足: {account.available}&quot;)
+
+        position = get_position(order.symbol)
+        if not position and order.side == 'sell':
+            raise PositionNotFound(f&quot;没有持仓: {order.symbol}&quot;)
+
+        # 执行下单
+        return api.submit_order(order)
+
+    except InsufficientCapital as e:
+        # 业务逻辑错误，通知用户，停止策略
+        logger.error(f&quot;订单被拒绝: {e}&quot;)
+        stop_strategy()
+        return None
+    except (ConnectionError, TimeoutError) as e:
+        # 系统错误，重试
+        logger.warning(f&quot;系统异常，重试: {e}&quot;)
+        return retry(order)
+</code></pre>
+
+<h3 id="_3">精确异常捕获方法论</h3>
+<p>写异常处理的核心原则：<strong>只捕获你能处理的异常，其余的让它抛出</strong>。</p>
+<h4 id="1">1. 从具体到通用</h4>
+<pre class="codehilite"><code class="language-python">try:
+    result = process_data(data)
+except KeyError as e:
+    # 缺少关键字段，数据格式有问题
+    logger.error(f&quot;数据缺少字段: {e}&quot;)
+except (TypeError, ValueError) as e:
+    # 数据类型或值不对
+    logger.error(f&quot;数据校验失败: {e}&quot;)
+except Exception as e:
+    # 兜底，但至少要记录完整堆栈
+    logger.exception(f&quot;未预期的错误: {e}&quot;)
+    raise  # 重新抛出，让上层决定怎么处理
+</code></pre>
+
+<h4 id="2-elsefinally">2. 使用<code>else</code>和<code>finally</code></h4>
+<pre class="codehilite"><code class="language-python">def load_config(path):
+    try:
+        with open(path, 'r') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        # 配置文件不存在，用默认配置
+        logger.warning(f&quot;配置文件不存在: {path}&quot;)
+        config = get_default_config()
+    except json.JSONDecodeError as e:
+        # JSON格式错误，需要人工干预
+        logger.error(f&quot;配置文件格式错误: {path}&quot;)
+        raise ConfigError(f&quot;配置文件解析失败: {e}&quot;)
+    else:
+        # 没有异常时执行
+        logger.info(f&quot;配置文件加载成功: {path}&quot;)
+    finally:
+        # 无论是否异常都执行
+        logger.debug(&quot;配置加载流程结束&quot;)
+
+    return config
+</code></pre>
+
+<h3 id="_4">自定义异常类设计</h3>
+<p>在量化系统中，自定义异常类让错误处理更清晰。设计原则：</p>
+<ol>
+<li>继承<code>Exception</code>，不要继承<code>BaseException</code></li>
+<li>异常类命名要见名知义</li>
+<li>可以在异常中携带额外的上下文信息</li>
+</ol>
+<pre class="codehilite"><code class="language-python">class StrategyError(Exception):
+    &quot;&quot;&quot;策略基础异常&quot;&quot;&quot;
+    def __init__(self, message, strategy_id=None, **context):
+        super().__init__(message)
+        self.strategy_id = strategy_id
+        self.context = context
+
+class DataError(StrategyError):
+    &quot;&quot;&quot;数据相关异常&quot;&quot;&quot;
+    pass
+
+class OrderError(StrategyError):
+    &quot;&quot;&quot;订单执行异常&quot;&quot;&quot;
+    def __init__(self, message, order_id=None, **kwargs):
+        super().__init__(message, **kwargs)
+        self.order_id = order_id
+
+class RiskCheckError(StrategyError):
+    &quot;&quot;&quot;风控检查异常&quot;&quot;&quot;
+    def __init__(self, message, risk_metric, limit, actual, **kwargs):
+        super().__init__(message, **kwargs)
+        self.risk_metric = risk_metric
+        self.limit = limit
+        self.actual = actual
+
+# 使用示例
+def check_risk(position, limits):
+    if position.value &gt; limits.max_value:
+        raise RiskCheckError(
+            f&quot;持仓市值超限&quot;,
+            risk_metric=&quot;position_value&quot;,
+            limit=limits.max_value,
+            actual=position.value,
+            strategy_id=position.strategy_id
+        )
+</code></pre>
+
+<h3 id="_5">异常日志记录方案</h3>
+<p>异常处理不只是<code>try-except</code>，更重要的是记录完整的错误信息。推荐使用<code>logging</code>模块，而不是<code>print</code>。</p>
+<pre class="codehilite"><code class="language-python">import logging
+import traceback
+from logging.handlers import RotatingFileHandler
+
+# 配置日志
+def setup_logger():
+    logger = logging.getLogger('quant')
+    logger.setLevel(logging.DEBUG)
+
+    # 文件处理器，按大小轮转
+    file_handler = RotatingFileHandler(
+        'quant.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.DEBUG)
+
+    # 控制台输出
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
+    # 格式
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    return logger
+
+logger = setup_logger()
+
+# 在异常处理中使用
+def safe_call(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        logger.exception(f&quot;函数调用失败: {func.__name__}&quot;)
+        # logger.exception会自动记录完整堆栈
+        return None
+</code></pre>
+
+<p><code>logger.exception</code>比<code>logger.error</code>更好用，它会自动带上完整的堆栈信息，排查问题的时候能省不少时间。</p>
+<h3 id="_6">实战案例：一个完整的异常处理模板</h3>
+<p>下面是我在量化策略中常用的异常处理模板：</p>
+<pre class="codehilite"><code class="language-python">import time
+from functools import wraps
+
+def retry(max_retries=3, delay=1, exceptions=(ConnectionError, TimeoutError)):
+    &quot;&quot;&quot;重试装饰器&quot;&quot;&quot;
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f&quot;重试{max_retries}次仍然失败: {e}&quot;)
+                        raise
+                    logger.warning(f&quot;第{attempt + 1}次调用失败: {e}, {delay}秒后重试&quot;)
+                    time.sleep(delay)
+            return None
+        return wrapper
+    return decorator
+
+class DataFetcher:
+    def __init__(self):
+        self.logger = logging.getLogger('quant.data')
+
+    @retry(max_retries=3, delay=2)
+    def fetch_kline(self, symbol, interval, limit=100):
+        &quot;&quot;&quot;获取K线数据，自动重试&quot;&quot;&quot;
+        try:
+            data = api.get_kline(symbol, interval, limit)
+            if not data:
+                raise DataError(f&quot;K线数据为空: {symbol}&quot;)
+            return data
+        except DataError as e:
+            self.logger.error(f&quot;数据异常: {e}&quot;)
+            raise
+        except Exception as e:
+            self.logger.exception(f&quot;获取K线失败: {e}&quot;)
+            raise
+
+    def process_strategy(self, symbol):
+        &quot;&quot;&quot;策略主流程&quot;&quot;&quot;
+        try:
+            # 1. 获取数据
+            kline_data = self.fetch_kline(symbol, '1m')
+
+            # 2. 计算指标
+            indicators = self.calculate_indicators(kline_data)
+
+            # 3. 生成信号
+            signal = self.generate_signal(indicators)
+
+            # 4. 执行交易
+            if signal:
+                self.execute_trade(symbol, signal)
+
+        except DataError as e:
+            # 数据问题，跳过本轮
+            self.logger.warning(f&quot;数据异常，跳过: {e}&quot;)
+        except RiskCheckError as e:
+            # 风控问题，停止策略
+            self.logger.critical(f&quot;风控触发，停止策略: {e}&quot;)
+            self.stop()
+        except Exception as e:
+            # 未知错误，记录完整堆栈
+            self.logger.exception(f&quot;策略运行未预期错误: {e}&quot;)
+            # 发送告警
+            self.send_alert(f&quot;策略异常: {e}&quot;)
+</code></pre>
+
+<h3 id="_7">总结</h3>
+<p>异常处理精确化的核心就三点：</p>
+<ol>
+<li><strong>不要用<code>bare except</code></strong>——它会吞掉<code>SystemExit</code>和<code>KeyboardInterrupt</code>，让程序失去控制</li>
+<li><strong>只捕获你能处理的异常</strong>——把异常分类处理，业务错误和系统错误分开</li>
+<li><strong>用<code>logger.exception</code>记录完整堆栈</strong>——排查问题的时候，堆栈信息比错误消息更有用</li>
+</ol>
+<p>量化系统跑在无人值守的环境里，异常处理就是你最后的防线。写清楚每个异常怎么处理，比写更多的策略逻辑更重要。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">异常处理</span><span class="tag-badge">bare except</span><span class="tag-badge">Python</span><span class="tag-badge">最佳实践</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
