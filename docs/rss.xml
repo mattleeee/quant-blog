@@ -7,6 +7,19 @@
         <language>zh-CN</language>
         
         <item>
+            <title>异常处理精确化：避免bare except的三个坑</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/17.html</link>
+            <description>异常处理精确化：避免bare except的三个坑
+
+写量化策略的时候，我见过太多这样的代码：
+
+
+
+跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...</description>
+            <pubDate>2026-08-18</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>PushPlus微信推送系统搭建：从零到自动通知</title>
             <link>https://hkcode.eu.org/quant-blog/posts/16.html</link>
             <description>PushPlus微信推送系统搭建：从零到自动通知
