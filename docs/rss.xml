@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Python缓存管理：防止内存泄漏的定期清理方案</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/18.html</link>
+            <description>Python缓存管理：防止内存泄漏的定期清理方案
+
+长期运行的Python程序（比如量化交易策略、数据采集服务）最头疼的问题之一就是内存悄悄涨上去，最后OOM被杀。缓存是罪魁祸首之一——你以为在加速，实际上在漏内存。
+
+本文直接给方案：定期清理过期条目 + 限制最大缓存数量 + LRU淘汰策略。...</description>
+            <pubDate>2026-08-19</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>异常处理精确化：避免bare except的三个坑</title>
             <link>https://hkcode.eu.org/quant-blog/posts/17.html</link>
             <description>异常处理精确化：避免bare except的三个坑
