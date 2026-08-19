@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python缓存管理：防止内存泄漏的定期清理方案 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Python缓存管理：防止内存泄漏的定期清理方案
+
+长期运行的Python程序（比如量化交易策略、数据采集服务）最头疼的问题之一就是内存悄悄涨上去，最后OOM被杀。缓存是罪魁祸首之一——你以为在加速，实际上在漏内存。...">
+    <meta name="keywords" content="缓存管理,内存泄漏,Python,定期清理">
+    <meta property="og:title" content="Python缓存管理：防止内存泄漏的定期清理方案">
+    <meta property="og:description" content="Python缓存管理：防止内存泄漏的定期清理方案
+
+长期运行的Python程序（比如量化交易策略、数据采集服务）最头疼的问题之一就是内存悄悄涨上去，最后OOM被杀。缓存是罪魁祸首之一——你以为在加速，实际上在漏内存。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/18.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Python缓存管理：防止内存泄漏的定期清理方案</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-19</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>长期运行的Python程序（比如量化交易策略、数据采集服务）最头疼的问题之一就是内存悄悄涨上去，最后OOM被杀。缓存是罪魁祸首之一——你以为在加速，实际上在漏内存。</p>
+<p>本文直接给方案：定期清理过期条目 + 限制最大缓存数量 + LRU淘汰策略。全部有代码，直接能跑。</p>
+<h3 id="_1">问题本质：缓存为什么导致内存泄漏</h3>
+<p>Python的dict不会自动清理，你往里塞数据，它就一直在内存里。量化场景最常见：</p>
+<ul>
+<li>缓存K线数据，越积越多</li>
+<li>缓存计算结果，key永远不重复</li>
+<li>缓存外部API响应，没设TTL</li>
+</ul>
+<p>结果就是程序跑三天，内存从200MB涨到2GB。不是Python的GC不干活，是你自己把对象引用攥着不放。</p>
+<h3 id="_2">方案一：基础版——手动清理过期条目</h3>
+<p>最朴素的做法：每个缓存条目记录时间戳，定期扫描删除过期数据。</p>
+<pre class="codehilite"><code class="language-python">import time
+import threading
+from typing import Any, Dict, Tuple, Optional
+
+class TimeBasedCache:
+    &quot;&quot;&quot;带TTL的缓存，定期清理过期条目&quot;&quot;&quot;
+
+    def __init__(self, ttl: int = 300, cleanup_interval: int = 60):
+        &quot;&quot;&quot;
+        Args:
+            ttl: 条目存活时间（秒）
+            cleanup_interval: 清理间隔（秒）
+        &quot;&quot;&quot;
+        self._cache: Dict[str, Tuple[Any, float]] = {}
+        self._ttl = ttl
+        self._cleanup_interval = cleanup_interval
+        self._lock = threading.Lock()
+        self._start_cleanup_thread()
+
+    def set(self, key: str, value: Any):
+        &quot;&quot;&quot;写入缓存&quot;&quot;&quot;
+        with self._lock:
+            self._cache[key] = (value, time.time())
+
+    def get(self, key: str) -&gt; Optional[Any]:
+        &quot;&quot;&quot;读取缓存，过期返回None&quot;&quot;&quot;
+        with self._lock:
+            item = self._cache.get(key)
+            if item is None:
+                return None
+            value, timestamp = item
+            if time.time() - timestamp &gt; self._ttl:
+                del self._cache[key]
+                return None
+            return value
+
+    def _cleanup(self):
+        &quot;&quot;&quot;清理过期条目&quot;&quot;&quot;
+        now = time.time()
+        with self._lock:
+            expired = [
+                key for key, (_, ts) in self._cache.items()
+                if now - ts &gt; self._ttl
+            ]
+            for key in expired:
+                del self._cache[key]
+            if expired:
+                print(f&quot;[Cache] 清理了 {len(expired)} 条过期缓存，剩余 {len(self._cache)} 条&quot;)
+
+    def _start_cleanup_thread(self):
+        &quot;&quot;&quot;启动后台清理线程&quot;&quot;&quot;
+        def run():
+            while True:
+                time.sleep(self._cleanup_interval)
+                self._cleanup()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+    def size(self) -&gt; int:
+        return len(self._cache)
+</code></pre>
+
+<p>用法很简单：</p>
+<pre class="codehilite"><code class="language-python"># 缓存5秒，每10秒清理一次
+cache = TimeBasedCache(ttl=5, cleanup_interval=10)
+
+cache.set(&quot;btc_price&quot;, 50000)
+print(cache.get(&quot;btc_price&quot;))  # 50000
+
+time.sleep(6)
+print(cache.get(&quot;btc_price&quot;))  # None，已过期
+
+# 等后台清理线程跑一次
+time.sleep(5)
+print(f&quot;缓存大小: {cache.size()}&quot;)  # 0
+</code></pre>
+
+<p>这个方案解决了“条目永远不删”的问题，但还有个隐患：如果短时间内写入大量不同key的数据，即使每个key都设了TTL，在过期之前的窗口期内，内存可能已经爆了。</p>
+<h3 id="lru">方案二：进阶版——限制最大缓存数量 + LRU</h3>
+<p>光靠TTL不够，必须限制缓存容量。用<code>collections.OrderedDict</code>实现LRU（Least Recently Used）淘汰策略。</p>
+<pre class="codehilite"><code class="language-python">import time
+import threading
+from collections import OrderedDict
+from typing import Any, Optional
+
+class LRUCacheWithTTL:
+    &quot;&quot;&quot;LRU缓存 + TTL过期 + 定期清理&quot;&quot;&quot;
+
+    def __init__(self, max_size: int = 1000, ttl: int = 300, cleanup_interval: int = 60):
+        &quot;&quot;&quot;
+        Args:
+            max_size: 最大缓存条目数
+            ttl: 条目存活时间（秒）
+            cleanup_interval: 清理间隔（秒）
+        &quot;&quot;&quot;
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._cleanup_interval = cleanup_interval
+        self._start_cleanup_thread()
+
+    def get(self, key: str) -&gt; Optional[Any]:
+        &quot;&quot;&quot;读取缓存，命中后移到末尾（表示最近使用）&quot;&quot;&quot;
+        with self._lock:
+            if key not in self._cache:
+                return None
+            value, timestamp = self._cache[key]
+            # 检查是否过期
+            if time.time() - timestamp &gt; self._ttl:
+                del self._cache[key]
+                return None
+            # LRU：移到末尾
+            self._cache.move_to_end(key)
+            return value
+
+    def set(self, key: str, value: Any):
+        &quot;&quot;&quot;写入缓存，超容量时淘汰最久未用的&quot;&quot;&quot;
+        with self._lock:
+            if key in self._cache:
+                # 更新已有key
+                self._cache[key] = (value, time.time())
+                self._cache.move_to_end(key)
+            else:
+                self._cache[key] = (value, time.time())
+                # 超容量，淘汰最久未用的（头部）
+                while len(self._cache) &gt; self._max_size:
+                    oldest_key, _ = self._cache.popitem(last=False)
+                    print(f&quot;[Cache] LRU淘汰: {oldest_key}&quot;)
+
+    def _cleanup(self):
+        &quot;&quot;&quot;定期清理过期条目&quot;&quot;&quot;
+        now = time.time()
+        with self._lock:
+            expired_keys = [
+                key for key, (_, ts) in self._cache.items()
+                if now - ts &gt; self._ttl
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+            if expired_keys:
+                print(f&quot;[Cache] 清理过期 {len(expired_keys)} 条，当前 {len(self._cache)} 条&quot;)
+
+    def _start_cleanup_thread(self):
+        def run():
+            while True:
+                time.sleep(self._cleanup_interval)
+                self._cleanup()
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def size(self) -&gt; int:
+        return len(self._cache)
+</code></pre>
+
+<p>关键点：</p>
+<ul>
+<li><code>OrderedDict</code>的<code>move_to_end</code>实现LRU，O(1)复杂度</li>
+<li><code>popitem(last=False)</code>从头部弹出最久未用的条目</li>
+<li>TTL和LRU双管齐下：LRU管容量，TTL管时效</li>
+</ul>
+<h3 id="_3">方案三：监控内存，提前报警</h3>
+<p>光清理还不够，你得知道内存到底什么情况。用<code>psutil</code>监控进程内存，设置阈值触发告警或额外清理。</p>
+<pre class="codehilite"><code class="language-python">import psutil
+import os
+
+def get_process_memory_mb() -&gt; float:
+    &quot;&quot;&quot;获取当前进程内存占用（MB）&quot;&quot;&quot;
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+class MemoryMonitor:
+    &quot;&quot;&quot;内存监控器，超阈值触发回调&quot;&quot;&quot;
+
+    def __init__(self, threshold_mb: float = 500, callback=None):
+        &quot;&quot;&quot;
+        Args:
+            threshold_mb: 内存阈值（MB）
+            callback: 超阈值时的回调函数
+        &quot;&quot;&quot;
+        self.threshold_mb = threshold_mb
+        self.callback = callback
+        self._check_interval = 5  # 每5秒检查一次
+        self._start_monitor()
+
+    def _check_memory(self):
+        current = get_process_memory_mb()
+        if current &gt; self.threshold_mb:
+            print(f&quot;[Memory] 警告！内存占用 {current:.1f}MB，超过阈值 {self.threshold_mb}MB&quot;)
+            if self.callback:
+                self.callback(current)
+
+    def _start_monitor(self):
+        def run():
+            while True:
+                time.sleep(self._check_interval)
+                self._check_memory()
+
+        threading.Thread(target=run, daemon=True).start()
+</code></pre>
+
+<p>组合使用：</p>
+<pre class="codehilite"><code class="language-python"># 创建缓存：最多500条，TTL 60秒，每30秒清理
+cache = LRUCacheWithTTL(max_size=500, ttl=60, cleanup_interval=30)
+
+# 内存监控：超过300MB时清空缓存
+def emergency_cleanup(memory_mb):
+    print(f&quot;[Emergency] 内存 {memory_mb:.1f}MB，清空缓存！&quot;)
+    cache._cache.clear()  # 直接清空底层dict
+
+monitor = MemoryMonitor(threshold_mb=300, callback=emergency_cleanup)
+
+# 模拟写入数据
+for i in range(10000):
+    cache.set(f&quot;key_{i}&quot;, {&quot;data&quot;: &quot;x&quot; * 1024})  # 每条1KB
+    if i % 100 == 0:
+        time.sleep(0.01)
+
+print(f&quot;最终缓存大小: {cache.size()}&quot;)
+</code></pre>
+
+<h3 id="_4">实战建议：量化场景怎么用</h3>
+<ol>
+<li>
+<p><strong>行情数据缓存</strong>：K线数据设TTL 60秒，最多缓存最近1000根K线，防止历史数据堆积。</p>
+</li>
+<li>
+<p><strong>指标计算结果</strong>：技术指标（MA、RSI等）的计算结果可以缓存，但必须设置TTL，因为新K线来了旧值就失效。</p>
+</li>
+<li>
+<p><strong>API响应缓存</strong>：外部数据源（如交易所REST API）的响应，TTL设5-10秒，避免频繁请求，同时保证数据新鲜度。</p>
+</li>
+<li>
+<p><strong>回测优化</strong>：回测中缓存因子值，用LRU限制大小，防止因子矩阵爆炸。</p>
+</li>
+</ol>
+<h3 id="_5">性能对比</h3>
+<table>
+<thead>
+<tr>
+<th>方案</th>
+<th>内存控制</th>
+<th>时效性</th>
+<th>实现复杂度</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无缓存</td>
+<td>最安全</td>
+<td>最慢</td>
+<td>无</td>
+</tr>
+<tr>
+<td>纯TTL</td>
+<td>中等</td>
+<td>好</td>
+<td>低</td>
+</tr>
+<tr>
+<td>TTL+LRU</td>
+<td>好</td>
+<td>好</td>
+<td>中</td>
+</tr>
+<tr>
+<td>TTL+LRU+监控</td>
+<td>最好</td>
+<td>好</td>
+<td>中高</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_6">完整示例：整合到你的策略里</h3>
+<pre class="codehilite"><code class="language-python">class QuantStrategy:
+    &quot;&quot;&quot;带缓存管理的策略基类&quot;&quot;&quot;
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        # K线缓存：最多1000条，TTL 300秒
+        self.kline_cache = LRUCacheWithTTL(
+            max_size=1000, 
+            ttl=300, 
+            cleanup_interval=60
+        )
+        # 指标缓存：最多200条，TTL 60秒
+        self.indicator_cache = LRUCacheWithTTL(
+            max_size=200,
+            ttl=60,
+            cleanup_interval=30
+        )
+        # 内存监控：超过500MB报警
+        self.memory_monitor = MemoryMonitor(
+            threshold_mb=500,
+            callback=self._emergency_cleanup
+        )
+
+    def _emergency_cleanup(self, memory_mb):
+        &quot;&quot;&quot;紧急清理：先清指标缓存，再清K线缓存&quot;&quot;&quot;
+        print(f&quot;[Emergency] 清空指标缓存&quot;)
+        self.indicator_cache._cache.clear()
+        if memory_mb &gt; 700:  # 更严重才清K线
+            print(f&quot;[Emergency] 清空K线缓存&quot;)
+            self.kline_cache._cache.clear()
+
+    def get_kline(self, symbol: str, timeframe: str = &quot;1m&quot;):
+        &quot;&quot;&quot;获取K线，带缓存&quot;&quot;&quot;
+        cache_key = f&quot;{symbol}_{timeframe}&quot;
+        data = self.kline_cache.get(cache_key)
+        if data is None:
+            # 这里写你的数据获取逻辑
+            data = self._fetch_kline(symbol, timeframe)
+            self.kline_cache.set(cache_key, data)
+        return data
+
+    def _fetch_kline(self, symbol: str, timeframe: str):
+        &quot;&quot;&quot;模拟获取K线数据&quot;&quot;&quot;
+        return {&quot;symbol&quot;: symbol, &quot;timeframe&quot;: timeframe, &quot;data&quot;: []}
+</code></pre>
+
+<h3 id="_7">总结</h3>
+<p>缓存管理不是可选项，是长期运行程序的刚需。核心就三点：</p>
+<ol>
+<li><strong>TTL保证时效性</strong>——过期数据不占内存</li>
+<li><strong>LRU保证容量</strong>——最多存多少条，超出就淘汰</li>
+<li><strong>内存监控兜底</strong>——异常情况能紧急清理</li>
+</ol>
+<p>代码都在上面了，直接抄去用。记住：缓存是优化工具，不是内存垃圾桶。设置好边界，你的程序才能长期稳定跑。</p>
+<hr />
+<p>更多内容请关注本站，后续会写关于Python异步编程、数据管道优化、策略回测框架等方面的实战文章。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">缓存管理</span><span class="tag-badge">内存泄漏</span><span class="tag-badge">Python</span><span class="tag-badge">定期清理</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
