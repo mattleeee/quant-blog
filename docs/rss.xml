@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>交易所API对接实战：Python连接Gate.io</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/19.html</link>
+            <description>交易所API对接实战：Python连接Gate.io
+
+做量化交易，第一步永远是搞定交易所API。今天直接上手Gate.io，重点说清楚三件事：怎么签名、怎么控频、怎么拿K线。...</description>
+            <pubDate>2026-08-20</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>Python缓存管理：防止内存泄漏的定期清理方案</title>
             <link>https://hkcode.eu.org/quant-blog/posts/18.html</link>
             <description>Python缓存管理：防止内存泄漏的定期清理方案
