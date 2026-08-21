@@ -38,7 +38,7 @@
             </div>
             <p class="excerpt">深信服安全软件拦截子进程的排查与解决方案
 
-最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，subprocess 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任何报错。...</p>
+最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。排查了一圈，最后定位到是深信服（Sangfor）安全软件在拦截子进程创建。...</p>
             <div class="post-tags"><span class="tag-badge">深信服</span><span class="tag-badge">Sangfor</span><span class="tag-badge">安全软件</span></div>
             <a href="/quant-blog/posts/20.html" class="read-more">阅读更多</a>
         </article>
