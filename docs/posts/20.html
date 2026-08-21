@@ -7,12 +7,12 @@
     <meta name="author" content="mattleeee">
         <meta name="description" content="深信服安全软件拦截子进程的排查与解决方案
 
-最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，subprocess 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任...">
+最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。...">
     <meta name="keywords" content="深信服,Sangfor,安全软件,子进程,拦截">
     <meta property="og:title" content="深信服安全软件拦截子进程的排查与解决方案">
     <meta property="og:description" content="深信服安全软件拦截子进程的排查与解决方案
 
-最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，subprocess 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任...">
+最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/20.html">
@@ -40,289 +40,347 @@
                 <span class="category"><span class="tag-badge">Python自动化</span></span>
             </div>
             <div class="post-content">
-<p>最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，<code>subprocess</code> 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任何报错。排查了半天，最后发现是深信服（Sangfor）的安全软件在作祟。</p>
-<p>这篇文章记录完整的排查过程和解决方案，希望能帮到遇到类似问题的朋友。</p>
+<p>最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。排查了一圈，最后定位到是深信服（Sangfor）安全软件在拦截子进程创建。</p>
+<p>这篇文章记录完整排查过程和解决方案，给同样被深信服坑过的朋友一个参考。</p>
 <h3 id="_1">问题现象</h3>
-<p>脚本逻辑很简单：用 <code>subprocess.Popen</code> 调用 PowerShell 脚本拉取数据，然后处理结果。</p>
+<p>我有个自动化脚本，需要周期性调用外部程序获取行情数据：</p>
 <pre class="codehilite"><code class="language-python">import subprocess
 import time
 
-# 调用 PowerShell 脚本
-proc = subprocess.Popen(
-    [&quot;powershell.exe&quot;, &quot;-ExecutionPolicy&quot;, &quot;Bypass&quot;, &quot;-File&quot;, &quot;fetch_data.ps1&quot;],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    encoding=&quot;utf-8&quot;
-)
-
-# 等待执行完成
-try:
-    stdout, stderr = proc.communicate(timeout=60)
-    print(f&quot;STDOUT: {stdout}&quot;)
-    print(f&quot;STDERR: {stderr}&quot;)
-except subprocess.TimeoutExpired:
-    print(&quot;Timeout: PowerShell 进程无响应&quot;)
-    proc.kill()
-</code></pre>
-
-<p><strong>现象描述：</strong>
-- 脚本运行到 <code>subprocess.Popen</code> 后，<code>communicate</code> 一直阻塞，直到 timeout
-- PowerShell 进程在任务管理器里能看到，但 CPU 和内存占用为 0，像是被挂起
-- 手动在命令行运行同样的 PowerShell 命令，一切正常
-- 换用 <code>os.system</code> 或 <code>subprocess.run</code>，问题依旧</p>
-<h3 id="_2">排查过程</h3>
-<h4 id="python">第一步：确认 Python 环境</h4>
-<p>先排除 Python 环境问题。用最小化代码测试：</p>
-<pre class="codehilite"><code class="language-python">import subprocess
-
-# 最简单的子进程测试
-result = subprocess.run(
-    [&quot;cmd.exe&quot;, &quot;/c&quot;, &quot;echo hello&quot;],
-    capture_output=True,
-    text=True,
-    timeout=10
-)
-print(f&quot;Return code: {result.returncode}&quot;)
-print(f&quot;Output: {result.stdout}&quot;)
-</code></pre>
-
-<p>结果：<code>cmd.exe</code> 也被拦截了，连 <code>echo hello</code> 都执行不了。这说明不是 PowerShell 脚本的问题，而是所有子进程都被拦截。</p>
-<h4 id="_3">第二步：检查系统日志</h4>
-<p>打开 Windows 事件查看器，查看 <strong>应用程序</strong> 和 <strong>安全</strong> 日志，发现以下记录：</p>
-<pre class="codehilite"><code>事件 ID: 4688（进程创建）
-进程名称: python.exe
-新进程名称: powershell.exe
-创建者进程 ID: 0x1234
-任务类别: 进程创建
-</code></pre>
-
-<p>但没有任何失败记录。接着查看深信服终端检测响应平台（EDR）的日志，发现关键信息：</p>
-<pre class="codehilite"><code>拦截原因: 检测到可疑的父子进程关系
-父进程: python.exe
-子进程: powershell.exe
-策略: 禁止脚本解释器通过父进程创建子进程
-</code></pre>
-
-<h4 id="_4">第三步：确认拦截源</h4>
-<p>在深信服安全客户端中，找到 <strong>终端防护</strong> → <strong>行为检测</strong> → <strong>隔离策略</strong>，可以看到一条规则：</p>
-<blockquote>
-<p><strong>策略名称</strong>: 防勒索软件-脚本引擎防护<br />
-<strong>规则</strong>: 禁止 <code>python.exe</code>、<code>wscript.exe</code>、<code>cscript.exe</code> 等解释器创建子进程</p>
-</blockquote>
-<p>这条策略本意是防止勒索软件利用脚本解释器执行恶意命令，但误伤了正常的 Python 自动化调用。</p>
-<h3 id="_5">解决方案</h3>
-<h4 id="_6">方案一：调整深信服策略（推荐）</h4>
-<p>联系 IT 管理员，在深信服 EDR 管理后台中，按以下步骤操作：</p>
-<ol>
-<li>登录深信服 EDR 控制台</li>
-<li>进入 <strong>策略中心</strong> → <strong>终端防护策略</strong> → <strong>行为检测</strong></li>
-<li>找到 "防勒索软件-脚本引擎防护" 策略</li>
-<li>在 <strong>白名单</strong> 中添加例外规则：</li>
-<li>父进程: <code>python.exe</code>（或具体路径）</li>
-<li>子进程: <code>powershell.exe</code>、<code>cmd.exe</code> 等</li>
-<li>条件: 仅允许信任的脚本路径</li>
-</ol>
-<p>如果无法添加白名单，可以临时关闭该策略，但只在测试环境操作，生产环境必须走正规流程。</p>
-<h4 id="_7">方案二：绕过子进程调用（临时方案）</h4>
-<p>如果 IT 部门审批需要时间，可以先用以下方式绕过：</p>
-<p><strong>方法1：使用 <code>ctypes</code> 调用 Windows API</strong></p>
-<pre class="codehilite"><code class="language-python">import ctypes
-import os
-
-# 使用 ShellExecute 替代 subprocess
-def run_command_shell_execute(command: str) -&gt; int:
-    &quot;&quot;&quot;
-    使用 ShellExecute 执行命令，绕过进程创建拦截
-    &quot;&quot;&quot;
-    result = ctypes.windll.shell32.ShellExecuteW(
-        None,      # hwnd
-        &quot;open&quot;,    # lpOperation
-        command,   # lpFile
-        None,      # lpParameters
-        None,      # lpDirectory
-        1          # nShowCmd (SW_SHOWNORMAL)
-    )
-    # 返回值 &gt; 32 表示成功
-    return result
-</code></pre>
-
-<p><strong>方法2：通过计划任务执行</strong></p>
-<pre class="codehilite"><code class="language-python">import subprocess
-
-def run_via_scheduled_task(task_name: str, command: str):
-    &quot;&quot;&quot;
-    创建 Windows 计划任务来执行命令，计划任务创建的进程不受解释器拦截策略影响
-    &quot;&quot;&quot;
-    # 创建计划任务
-    create_cmd = (
-        f'schtasks /Create /TN &quot;{task_name}&quot; /TR &quot;{command}&quot; '
-        f'/SC ONCE /ST 00:00 /F'
-    )
-    subprocess.run(create_cmd, shell=True, check=True)
-
-    # 立即运行
-    subprocess.run(f'schtasks /Run /TN &quot;{task_name}&quot;', shell=True, check=True)
-
-    # 删除计划任务
-    subprocess.run(f'schtasks /Delete /TN &quot;{task_name}&quot; /F', shell=True, check=True)
-</code></pre>
-
-<p><strong>方法3：使用 PowerShell 远程执行</strong></p>
-<pre class="codehilite"><code class="language-python">import subprocess
-
-def run_powershell_remote(script_path: str):
-    &quot;&quot;&quot;
-    通过 WinRM 远程执行 PowerShell，不走本地进程创建链
-    &quot;&quot;&quot;
-    ps_command = f&quot;&quot;&quot;
-    Invoke-Command -ComputerName localhost -ScriptBlock {{
-        &amp; &quot;{script_path}&quot;
-    }}
-    &quot;&quot;&quot;
-    subprocess.run(
-        [&quot;powershell.exe&quot;, &quot;-Command&quot;, ps_command],
+def fetch_market_data():
+    # 调用外部行情程序获取数据
+    result = subprocess.run(
+        ['market_data_fetcher.exe', '--symbol', 'BTCUSDT', '--interval', '1m'],
         capture_output=True,
+        text=True,
         timeout=30
     )
-</code></pre>
+    return result.stdout
 
-<p><strong>方法4：改用 Python 原生实现</strong></p>
-<p>如果子进程只是为了执行简单的文件操作或数据处理，尽量用 Python 原生库替代：</p>
-<pre class="codehilite"><code class="language-python"># 替代 PowerShell 的文件复制
-import shutil
-import os
-
-# 原来用 subprocess 调 PowerShell 复制文件
-# subprocess.run([&quot;powershell.exe&quot;, &quot;Copy-Item&quot;, &quot;src.txt&quot;, &quot;dst.txt&quot;])
-
-# 改用 Python 原生
-shutil.copy2(&quot;src.txt&quot;, &quot;dst.txt&quot;)
-</code></pre>
-
-<h4 id="_8">方案三：调整代码架构（长期方案）</h4>
-<p>从架构层面避免频繁创建子进程：</p>
-<pre class="codehilite"><code class="language-python">import subprocess
-import threading
-import queue
-
-class PersistentProcessManager:
-    &quot;&quot;&quot;
-    进程池管理器：复用子进程，减少进程创建频率
-    &quot;&quot;&quot;
-    def __init__(self, command: list, max_workers: int = 3):
-        self.command = command
-        self.processes = queue.Queue()
-        self.lock = threading.Lock()
-
-        for _ in range(max_workers):
-            self._create_process()
-
-    def _create_process(self):
-        proc = subprocess.Popen(
-            self.command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        self.processes.put(proc)
-
-    def execute(self, input_data: str) -&gt; str:
-        &quot;&quot;&quot;
-        从池中获取进程执行命令，执行完放回池中
-        &quot;&quot;&quot;
-        with self.lock:
-            if self.processes.empty():
-                self._create_process()
-            proc = self.processes.get()
-
+if __name__ == '__main__':
+    while True:
         try:
-            stdout, stderr = proc.communicate(input=input_data, timeout=30)
-            return stdout
+            data = fetch_market_data()
+            print(f&quot;获取数据成功: {len(data)} bytes&quot;)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            self._create_process()
-            raise
-        finally:
-            # 检查进程状态，如果还活着就放回池中
-            if proc.poll() is None:
-                self.processes.put(proc)
+            print(&quot;警告: 子进程执行超时&quot;)
+        except Exception as e:
+            print(f&quot;错误: {e}&quot;)
+        time.sleep(5)
 </code></pre>
 
-<p>这样只需要创建少量子进程，大幅降低触发安全策略的概率。</p>
-<h3 id="it">与 IT 部门沟通的建议</h3>
-<p>跟 IT 部门沟通时，注意以下几点：</p>
+<p>运行后出现以下现象：</p>
+<ul>
+<li>脚本卡在<code>subprocess.run()</code>，既不返回也不报错</li>
+<li>任务管理器能看到<code>market_data_fetcher.exe</code>进程，但CPU占用为0</li>
+<li>手动打开PowerShell执行相同命令，PowerShell直接无响应</li>
+<li>关闭深信服安全软件后，一切恢复正常</li>
+</ul>
+<h3 id="_2">排查过程</h3>
+<h4 id="_3">第一步：确认问题范围</h4>
+<p>先写个最小化测试脚本，排除业务代码干扰：</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+# 测试1: 基础命令
+try:
+    result = subprocess.run(['echo', 'hello'], capture_output=True, timeout=5)
+    print(f&quot;echo 执行成功: {result.stdout}&quot;)
+except Exception as e:
+    print(f&quot;echo 执行失败: {e}&quot;)
+
+# 测试2: PowerShell命令
+try:
+    result = subprocess.run(
+        ['powershell', '-Command', 'Get-Process | Select-Object -First 5'],
+        capture_output=True,
+        timeout=10
+    )
+    print(f&quot;PowerShell 执行成功: {result.stdout.decode()}&quot;)
+except Exception as e:
+    print(f&quot;PowerShell 执行失败: {e}&quot;)
+</code></pre>
+
+<p>测试结果：</p>
+<ul>
+<li><code>echo</code>命令正常执行</li>
+<li><code>powershell</code>命令卡死</li>
+<li><code>cmd /c dir</code>正常执行</li>
+<li>任何需要创建新进程的调用都可能被拦截</li>
+</ul>
+<p>这说明问题不是简单的权限问题，而是安全软件对特定进程创建行为的拦截。</p>
+<h4 id="_4">第二步：检查安全软件日志</h4>
+<p>深信服安全软件的管理后台有详细的进程拦截日志。如果你有管理员权限，可以查看：</p>
+<ul>
+<li><strong>终端管理</strong> → <strong>安全日志</strong> → <strong>进程防护日志</strong></li>
+<li>重点关注被拦截的进程路径和操作类型</li>
+</ul>
+<p>日志中会明确显示拦截规则，例如：</p>
+<pre class="codehilite"><code>进程: powershell.exe
+操作: 创建子进程
+目标: cmd.exe
+规则: 禁止PowerShell创建子进程
+</code></pre>
+
+<h4 id="_5">第三步：确认拦截规则</h4>
+<p>深信服的默认策略比较激进，特别是针对PowerShell和WScript这类脚本宿主。常见的拦截场景：</p>
 <ol>
-<li><strong>说明业务场景</strong>：明确告知这是量化交易数据同步的自动化脚本，不是恶意程序</li>
-<li><strong>提供证据</strong>：给出脚本源码、执行日志、深信服拦截记录</li>
-<li><strong>请求白名单</strong>：申请将特定的 Python 脚本路径加入白名单</li>
-<li><strong>提供备选方案</strong>：如果无法加白名单，询问是否有其他合规的替代方案</li>
+<li><strong>PowerShell创建子进程</strong> - 防止恶意脚本通过PowerShell下载执行</li>
+<li><strong>Python调用系统命令</strong> - 防止Python脚本逃逸沙箱</li>
+<li><strong>进程注入行为</strong> - 某些正常的数据采集也会被误判</li>
 </ol>
-<h3 id="_9">最终解决方案</h3>
-<p>我们最终通过 IT 部门在深信服 EDR 后台添加了白名单规则：</p>
-<pre class="codehilite"><code>父进程: D:\Python\python.exe
-子进程: powershell.exe, cmd.exe
-条件: 命令行包含 &quot;D:\scripts\quant\&quot;
+<h3 id="_6">临时解决方案</h3>
+<p>在没有IT管理员权限的情况下，先用以下方法绕过：</p>
+<h4 id="ossystemsubprocess">方案一：使用<code>os.system</code>替代<code>subprocess</code></h4>
+<pre class="codehilite"><code class="language-python">import os
+
+# 使用os.system替代subprocess.run
+os.system('market_data_fetcher.exe --symbol BTCUSDT --interval 1m')
+
+# 如果需要获取输出，重定向到文件
+os.system('market_data_fetcher.exe --symbol BTCUSDT --interval 1m &gt; output.txt')
 </code></pre>
 
-<p>同时在代码中做了优化：
-- 用 <code>subprocess.run</code> 替代 <code>Popen</code>，减少进程泄漏风险
-- 增加超时和重试机制
-- 对子进程输出做编码处理，避免乱码</p>
+<p>注意：<code>os.system</code>有命令注入风险，且无法直接获取输出，仅作临时方案。</p>
+<h4 id="cmd">方案二：通过cmd中转</h4>
 <pre class="codehilite"><code class="language-python">import subprocess
-import time
-from typing import Tuple
 
-def run_powershell_safe(script_path: str, timeout: int = 30, retries: int = 3) -&gt; Tuple[bool, str]:
-    &quot;&quot;&quot;
-    安全的 PowerShell 执行函数，包含超时和重试
-    &quot;&quot;&quot;
-    for attempt in range(retries):
-        try:
-            result = subprocess.run(
-                [
-                    &quot;powershell.exe&quot;,
-                    &quot;-ExecutionPolicy&quot;, &quot;Bypass&quot;,
-                    &quot;-NoProfile&quot;,
-                    &quot;-File&quot;, script_path
-                ],
-                capture_output=True,
-                text=True,
-                encoding=&quot;utf-8&quot;,
-                errors=&quot;replace&quot;,
-                timeout=timeout
-            )
+def run_with_cmd(command):
+    &quot;&quot;&quot;通过cmd.exe中转执行命令&quot;&quot;&quot;
+    # 将命令包装为cmd /c的形式
+    cmd_command = f'cmd /c {command}'
 
-            if result.returncode == 0:
-                return True, result.stdout
-            else:
-                return False, result.stderr
-
-        except subprocess.TimeoutExpired:
-            print(f&quot;Attempt {attempt + 1}: Timeout, retrying...&quot;)
-            time.sleep(2)
-
-    return False, &quot;All retries failed&quot;
+    try:
+        result = subprocess.run(
+            cmd_command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        return &quot;执行超时&quot;
 
 # 使用示例
-success, output = run_powershell_safe(&quot;fetch_data.ps1&quot;, timeout=60, retries=3)
-if success:
-    print(f&quot;执行成功: {output}&quot;)
-else:
-    print(f&quot;执行失败: {output}&quot;)
+output = run_with_cmd('market_data_fetcher.exe --symbol BTCUSDT --interval 1m')
+print(output)
 </code></pre>
 
-<h3 id="_10">总结</h3>
-<p>深信服安全软件拦截子进程的问题，核心在于其 "防勒索软件-脚本引擎防护" 策略对解释器创建子进程的限制。解决方案优先级：</p>
+<p>这个方法利用<code>cmd.exe</code>作为中间层，很多时候能绕过安全软件对直接创建子进程的拦截。</p>
+<h4 id="ctypeswindows-api">方案三：使用<code>ctypes</code>调用Windows API</h4>
+<pre class="codehilite"><code class="language-python">import ctypes
+import ctypes.wintypes
+
+def run_powershell_script(script):
+    &quot;&quot;&quot;使用Windows API直接执行PowerShell脚本&quot;&quot;&quot;
+    # 创建进程的Windows API
+    CREATE_NO_WINDOW = 0x08000000
+
+    class STARTUPINFO(ctypes.Structure):
+        _fields_ = [(&quot;cb&quot;, ctypes.wintypes.DWORD),
+                    (&quot;lpReserved&quot;, ctypes.wintypes.LPWSTR),
+                    (&quot;lpDesktop&quot;, ctypes.wintypes.LPWSTR),
+                    (&quot;lpTitle&quot;, ctypes.wintypes.LPWSTR),
+                    (&quot;dwX&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwY&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwXSize&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwYSize&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwXCountChars&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwYCountChars&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwFillAttribute&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwFlags&quot;, ctypes.wintypes.DWORD),
+                    (&quot;wShowWindow&quot;, ctypes.wintypes.WORD),
+                    (&quot;cbReserved2&quot;, ctypes.wintypes.WORD),
+                    (&quot;lpReserved2&quot;, ctypes.POINTER(ctypes.c_byte)),
+                    (&quot;hStdInput&quot;, ctypes.wintypes.HANDLE),
+                    (&quot;hStdOutput&quot;, ctypes.wintypes.HANDLE),
+                    (&quot;hStdError&quot;, ctypes.wintypes.HANDLE)]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [(&quot;hProcess&quot;, ctypes.wintypes.HANDLE),
+                    (&quot;hThread&quot;, ctypes.wintypes.HANDLE),
+                    (&quot;dwProcessId&quot;, ctypes.wintypes.DWORD),
+                    (&quot;dwThreadId&quot;, ctypes.wintypes.DWORD)]
+
+    # 构造命令
+    command = f'powershell -Command &quot;{script}&quot;'
+
+    # 创建进程
+    si = STARTUPINFO()
+    pi = PROCESS_INFORMATION()
+    si.cb = ctypes.sizeof(STARTUPINFO)
+
+    success = ctypes.windll.kernel32.CreateProcessW(
+        None,  # 应用程序名
+        command,  # 命令行
+        None,  # 进程安全属性
+        None,  # 线程安全属性
+        False,  # 句柄继承
+        CREATE_NO_WINDOW,  # 创建标志
+        None,  # 环境变量
+        None,  # 当前目录
+        ctypes.byref(si),
+        ctypes.byref(pi)
+    )
+
+    if not success:
+        error_code = ctypes.windll.kernel32.GetLastError()
+        return f&quot;创建进程失败，错误码: {error_code}&quot;
+
+    # 等待进程结束
+    ctypes.windll.kernel32.WaitForSingleObject(pi.hProcess, 30000)
+
+    # 关闭句柄
+    ctypes.windll.kernel32.CloseHandle(pi.hProcess)
+    ctypes.windll.kernel32.CloseHandle(pi.hThread)
+
+    return &quot;执行完成&quot;
+
+# 使用示例
+result = run_powershell_script(&quot;Get-Process | Select-Object -First 5&quot;)
+print(result)
+</code></pre>
+
+<p>这个方案绕过常规的进程创建API，直接调用Win32 API，成功率较高。</p>
+<h4 id="_7">方案四：使用计划任务</h4>
+<pre class="codehilite"><code class="language-python">import subprocess
+import xml.etree.ElementTree as ET
+
+def create_scheduled_task(task_name, command, args):
+    &quot;&quot;&quot;通过计划任务执行命令&quot;&quot;&quot;
+    # 创建计划任务XML
+    task_xml = f'''&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-16&quot;?&gt;
+&lt;Task version=&quot;1.2&quot; xmlns=&quot;http://schemas.microsoft.com/windows/2004/02/mit/task&quot;&gt;
+  &lt;Triggers&gt;
+    &lt;CalendarTrigger&gt;
+      &lt;StartBoundary&gt;2024-01-01T00:00:00&lt;/StartBoundary&gt;
+      &lt;Enabled&gt;true&lt;/Enabled&gt;
+      &lt;ScheduleByDay&gt;
+        &lt;DaysInterval&gt;1&lt;/DaysInterval&gt;
+      &lt;/ScheduleByDay&gt;
+    &lt;/CalendarTrigger&gt;
+  &lt;/Triggers&gt;
+  &lt;Principals&gt;
+    &lt;Principal id=&quot;Author&quot;&gt;
+      &lt;LogonType&gt;InteractiveToken&lt;/LogonType&gt;
+      &lt;RunLevel&gt;LeastPrivilege&lt;/RunLevel&gt;
+    &lt;/Principal&gt;
+  &lt;/Principals&gt;
+  &lt;Settings&gt;
+    &lt;MultipleInstancesPolicy&gt;IgnoreNew&lt;/MultipleInstancesPolicy&gt;
+    &lt;DisallowStartIfOnBatteries&gt;false&lt;/DisallowStartIfOnBatteries&gt;
+    &lt;StopIfGoingOnBatteries&gt;false&lt;/StopIfGoingOnBatteries&gt;
+    &lt;AllowHardTerminate&gt;true&lt;/AllowHardTerminate&gt;
+    &lt;StartWhenAvailable&gt;true&lt;/StartWhenAvailable&gt;
+    &lt;RunOnlyIfNetworkAvailable&gt;false&lt;/RunOnlyIfNetworkAvailable&gt;
+  &lt;/Settings&gt;
+  &lt;Actions&gt;
+    &lt;Exec&gt;
+      &lt;Command&gt;{command}&lt;/Command&gt;
+      &lt;Arguments&gt;{args}&lt;/Arguments&gt;
+    &lt;/Exec&gt;
+  &lt;/Actions&gt;
+&lt;/Task&gt;'''
+
+    # 保存XML文件
+    with open(f'{task_name}.xml', 'w', encoding='utf-16') as f:
+        f.write(task_xml)
+
+    # 导入计划任务
+    subprocess.run(['schtasks', '/Create', '/TN', task_name, '/XML', f'{task_name}.xml', '/F'],
+                  capture_output=True, text=True)
+
+    # 立即运行
+    subprocess.run(['schtasks', '/Run', '/TN', task_name],
+                  capture_output=True, text=True)
+
+    # 清理
+    subprocess.run(['schtasks', '/Delete', '/TN', task_name, '/F'],
+                  capture_output=True, text=True)
+    import os
+    os.remove(f'{task_name}.xml')
+
+# 使用示例
+create_scheduled_task('data_fetch', 'market_data_fetcher.exe', '--symbol BTCUSDT --interval 1m')
+</code></pre>
+
+<p>计划任务由系统服务启动，通常能绕过安全软件的进程创建拦截。</p>
+<h3 id="it">与IT部门沟通建议</h3>
+<p>临时方案只能应急，根本解决需要IT部门调整安全策略。建议这样沟通：</p>
+<h4 id="1">1. 准备证据</h4>
+<pre class="codehilite"><code class="language-python"># 收集拦截证据的脚本
+import subprocess
+import datetime
+import json
+
+def collect_evidence():
+    &quot;&quot;&quot;收集安全软件拦截的证据&quot;&quot;&quot;
+    evidence = {
+        'timestamp': datetime.datetime.now().isoformat(),
+        'test_cases': []
+    }
+
+    # 测试用例1: Python直接调用subprocess
+    try:
+        result = subprocess.run(['powershell', '-Command', 'echo test'],
+                              capture_output=True, timeout=5)
+        evidence['test_cases'].append({
+            'name': 'python_subprocess_powershell',
+            'status': 'success',
+            'output': result.stdout.decode()
+        })
+    except Exception as e:
+        evidence['test_cases'].append({
+            'name': 'python_subprocess_powershell',
+            'status': 'failed',
+            'error': str(e)
+        })
+
+    # 测试用例2: 通过cmd中转
+    try:
+        result = subprocess.run(['cmd', '/c', 'echo test'],
+                              capture_output=True, timeout=5)
+        evidence['test_cases'].append({
+            'name': 'python_subprocess_cmd',
+            'status': 'success',
+            'output': result.stdout.decode()
+        })
+    except Exception as e:
+        evidence['test_cases'].append({
+            'name': 'python_subprocess_cmd',
+            'status': 'failed',
+            'error': str(e)
+        })
+
+    # 保存证据
+    with open('intercept_evidence.json', 'w', encoding='utf-8') as f:
+        json.dump(evidence, f, ensure_ascii=False, indent=2)
+
+    print(f&quot;证据已保存到 intercept_evidence.json&quot;)
+    print(json.dumps(evidence, ensure_ascii=False, indent=2))
+
+if __name__ == '__main__':
+    collect_evidence()
+</code></pre>
+
+<h4 id="2">2. 沟通要点</h4>
+<ul>
+<li><strong>明确业务需求</strong>：说明Python脚本是量化交易系统的一部分，需要调用外部程序获取行情数据</li>
+<li><strong>提供测试结果</strong>：展示证据文件，说明哪些操作被拦截，哪些正常</li>
+<li><strong>请求白名单</strong>：建议将Python解释器和常用工具加入白名单</li>
+<li><strong>最小权限原则</strong>：请求调整安全策略，而不是完全关闭安全软件</li>
+</ul>
+<h3 id="_8">总结</h3>
+<p>深信服安全软件对子进程创建的拦截确实给自动化脚本带来不少麻烦。从排查到解决，核心思路是：</p>
 <ol>
-<li><strong>首选</strong>：联系 IT 部门添加白名单</li>
-<li><strong>临时</strong>：使用 <code>ctypes</code> 或计划任务绕过</li>
-<li><strong>长期</strong>：架构层面减少子进程创建频率</li>
+<li><strong>确认问题范围</strong> - 用最小化测试脚本定位被拦截的操作</li>
+<li><strong>查看安全日志</strong> - 获取具体的拦截规则</li>
+<li><strong>临时绕过</strong> - 使用<code>os.system</code>、cmd中转、Win32 API或计划任务</li>
+<li><strong>根本解决</strong> - 与IT部门沟通，调整安全策略</li>
 </ol>
-<p>遇到类似问题，先看事件查看器和安全软件日志，确认拦截源，再针对性解决。不要盲目改代码，浪费时间。</p>
+<p>如果你的环境里也有类似的安全软件拦截问题，建议优先走正规渠道解决。临时方案只是权宜之计，长期运行还是需要稳定的环境。</p>
 <hr />
-<p>更多关于 Python 自动化与量化交易的实战技巧，请持续关注本站。</p>
+<p>更多Python量化与自动化实战内容，请关注本站。</p>
             </div>
             <div class="post-tags"><span class="tag-badge">深信服</span><span class="tag-badge">Sangfor</span><span class="tag-badge">安全软件</span><span class="tag-badge">子进程</span><span class="tag-badge">拦截</span></div>
             <div class="post-footer">
