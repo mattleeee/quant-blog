@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>深信服安全软件拦截子进程的排查与解决方案 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="深信服安全软件拦截子进程的排查与解决方案
+
+最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，subprocess 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任...">
+    <meta name="keywords" content="深信服,Sangfor,安全软件,子进程,拦截">
+    <meta property="og:title" content="深信服安全软件拦截子进程的排查与解决方案">
+    <meta property="og:description" content="深信服安全软件拦截子进程的排查与解决方案
+
+最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，subprocess 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/20.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>深信服安全软件拦截子进程的排查与解决方案</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-22</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>最近在部署一个自动化交易数据同步脚本时，遇到一个诡异的问题：脚本在本地环境跑得好好的，一旦放到指定服务器上，<code>subprocess</code> 调用的 PowerShell 命令就无响应，进程卡死，日志里没有任何报错。排查了半天，最后发现是深信服（Sangfor）的安全软件在作祟。</p>
+<p>这篇文章记录完整的排查过程和解决方案，希望能帮到遇到类似问题的朋友。</p>
+<h3 id="_1">问题现象</h3>
+<p>脚本逻辑很简单：用 <code>subprocess.Popen</code> 调用 PowerShell 脚本拉取数据，然后处理结果。</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import time
+
+# 调用 PowerShell 脚本
+proc = subprocess.Popen(
+    [&quot;powershell.exe&quot;, &quot;-ExecutionPolicy&quot;, &quot;Bypass&quot;, &quot;-File&quot;, &quot;fetch_data.ps1&quot;],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    encoding=&quot;utf-8&quot;
+)
+
+# 等待执行完成
+try:
+    stdout, stderr = proc.communicate(timeout=60)
+    print(f&quot;STDOUT: {stdout}&quot;)
+    print(f&quot;STDERR: {stderr}&quot;)
+except subprocess.TimeoutExpired:
+    print(&quot;Timeout: PowerShell 进程无响应&quot;)
+    proc.kill()
+</code></pre>
+
+<p><strong>现象描述：</strong>
+- 脚本运行到 <code>subprocess.Popen</code> 后，<code>communicate</code> 一直阻塞，直到 timeout
+- PowerShell 进程在任务管理器里能看到，但 CPU 和内存占用为 0，像是被挂起
+- 手动在命令行运行同样的 PowerShell 命令，一切正常
+- 换用 <code>os.system</code> 或 <code>subprocess.run</code>，问题依旧</p>
+<h3 id="_2">排查过程</h3>
+<h4 id="python">第一步：确认 Python 环境</h4>
+<p>先排除 Python 环境问题。用最小化代码测试：</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+# 最简单的子进程测试
+result = subprocess.run(
+    [&quot;cmd.exe&quot;, &quot;/c&quot;, &quot;echo hello&quot;],
+    capture_output=True,
+    text=True,
+    timeout=10
+)
+print(f&quot;Return code: {result.returncode}&quot;)
+print(f&quot;Output: {result.stdout}&quot;)
+</code></pre>
+
+<p>结果：<code>cmd.exe</code> 也被拦截了，连 <code>echo hello</code> 都执行不了。这说明不是 PowerShell 脚本的问题，而是所有子进程都被拦截。</p>
+<h4 id="_3">第二步：检查系统日志</h4>
+<p>打开 Windows 事件查看器，查看 <strong>应用程序</strong> 和 <strong>安全</strong> 日志，发现以下记录：</p>
+<pre class="codehilite"><code>事件 ID: 4688（进程创建）
+进程名称: python.exe
+新进程名称: powershell.exe
+创建者进程 ID: 0x1234
+任务类别: 进程创建
+</code></pre>
+
+<p>但没有任何失败记录。接着查看深信服终端检测响应平台（EDR）的日志，发现关键信息：</p>
+<pre class="codehilite"><code>拦截原因: 检测到可疑的父子进程关系
+父进程: python.exe
+子进程: powershell.exe
+策略: 禁止脚本解释器通过父进程创建子进程
+</code></pre>
+
+<h4 id="_4">第三步：确认拦截源</h4>
+<p>在深信服安全客户端中，找到 <strong>终端防护</strong> → <strong>行为检测</strong> → <strong>隔离策略</strong>，可以看到一条规则：</p>
+<blockquote>
+<p><strong>策略名称</strong>: 防勒索软件-脚本引擎防护<br />
+<strong>规则</strong>: 禁止 <code>python.exe</code>、<code>wscript.exe</code>、<code>cscript.exe</code> 等解释器创建子进程</p>
+</blockquote>
+<p>这条策略本意是防止勒索软件利用脚本解释器执行恶意命令，但误伤了正常的 Python 自动化调用。</p>
+<h3 id="_5">解决方案</h3>
+<h4 id="_6">方案一：调整深信服策略（推荐）</h4>
+<p>联系 IT 管理员，在深信服 EDR 管理后台中，按以下步骤操作：</p>
+<ol>
+<li>登录深信服 EDR 控制台</li>
+<li>进入 <strong>策略中心</strong> → <strong>终端防护策略</strong> → <strong>行为检测</strong></li>
+<li>找到 "防勒索软件-脚本引擎防护" 策略</li>
+<li>在 <strong>白名单</strong> 中添加例外规则：</li>
+<li>父进程: <code>python.exe</code>（或具体路径）</li>
+<li>子进程: <code>powershell.exe</code>、<code>cmd.exe</code> 等</li>
+<li>条件: 仅允许信任的脚本路径</li>
+</ol>
+<p>如果无法添加白名单，可以临时关闭该策略，但只在测试环境操作，生产环境必须走正规流程。</p>
+<h4 id="_7">方案二：绕过子进程调用（临时方案）</h4>
+<p>如果 IT 部门审批需要时间，可以先用以下方式绕过：</p>
+<p><strong>方法1：使用 <code>ctypes</code> 调用 Windows API</strong></p>
+<pre class="codehilite"><code class="language-python">import ctypes
+import os
+
+# 使用 ShellExecute 替代 subprocess
+def run_command_shell_execute(command: str) -&gt; int:
+    &quot;&quot;&quot;
+    使用 ShellExecute 执行命令，绕过进程创建拦截
+    &quot;&quot;&quot;
+    result = ctypes.windll.shell32.ShellExecuteW(
+        None,      # hwnd
+        &quot;open&quot;,    # lpOperation
+        command,   # lpFile
+        None,      # lpParameters
+        None,      # lpDirectory
+        1          # nShowCmd (SW_SHOWNORMAL)
+    )
+    # 返回值 &gt; 32 表示成功
+    return result
+</code></pre>
+
+<p><strong>方法2：通过计划任务执行</strong></p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+def run_via_scheduled_task(task_name: str, command: str):
+    &quot;&quot;&quot;
+    创建 Windows 计划任务来执行命令，计划任务创建的进程不受解释器拦截策略影响
+    &quot;&quot;&quot;
+    # 创建计划任务
+    create_cmd = (
+        f'schtasks /Create /TN &quot;{task_name}&quot; /TR &quot;{command}&quot; '
+        f'/SC ONCE /ST 00:00 /F'
+    )
+    subprocess.run(create_cmd, shell=True, check=True)
+
+    # 立即运行
+    subprocess.run(f'schtasks /Run /TN &quot;{task_name}&quot;', shell=True, check=True)
+
+    # 删除计划任务
+    subprocess.run(f'schtasks /Delete /TN &quot;{task_name}&quot; /F', shell=True, check=True)
+</code></pre>
+
+<p><strong>方法3：使用 PowerShell 远程执行</strong></p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+def run_powershell_remote(script_path: str):
+    &quot;&quot;&quot;
+    通过 WinRM 远程执行 PowerShell，不走本地进程创建链
+    &quot;&quot;&quot;
+    ps_command = f&quot;&quot;&quot;
+    Invoke-Command -ComputerName localhost -ScriptBlock {{
+        &amp; &quot;{script_path}&quot;
+    }}
+    &quot;&quot;&quot;
+    subprocess.run(
+        [&quot;powershell.exe&quot;, &quot;-Command&quot;, ps_command],
+        capture_output=True,
+        timeout=30
+    )
+</code></pre>
+
+<p><strong>方法4：改用 Python 原生实现</strong></p>
+<p>如果子进程只是为了执行简单的文件操作或数据处理，尽量用 Python 原生库替代：</p>
+<pre class="codehilite"><code class="language-python"># 替代 PowerShell 的文件复制
+import shutil
+import os
+
+# 原来用 subprocess 调 PowerShell 复制文件
+# subprocess.run([&quot;powershell.exe&quot;, &quot;Copy-Item&quot;, &quot;src.txt&quot;, &quot;dst.txt&quot;])
+
+# 改用 Python 原生
+shutil.copy2(&quot;src.txt&quot;, &quot;dst.txt&quot;)
+</code></pre>
+
+<h4 id="_8">方案三：调整代码架构（长期方案）</h4>
+<p>从架构层面避免频繁创建子进程：</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import threading
+import queue
+
+class PersistentProcessManager:
+    &quot;&quot;&quot;
+    进程池管理器：复用子进程，减少进程创建频率
+    &quot;&quot;&quot;
+    def __init__(self, command: list, max_workers: int = 3):
+        self.command = command
+        self.processes = queue.Queue()
+        self.lock = threading.Lock()
+
+        for _ in range(max_workers):
+            self._create_process()
+
+    def _create_process(self):
+        proc = subprocess.Popen(
+            self.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        self.processes.put(proc)
+
+    def execute(self, input_data: str) -&gt; str:
+        &quot;&quot;&quot;
+        从池中获取进程执行命令，执行完放回池中
+        &quot;&quot;&quot;
+        with self.lock:
+            if self.processes.empty():
+                self._create_process()
+            proc = self.processes.get()
+
+        try:
+            stdout, stderr = proc.communicate(input=input_data, timeout=30)
+            return stdout
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self._create_process()
+            raise
+        finally:
+            # 检查进程状态，如果还活着就放回池中
+            if proc.poll() is None:
+                self.processes.put(proc)
+</code></pre>
+
+<p>这样只需要创建少量子进程，大幅降低触发安全策略的概率。</p>
+<h3 id="it">与 IT 部门沟通的建议</h3>
+<p>跟 IT 部门沟通时，注意以下几点：</p>
+<ol>
+<li><strong>说明业务场景</strong>：明确告知这是量化交易数据同步的自动化脚本，不是恶意程序</li>
+<li><strong>提供证据</strong>：给出脚本源码、执行日志、深信服拦截记录</li>
+<li><strong>请求白名单</strong>：申请将特定的 Python 脚本路径加入白名单</li>
+<li><strong>提供备选方案</strong>：如果无法加白名单，询问是否有其他合规的替代方案</li>
+</ol>
+<h3 id="_9">最终解决方案</h3>
+<p>我们最终通过 IT 部门在深信服 EDR 后台添加了白名单规则：</p>
+<pre class="codehilite"><code>父进程: D:\Python\python.exe
+子进程: powershell.exe, cmd.exe
+条件: 命令行包含 &quot;D:\scripts\quant\&quot;
+</code></pre>
+
+<p>同时在代码中做了优化：
+- 用 <code>subprocess.run</code> 替代 <code>Popen</code>，减少进程泄漏风险
+- 增加超时和重试机制
+- 对子进程输出做编码处理，避免乱码</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import time
+from typing import Tuple
+
+def run_powershell_safe(script_path: str, timeout: int = 30, retries: int = 3) -&gt; Tuple[bool, str]:
+    &quot;&quot;&quot;
+    安全的 PowerShell 执行函数，包含超时和重试
+    &quot;&quot;&quot;
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(
+                [
+                    &quot;powershell.exe&quot;,
+                    &quot;-ExecutionPolicy&quot;, &quot;Bypass&quot;,
+                    &quot;-NoProfile&quot;,
+                    &quot;-File&quot;, script_path
+                ],
+                capture_output=True,
+                text=True,
+                encoding=&quot;utf-8&quot;,
+                errors=&quot;replace&quot;,
+                timeout=timeout
+            )
+
+            if result.returncode == 0:
+                return True, result.stdout
+            else:
+                return False, result.stderr
+
+        except subprocess.TimeoutExpired:
+            print(f&quot;Attempt {attempt + 1}: Timeout, retrying...&quot;)
+            time.sleep(2)
+
+    return False, &quot;All retries failed&quot;
+
+# 使用示例
+success, output = run_powershell_safe(&quot;fetch_data.ps1&quot;, timeout=60, retries=3)
+if success:
+    print(f&quot;执行成功: {output}&quot;)
+else:
+    print(f&quot;执行失败: {output}&quot;)
+</code></pre>
+
+<h3 id="_10">总结</h3>
+<p>深信服安全软件拦截子进程的问题，核心在于其 "防勒索软件-脚本引擎防护" 策略对解释器创建子进程的限制。解决方案优先级：</p>
+<ol>
+<li><strong>首选</strong>：联系 IT 部门添加白名单</li>
+<li><strong>临时</strong>：使用 <code>ctypes</code> 或计划任务绕过</li>
+<li><strong>长期</strong>：架构层面减少子进程创建频率</li>
+</ol>
+<p>遇到类似问题，先看事件查看器和安全软件日志，确认拦截源，再针对性解决。不要盲目改代码，浪费时间。</p>
+<hr />
+<p>更多关于 Python 自动化与量化交易的实战技巧，请持续关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">深信服</span><span class="tag-badge">Sangfor</span><span class="tag-badge">安全软件</span><span class="tag-badge">子进程</span><span class="tag-badge">拦截</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
