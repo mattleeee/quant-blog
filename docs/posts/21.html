@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模拟交易系统架构设计：从信号扫描到自动执行 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="模拟交易系统架构设计：从信号扫描到自动执行
+
+在量化交易开发中，模拟交易（Paper Trading）系统是连接策略研究与实盘的关键桥梁。...">
+    <meta name="keywords" content="模拟交易,系统架构,信号扫描,Python">
+    <meta property="og:title" content="模拟交易系统架构设计：从信号扫描到自动执行">
+    <meta property="og:description" content="模拟交易系统架构设计：从信号扫描到自动执行
+
+在量化交易开发中，模拟交易（Paper Trading）系统是连接策略研究与实盘的关键桥梁。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/21.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>模拟交易系统架构设计：从信号扫描到自动执行</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-23</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>在量化交易开发中，模拟交易（Paper Trading）系统是连接策略研究与实盘的关键桥梁。一个设计良好的模拟交易系统，不仅要能验证策略逻辑，还要能暴露实盘中可能遇到的延迟、滑点、数据异常等问题。本文分享一个完整的模拟交易系统架构，涵盖信号扫描、市场分析、交易执行和通知推送四个核心模块。</p>
+<h2 id="_1">系统架构总览</h2>
+<p>整个系统采用模块化设计，各模块通过消息队列或直接调用解耦，便于独立测试和替换。数据流向为：<strong>行情数据源 → 信号扫描模块 → 市场分析模块 → 模拟交易引擎 → 推送通知模块</strong>。</p>
+<pre class="codehilite"><code>+----------------+     +------------------+     +------------------+
+|  行情数据源      | --&gt; |  信号扫描模块     | --&gt; |  市场分析模块     |
+| (WebSocket/API) |     | (Strategy Engine)|     | (Risk Checker)  |
++----------------+     +------------------+     +--------+---------+
+                                                          |
+                                                          v
++----------------+     +------------------+     +------------------+
+|  推送通知模块    | &lt;-- |  模拟交易引擎     | &lt;-- |  订单生成器      |
+| (Telegram/邮件) |     | (Paper Engine)  |     | (Order Creator) |
++----------------+     +------------------+     +------------------+
+</code></pre>
+
+<h2 id="_2">模块职责划分</h2>
+<h3 id="1">1. 信号扫描模块</h3>
+<p>该模块负责监听行情数据，运行策略逻辑，生成交易信号。核心设计要点是<strong>策略与数据解耦</strong>——策略只接收标准化的K线数据，不关心数据来源。</p>
+<pre class="codehilite"><code class="language-python"># signal_scanner.py
+from abc import ABC, abstractmethod
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from datetime import datetime
+
+@dataclass
+class Signal:
+    symbol: str
+    direction: str  # 'long' or 'short'
+    strength: float  # 0.0 to 1.0
+    timestamp: datetime
+    price: float
+    metadata: Dict = field(default_factory=dict)
+
+class BaseStrategy(ABC):
+    &quot;&quot;&quot;策略基类，所有策略必须实现generate_signal方法&quot;&quot;&quot;
+
+    @abstractmethod
+    def generate_signal(self, data: pd.DataFrame) -&gt; Optional[Signal]:
+        &quot;&quot;&quot;输入标准化K线数据，输出交易信号&quot;&quot;&quot;
+        pass
+
+class MovingAverageCrossStrategy(BaseStrategy):
+    &quot;&quot;&quot;双均线交叉策略示例&quot;&quot;&quot;
+
+    def __init__(self, fast_period: int = 5, slow_period: int = 20):
+        self.fast_period = fast_period
+        self.slow_period = slow_period
+
+    def generate_signal(self, data: pd.DataFrame) -&gt; Optional[Signal]:
+        if len(data) &lt; self.slow_period + 1:
+            return None
+
+        fast_ma = data['close'].rolling(self.fast_period).mean()
+        slow_ma = data['close'].rolling(self.slow_period).mean()
+
+        # 金叉
+        if fast_ma.iloc[-2] &lt;= slow_ma.iloc[-2] and fast_ma.iloc[-1] &gt; slow_ma.iloc[-1]:
+            strength = min(abs(fast_ma.iloc[-1] - slow_ma.iloc[-1]) / slow_ma.iloc[-1] * 100, 1.0)
+            return Signal(
+                symbol=data['symbol'].iloc[-1],
+                direction='long',
+                strength=strength,
+                timestamp=datetime.now(),
+                price=data['close'].iloc[-1]
+            )
+        # 死叉
+        elif fast_ma.iloc[-2] &gt;= slow_ma.iloc[-2] and fast_ma.iloc[-1] &lt; slow_ma.iloc[-1]:
+            strength = min(abs(fast_ma.iloc[-1] - slow_ma.iloc[-1]) / slow_ma.iloc[-1] * 100, 1.0)
+            return Signal(
+                symbol=data['symbol'].iloc[-1],
+                direction='short',
+                strength=strength,
+                timestamp=datetime.now(),
+                price=data['close'].iloc[-1]
+            )
+        return None
+
+class SignalScanner:
+    &quot;&quot;&quot;信号扫描器，管理多个策略和数据源&quot;&quot;&quot;
+
+    def __init__(self, strategies: List[BaseStrategy]):
+        self.strategies = strategies
+        self.data_buffer = {}  # symbol -&gt; DataFrame
+
+    def on_bar_update(self, symbol: str, bar: Dict):
+        &quot;&quot;&quot;接收新K线数据，更新缓冲区并运行策略&quot;&quot;&quot;
+        if symbol not in self.data_buffer:
+            self.data_buffer[symbol] = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
+
+        # 添加新bar，保留最近500根
+        new_row = pd.DataFrame([bar])
+        self.data_buffer[symbol] = pd.concat([self.data_buffer[symbol], new_row], ignore_index=True)
+        self.data_buffer[symbol] = self.data_buffer[symbol].tail(500)
+
+        # 运行所有策略
+        signals = []
+        for strategy in self.strategies:
+            signal = strategy.generate_signal(self.data_buffer[symbol])
+            if signal:
+                signals.append(signal)
+
+        return signals
+</code></pre>
+
+<h3 id="2">2. 市场分析模块</h3>
+<p>该模块在信号生成后进行二次确认，主要做风险过滤和仓位计算。我将其设计为可插拔的过滤器链，每个过滤器独立负责一项检查。</p>
+<pre class="codehilite"><code class="language-python"># market_analyzer.py
+from typing import List, Callable
+from dataclasses import dataclass
+import numpy as np
+
+@dataclass
+class AnalysisResult:
+    approved: bool
+    position_size: float
+    risk_score: float
+    reason: str = &quot;&quot;
+
+class MarketAnalyzer:
+    &quot;&quot;&quot;市场分析器，执行一系列过滤器&quot;&quot;&quot;
+
+    def __init__(self, filters: List[Callable] = None):
+        self.filters = filters or []
+
+    def add_filter(self, filter_func: Callable):
+        self.filters.append(filter_func)
+
+    def analyze(self, signal, market_data: dict) -&gt; AnalysisResult:
+        &quot;&quot;&quot;运行所有过滤器，决定是否接受信号&quot;&quot;&quot;
+        for filter_func in self.filters:
+            result = filter_func(signal, market_data)
+            if not result.approved:
+                return result
+        return AnalysisResult(approved=True, position_size=1.0, risk_score=0.0)
+
+# 过滤器示例
+def volatility_filter(signal, market_data, max_volatility=0.05):
+    &quot;&quot;&quot;波动率过滤：拒绝高波动行情&quot;&quot;&quot;
+    symbol = signal.symbol
+    recent_bars = market_data.get(symbol, [])
+    if len(recent_bars) &lt; 20:
+        return AnalysisResult(approved=False, position_size=0, risk_score=1.0, reason=&quot;数据不足&quot;)
+
+    returns = np.diff([bar['close'] for bar in recent_bars[-20:]])
+    volatility = np.std(returns)
+    if volatility &gt; max_volatility:
+        return AnalysisResult(approved=False, position_size=0, risk_score=volatility, 
+                            reason=f&quot;波动率过高: {volatility:.4f}&quot;)
+    return AnalysisResult(approved=True, position_size=1.0, risk_score=volatility)
+
+def volume_filter(signal, market_data, min_volume=1000):
+    &quot;&quot;&quot;成交量过滤：拒绝流动性不足的品种&quot;&quot;&quot;
+    symbol = signal.symbol
+    recent_bars = market_data.get(symbol, [])
+    if not recent_bars:
+        return AnalysisResult(approved=False, position_size=0, risk_score=1.0, reason=&quot;无数据&quot;)
+
+    avg_volume = np.mean([bar['volume'] for bar in recent_bars[-10:]])
+    if avg_volume &lt; min_volume:
+        return AnalysisResult(approved=False, position_size=0, risk_score=1.0, 
+                            reason=f&quot;成交量不足: {avg_volume:.0f}&quot;)
+    return AnalysisResult(approved=True, position_size=1.0, risk_score=0.0)
+</code></pre>
+
+<h3 id="3">3. 模拟交易引擎</h3>
+<p>这是系统的核心。模拟交易引擎需要处理订单状态机、持仓管理和资金核算。关键设计是<strong>使用撮合队列模拟真实撮合延迟</strong>，而不是立即成交。</p>
+<pre class="codehilite"><code class="language-python"># paper_trading_engine.py
+from enum import Enum
+from typing import Dict, List
+import asyncio
+from datetime import datetime
+from dataclasses import dataclass, field
+
+class OrderStatus(Enum):
+    PENDING = &quot;pending&quot;
+    FILLED = &quot;filled&quot;
+    REJECTED = &quot;rejected&quot;
+    CANCELLED = &quot;cancelled&quot;
+
+class OrderType(Enum):
+    MARKET = &quot;market&quot;
+    LIMIT = &quot;limit&quot;
+
+@dataclass
+class Order:
+    order_id: str
+    symbol: str
+    side: str  # 'buy' or 'sell'
+    quantity: float
+    order_type: OrderType
+    price: float = 0.0
+    status: OrderStatus = OrderStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.now)
+    filled_at: datetime = None
+
+@dataclass
+class Position:
+    symbol: str
+    quantity: float = 0.0
+    avg_price: float = 0.0
+
+    def update(self, side: str, price: float, quantity: float):
+        &quot;&quot;&quot;更新持仓&quot;&quot;&quot;
+        if side == 'buy':
+            total_cost = self.avg_price * self.quantity + price * quantity
+            self.quantity += quantity
+            self.avg_price = total_cost / self.quantity if self.quantity &gt; 0 else 0
+        else:
+            self.quantity -= quantity
+            if self.quantity &lt;= 0:
+                self.quantity = 0
+                self.avg_price = 0
+
+class PaperTradingEngine:
+    &quot;&quot;&quot;模拟交易引擎&quot;&quot;&quot;
+
+    def __init__(self, initial_capital: float = 100000.0, fill_delay_ms: int = 100):
+        self.initial_capital = initial_capital
+        self.cash = initial_capital
+        self.positions: Dict[str, Position] = {}
+        self.orders: List[Order] = []
+        self.fill_delay_ms = fill_delay_ms
+
+    async def place_order(self, symbol: str, side: str, quantity: float, 
+                         order_type: OrderType = OrderType.MARKET, price: float = 0.0) -&gt; Order:
+        &quot;&quot;&quot;下单并模拟撮合延迟&quot;&quot;&quot;
+        order = Order(
+            order_id=f&quot;ORD{len(self.orders)+1:06d}&quot;,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            price=price
+        )
+        self.orders.append(order)
+
+        # 模拟撮合延迟
+        await asyncio.sleep(self.fill_delay_ms / 1000)
+
+        # 市价单直接成交，限价单检查价格
+        if order.order_type == OrderType.MARKET:
+            order.status = OrderStatus.FILLED
+            order.filled_at = datetime.now()
+            self._execute_fill(order, order.price if order.price &gt; 0 else self._get_market_price(symbol))
+        else:
+            # 限价单需要外部触发价格检查
+            order.status = OrderStatus.PENDING
+
+        return order
+
+    def _execute_fill(self, order: Order, fill_price: float):
+        &quot;&quot;&quot;执行成交，更新账户&quot;&quot;&quot;
+        # 检查资金
+        cost = fill_price * order.quantity
+        if order.side == 'buy' and cost &gt; self.cash:
+            order.status = OrderStatus.REJECTED
+            return
+
+        # 更新持仓
+        if order.symbol not in self.positions:
+            self.positions[order.symbol] = Position(symbol=order.symbol)
+
+        self.positions[order.symbol].update(order.side, fill_price, order.quantity)
+
+        # 更新现金
+        if order.side == 'buy':
+            self.cash -= cost
+        else:
+            self.cash += cost
+
+        order.status = OrderStatus.FILLED
+        order.filled_at = datetime.now()
+
+    def _get_market_price(self, symbol: str) -&gt; float:
+        &quot;&quot;&quot;获取市场价，实际系统中从行情模块获取&quot;&quot;&quot;
+        # 简化实现
+        return 100.0
+
+    def get_portfolio_value(self, market_prices: Dict[str, float]) -&gt; float:
+        &quot;&quot;&quot;计算总资产&quot;&quot;&quot;
+        total = self.cash
+        for symbol, pos in self.positions.items():
+            if symbol in market_prices:
+                total += pos.quantity * market_prices[symbol]
+        return total
+
+# 使用示例
+async def main():
+    engine = PaperTradingEngine(initial_capital=50000)
+
+    # 模拟下单
+    order = await engine.place_order(&quot;BTCUSDT&quot;, &quot;buy&quot;, 0.1, OrderType.MARKET, price=40000)
+    print(f&quot;Order {order.order_id}: {order.status}&quot;)
+
+    order2 = await engine.place_order(&quot;BTCUSDT&quot;, &quot;sell&quot;, 0.05, OrderType.MARKET, price=41000)
+    print(f&quot;Order {order2.order_id}: {order2.status}&quot;)
+
+    # 计算总资产
+    market_prices = {&quot;BTCUSDT&quot;: 41000}
+    total = engine.get_portfolio_value(market_prices)
+    print(f&quot;Total portfolio value: {total:.2f}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    asyncio.run(main())
+</code></pre>
+
+<h3 id="4">4. 推送通知模块</h3>
+<p>信号触发和订单成交后需要及时通知。这里设计一个支持多通道的通知管理器，通过异步队列解耦通知发送与业务逻辑。</p>
+<pre class="codehilite"><code class="language-python"># notification.py
+import asyncio
+from typing import Dict, List, Callable
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class Notification:
+    title: str
+    message: str
+    level: str  # 'info', 'warning', 'critical'
+    timestamp: datetime = datetime.now()
+
+class NotificationManager:
+    &quot;&quot;&quot;通知管理器，支持多通道异步发送&quot;&quot;&quot;
+
+    def __init__(self):
+        self.channels: List[Callable] = []
+        self.queue = asyncio.Queue()
+        self._worker_task = None
+
+    def add_channel(self, channel_func: Callable):
+        &quot;&quot;&quot;添加通知通道，如Telegram、邮件、Webhook&quot;&quot;&quot;
+        self.channels.append(channel_func)
+
+    async def start(self):
+        &quot;&quot;&quot;启动后台发送任务&quot;&quot;&quot;
+        self._worker_task = asyncio.create_task(self._worker())
+
+    async def stop(self):
+        &quot;&quot;&quot;停止后台任务&quot;&quot;&quot;
+        if self._worker_task:
+            self._worker_task.cancel()
+
+    async def send(self, title: str, message: str, level: str = &quot;info&quot;):
+        &quot;&quot;&quot;异步发送通知&quot;&quot;&quot;
+        notification = Notification(title=title, message=message, level=level)
+        await self.queue.put(notification)
+
+    async def _worker(self):
+        &quot;&quot;&quot;后台消费队列并发送通知&quot;&quot;&quot;
+        while True:
+            try:
+                notification = await self.queue.get()
+                for channel in self.channels:
+                    try:
+                        await channel(notification)
+                    except Exception as e:
+                        print(f&quot;Channel error: {e}&quot;)
+            except asyncio.CancelledError:
+                break
+
+# 通道实现示例：Telegram
+async def telegram_channel(notification: Notification, bot_token: str, chat_id: str):
+    &quot;&quot;&quot;发送Telegram通知&quot;&quot;&quot;
+    import httpx
+
+    text = f&quot;*{notification.title}*\n{notification.message}\n{notification.timestamp}&quot;
+    url = f&quot;https://api.telegram.org/bot{bot_token}/sendMessage&quot;
+
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json={
+            &quot;chat_id&quot;: chat_id,
+            &quot;text&quot;: text,
+            &quot;parse_mode&quot;: &quot;Markdown&quot;
+        })
+
+# 通道实现示例：Webhook
+async def webhook_channel(notification: Notification, webhook_url: str):
+    &quot;&quot;&quot;发送Webhook通知&quot;&quot;&quot;
+    import httpx
+
+    payload = {
+        &quot;title&quot;: notification.title,
+        &quot;message&quot;: notification.message,
+        &quot;level&quot;: notification.level,
+        &quot;timestamp&quot;: notification.timestamp.isoformat()
+    }
+
+    async with httpx.AsyncClient() as client:
+        await client.post(webhook_url, json=payload)
+
+# 使用示例
+async def notification_demo():
+    manager = NotificationManager()
+
+    # 配置通道
+    manager.add_channel(lambda n: telegram_channel(n, &quot;YOUR_BOT_TOKEN&quot;, &quot;YOUR_CHAT_ID&quot;))
+    manager.add_channel(lambda n: webhook_channel(n, &quot;http://localhost:3000/webhook&quot;))
+
+    await manager.start()
+
+    # 发送通知
+    await manager.send(
+        title=&quot;交易信号触发&quot;,
+        message=&quot;BTCUSDT 出现金叉信号，建议做多&quot;,
+        level=&quot;warning&quot;
+    )
+
+    # 等待发送完成
+    await asyncio.sleep(2)
+    await manager.stop()
+
+if __name__ == &quot;__main__&quot;:
+    asyncio.run(notification_demo())
+</code></pre>
+
+<h2 id="_3">数据流向与关键技术选型</h2>
+<h3 id="_4">数据流时序</h3>
+<ol>
+<li><strong>行情采集</strong>：使用WebSocket接收实时K线，比REST轮询延迟更低</li>
+<li><strong>信号生成</strong>：每次新K线到达时，触发策略计算</li>
+<li><strong>风险评估</strong>：信号产生后同步执行过滤器链</li>
+<li><strong>订单执行</strong>：通过异步队列提交订单，模拟撮合延迟</li>
+<li><strong>通知推送</strong>：订单状态变化或信号产生时异步推送</li>
+</ol>
+<h3 id="_5">技术选型建议</h3>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>推荐方案</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>异步框架</td>
+<td>asyncio + aiohttp</td>
+<td>原生异步，适合IO密集型任务</td>
+</tr>
+<tr>
+<td>数据存储</td>
+<td>SQLite（开发）/ TimescaleDB（生产）</td>
+<td>时序数据用专业数据库</td>
+</tr>
+<tr>
+<td>消息队列</td>
+<td>Redis Streams</td>
+<td>轻量级，支持消费者组</td>
+</tr>
+<tr>
+<td>任务调度</td>
+<td>APScheduler</td>
+<td>支持cron表达式，适合定时任务</td>
+</tr>
+<tr>
+<td>配置管理</td>
+<td>pydantic + .env</td>
+<td>类型安全，环境隔离</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_6">关键设计要点</h3>
+<ol>
+<li><strong>异步边界</strong>：所有IO操作（网络请求、数据库）必须异步化，避免阻塞事件循环</li>
+<li><strong>错误隔离</strong>：每个模块独立try-except，防止单点故障导致整个系统崩溃</li>
+<li><strong>状态持久化</strong>：定期将订单和持仓状态写入数据库，支持系统重启恢复</li>
+<li><strong>回放能力</strong>：记录所有市场数据和交易决策，便于</li>
+</ol>
+            </div>
+            <div class="post-tags"><span class="tag-badge">模拟交易</span><span class="tag-badge">系统架构</span><span class="tag-badge">信号扫描</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
