@@ -7,11 +7,20 @@
         <language>zh-CN</language>
         
         <item>
+            <title>模拟交易系统架构设计：从信号扫描到自动执行</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/21.html</link>
+            <description>模拟交易系统架构设计：从信号扫描到自动执行
+
+在量化交易开发中，模拟交易（Paper Trading）系统是连接策略研究与实盘的关键桥梁。一个设计良好的模拟交易系统，不仅要能验证策略逻辑，还要能暴露实盘中可能遇到的延迟、滑点、数据异常等问题。...</description>
+            <pubDate>2026-08-23</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>深信服安全软件拦截子进程的排查与解决方案</title>
             <link>https://hkcode.eu.org/quant-blog/posts/20.html</link>
             <description>深信服安全软件拦截子进程的排查与解决方案
 
-在量化交易和自动化运维中，subprocess 调用是家常便饭——启动一个数据同步脚本、调用外部行情接口、或者拉起一个辅助进程。...</description>
+最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。排查了一圈，最后定位到是深信服（Sangfor）安全软件在拦截子进程创建。...</description>
             <pubDate>2026-08-22</pubDate>
             <category>Python自动化</category>
         </item>
@@ -181,15 +190,6 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。上个月我把一个数据清洗脚本挂到任务计划里，结果每天凌晨3点准时收到退出码267009的告警邮件。...</description>
             <pubDate>2026-08-05</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/1.html</link>
-            <description>为什么我放弃了守护进程，改用Windows计划任务跑Python脚本
-
-公司电脑装了深信服（Sangfor）安全软件，这玩意对后台进程的监控极其严格。我原本用 supervisord 挂着几个量化数据采集脚本，结果发现每天凌晨脚本都会神秘消失。...</description>
-            <pubDate>2026-08-04</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
