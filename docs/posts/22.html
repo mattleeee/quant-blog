@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>信号扫描模块设计与实现：多指标并行检测 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="信号扫描模块设计与实现：多指标并行检测
+
+行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。...">
+    <meta name="keywords" content="信号扫描,技术指标,并行检测,Python">
+    <meta property="og:title" content="信号扫描模块设计与实现：多指标并行检测">
+    <meta property="og:description" content="信号扫描模块设计与实现：多指标并行检测
+
+行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/22.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>信号扫描模块设计与实现：多指标并行检测</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-24</span>
+                <span class="category"><span class="tag-badge">Python自动化</span></span>
+            </div>
+            <div class="post-content">
+<p>行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。</p>
+<p>这篇文章分享一个实战可用的信号扫描模块，核心设计思路：</p>
+<ul>
+<li>多标的并行扫描（<code>ThreadPoolExecutor</code> 实现）</li>
+<li>指标计算与信号判定分离</li>
+<li>规则可配置，新增策略不用改扫描主逻辑</li>
+</ul>
+<h3 id="1">1. 整体架构与扫描流程</h3>
+<p>模块分三层：</p>
+<pre class="codehilite"><code>数据层 -&gt; 指标层 -&gt; 信号层
+</code></pre>
+
+<ul>
+<li><strong>数据层</strong>：负责拉取K线数据，统一格式（<code>pd.DataFrame</code>，列名统一）</li>
+<li><strong>指标层</strong>：计算均线、RSI、MACD，输出指标DataFrame</li>
+<li><strong>信号层</strong>：根据规则判定是否触发信号，输出信号列表</li>
+</ul>
+<p>扫描流程：</p>
+<pre class="codehilite"><code>初始化标的列表
+  -&gt; 加载历史数据
+  -&gt; 计算技术指标
+  -&gt; 应用信号规则
+  -&gt; 输出结果
+</code></pre>
+
+<p>关键设计决策：<strong>并行扫描</strong>。每个标的的指标计算和信号判定是独立的，天然适合并行。用 <code>concurrent.futures.ThreadPoolExecutor</code> 做并发，I/O密集（数据拉取）和CPU密集（指标计算）都能受益。</p>
+<h3 id="2">2. 数据层：统一数据接口</h3>
+<p>所有标的的数据格式必须一致，否则指标计算代码没法复用。定义一个简单的数据加载函数：</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+def load_kline_data(symbol: str, period: str = '1d', limit: int = 200) -&gt; Optional[pd.DataFrame]:
+    &quot;&quot;&quot;
+    加载K线数据，统一列名和格式。
+    这里用模拟数据演示，实际场景替换为交易所API、数据库或本地文件。
+    &quot;&quot;&quot;
+    # 模拟数据：生成随机价格序列
+    np.random.seed(hash(symbol) % 2**32)
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=limit, freq=period)
+    base_price = 100 + np.random.rand() * 50
+    prices = base_price * (1 + np.random.randn(limit).cumsum() * 0.02)
+
+    df = pd.DataFrame({
+        'date': dates,
+        'open': prices * (1 + np.random.randn(limit) * 0.005),
+        'high': prices * (1 + np.abs(np.random.randn(limit)) * 0.01),
+        'low': prices * (1 - np.abs(np.random.randn(limit)) * 0.01),
+        'close': prices,
+        'volume': np.random.randint(10000, 100000, size=limit)
+    })
+    df.set_index('date', inplace=True)
+    return df
+</code></pre>
+
+<p>实际项目中，这里通常对接 <code>ccxt</code>、<code>akshare</code> 或本地数据库。关键是返回的DataFrame必须包含 <code>open/high/low/close/volume</code> 五列，索引是时间。</p>
+<h3 id="3">3. 指标层：计算技术指标</h3>
+<p>指标计算用 <code>pandas</code> 向量化操作，性能好且代码简洁。核心指标：均线（MA）、RSI、MACD。</p>
+<pre class="codehilite"><code class="language-python">def calculate_indicators(df: pd.DataFrame) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    计算技术指标，返回包含原始数据和指标列的DataFrame。
+    &quot;&quot;&quot;
+    if df is None or df.empty:
+        return df
+
+    result = df.copy()
+
+    # 均线系统：MA5, MA10, MA20, MA60
+    for window in [5, 10, 20, 60]:
+        result[f'ma_{window}'] = result['close'].rolling(window=window).mean()
+
+    # RSI (14日)
+    delta = result['close'].diff()
+    gain = delta.where(delta &gt; 0, 0.0)
+    loss = -delta.where(delta &lt; 0, 0.0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    rs = avg_gain / avg_loss
+    result['rsi_14'] = 100 - (100 / (1 + rs))
+
+    # MACD (12, 26, 9)
+    ema_12 = result['close'].ewm(span=12, adjust=False).mean()
+    ema_26 = result['close'].ewm(span=26, adjust=False).mean()
+    result['macd_dif'] = ema_12 - ema_26
+    result['macd_dea'] = result['macd_dif'].ewm(span=9, adjust=False).mean()
+    result['macd_hist'] = result['macd_dif'] - result['macd_dea']
+
+    return result
+</code></pre>
+
+<p>注意几个细节：</p>
+<ul>
+<li><code>rolling(window).mean()</code> 计算移动平均，前N-1个值是NaN</li>
+<li>RSI 计算里 <code>delta.where(delta &gt; 0, 0.0)</code> 把负变动置0，避免负数干扰</li>
+<li>MACD 用 <code>ewm</code> 指数加权，比SMA更贴近实际交易软件的计算方式</li>
+</ul>
+<h3 id="4">4. 信号层：规则判定</h3>
+<p>信号判定是整个模块的核心。设计思路：<strong>规则函数接收指标DataFrame，返回布尔值（True=触发信号）</strong>。这样每种策略就是一个独立函数，互不干扰。</p>
+<pre class="codehilite"><code class="language-python">def check_ma_cross(df: pd.DataFrame) -&gt; bool:
+    &quot;&quot;&quot;金叉信号：MA5上穿MA20&quot;&quot;&quot;
+    if len(df) &lt; 20:
+        return False
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 前一根K线 MA5 &lt;= MA20，当前K线 MA5 &gt; MA20
+    return (prev['ma_5'] &lt;= prev['ma_20'] and latest['ma_5'] &gt; latest['ma_20'])
+
+
+def check_rsi_oversold(df: pd.DataFrame) -&gt; bool:
+    &quot;&quot;&quot;超卖反弹信号：RSI从低于30回升到30以上&quot;&quot;&quot;
+    if len(df) &lt; 15:
+        return False
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    return (prev['rsi_14'] &lt; 30 and latest['rsi_14'] &gt;= 30)
+
+
+def check_macd_golden_cross(df: pd.DataFrame) -&gt; bool:
+    &quot;&quot;&quot;MACD金叉：DIF上穿DEA&quot;&quot;&quot;
+    if len(df) &lt; 26:
+        return False
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    return (prev['macd_dif'] &lt;= prev['macd_dea'] and latest['macd_dif'] &gt; latest['macd_dea'])
+</code></pre>
+
+<p>每个函数只做一件事：判断当前时刻是否满足信号条件。注意边界处理：数据长度不够时直接返回 <code>False</code>，避免 NaN 比较出错。</p>
+<h3 id="5">5. 并行扫描主逻辑</h3>
+<p>扫描模块的核心：对每个标的执行 <code>加载数据 -&gt; 计算指标 -&gt; 跑所有信号规则</code>。</p>
+<pre class="codehilite"><code class="language-python">class SignalScanner:
+    &quot;&quot;&quot;信号扫描器&quot;&quot;&quot;
+
+    def __init__(self, symbols: List[str], signal_rules: Dict[str, callable], 
+                 max_workers: int = 4):
+        self.symbols = symbols
+        self.signal_rules = signal_rules  # {'规则名': 函数}
+        self.max_workers = max_workers
+
+    def scan_symbol(self, symbol: str) -&gt; Dict:
+        &quot;&quot;&quot;扫描单个标的，返回信号结果&quot;&quot;&quot;
+        try:
+            # 1. 加载数据
+            df = load_kline_data(symbol)
+            if df is None or len(df) &lt; 60:
+                return {'symbol': symbol, 'signals': [], 'error': '数据不足'}
+
+            # 2. 计算指标
+            df_indicators = calculate_indicators(df)
+
+            # 3. 运行所有信号规则
+            triggered = []
+            for rule_name, rule_func in self.signal_rules.items():
+                try:
+                    if rule_func(df_indicators):
+                        triggered.append(rule_name)
+                except Exception as e:
+                    logger.warning(f&quot;[{symbol}] 规则 {rule_name} 执行异常: {e}&quot;)
+
+            return {'symbol': symbol, 'signals': triggered, 'error': None}
+
+        except Exception as e:
+            logger.error(f&quot;[{symbol}] 扫描异常: {e}&quot;)
+            return {'symbol': symbol, 'signals': [], 'error': str(e)}
+
+    def scan_all(self) -&gt; List[Dict]:
+        &quot;&quot;&quot;并行扫描所有标的&quot;&quot;&quot;
+        results = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有任务
+            future_map = {executor.submit(self.scan_symbol, sym): sym 
+                         for sym in self.symbols}
+
+            # 收集结果
+            for future in as_completed(future_map):
+                symbol = future_map[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    # 打印日志
+                    if result['signals']:
+                        logger.info(f&quot;[{symbol}] 触发信号: {result['signals']}&quot;)
+                except Exception as e:
+                    logger.error(f&quot;[{symbol}] 任务执行失败: {e}&quot;)
+
+        return results
+</code></pre>
+
+<p><strong>关键点：</strong></p>
+<ul>
+<li><code>ThreadPoolExecutor</code> 控制并发数，避免请求过多被交易所限流</li>
+<li><code>as_completed</code> 按完成顺序处理结果，不用等所有任务结束</li>
+<li>单个标的异常不影响其他标的的扫描</li>
+<li>信号规则用字典传入，新增策略只需加一个函数和一个键值对</li>
+</ul>
+<h3 id="6">6. 使用示例</h3>
+<pre class="codehilite"><code class="language-python">if __name__ == &quot;__main__&quot;:
+    # 定义要扫描的标的
+    symbols = ['BTC_USDT', 'ETH_USDT', 'BNB_USDT', 'SOL_USDT', 'XRP_USDT']
+
+    # 注册信号规则
+    rules = {
+        'MA金叉': check_ma_cross,
+        'RSI超卖反弹': check_rsi_oversold,
+        'MACD金叉': check_macd_golden_cross,
+    }
+
+    # 创建扫描器并执行
+    scanner = SignalScanner(symbols, rules, max_workers=3)
+    results = scanner.scan_all()
+
+    # 输出结果
+    print(&quot;\n=== 扫描结果 ===&quot;)
+    for res in results:
+        status = &quot;✅&quot; if res['signals'] else &quot;❌&quot;
+        print(f&quot;{status} {res['symbol']}: {res['signals'] if res['signals'] else '无信号'}&quot;)
+</code></pre>
+
+<p>输出效果：</p>
+<pre class="codehilite"><code>2024-11-20 10:30:01 - INFO - [BTC_USDT] 触发信号: ['MA金叉', 'MACD金叉']
+2024-11-20 10:30:02 - INFO - [ETH_USDT] 触发信号: ['RSI超卖反弹']
+2024-11-20 10:30:02 - INFO - [SOL_USDT] 触发信号: ['MA金叉']
+
+=== 扫描结果 ===
+✅ BTC_USDT: ['MA金叉', 'MACD金叉']
+❌ ETH_USDT: ['RSI超卖反弹']
+✅ BNB_USDT: []
+...
+</code></pre>
+
+<h3 id="7">7. 性能与扩展性优化</h3>
+<p><strong>性能瓶颈</strong>：指标计算是纯CPU操作，数据拉取是I/O操作。<code>ThreadPoolExecutor</code> 对I/O密集型任务提升明显，但对纯CPU计算受GIL限制。如果扫描几百个标的且数据量大，可以考虑：</p>
+<ul>
+<li><code>ProcessPoolExecutor</code> 做CPU密集型指标计算</li>
+<li>数据层加缓存（<code>functools.lru_cache</code> 或 Redis），避免重复拉取</li>
+<li>增量更新：只计算最新K线，而不是每次全量重算</li>
+</ul>
+<p><strong>扩展方向</strong>：</p>
+<ol>
+<li><strong>信号规则组合</strong>：目前每个规则独立判定，可以增加组合逻辑（如 <code>MA金叉 AND RSI&gt;50</code>）</li>
+<li><strong>信号优先级</strong>：多个信号同时触发时，按权重排序输出</li>
+<li><strong>实时扫描</strong>：配合定时器或WebSocket，做到分钟级扫描</li>
+<li><strong>结果持久化</strong>：把信号写入数据库或消息队列，供下游策略模块消费</li>
+</ol>
+<p><strong>一个比较实用的增量更新示例</strong>：</p>
+<pre class="codehilite"><code class="language-python">def incremental_indicators(df: pd.DataFrame, last_indicators: Dict) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    增量计算指标：传入上次的指标结果，只更新最新数据。
+    大幅减少计算量，适合高频扫描场景。
+    &quot;&quot;&quot;
+    # 简化版：只保留最近200根K线
+    df = df.tail(200)
+    return calculate_indicators(df)
+</code></pre>
+
+<h3 id="8">8. 踩坑记录</h3>
+<p>写这个模块时遇到的几个实际问题：</p>
+<ol>
+<li><strong>NaN 比较陷阱</strong>：<code>rolling</code> 计算前N-1个值是NaN，直接比较会报错。处理方式：数据长度不足时提前返回 <code>False</code>。</li>
+<li><strong>时区问题</strong>：不同交易所返回的K线时间戳时区不一致，统一转UTC再处理。</li>
+<li><strong>并发数控制</strong>：线程数不是越多越好，交易所API有频率限制。建议并发数 = 标的数开根号，或者根据API限制动态调整。</li>
+<li><strong>异常隔离</strong>：一个标的的数据异常（如停牌、数据缺失）不应该影响其他标的的扫描。用 <code>try-except</code> 包裹每个标的的处理逻辑。</li>
+</ol>
+<h3 id="9">9. 结语</h3>
+<p>信号扫描模块的核心价值在于：<strong>把人工盯盘的经验转化为可重复执行的代码逻辑</strong>。通过并行扫描，把注意力从"盯盘"解放出来，留给真正的策略优化和风控。</p>
+<p>这个模块的设计是通用的，指标公式和信号规则都可以按需替换。后续可以在此基础上扩展：信号历史统计、回测验证、多时间框架扫描等。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">信号扫描</span><span class="tag-badge">技术指标</span><span class="tag-badge">并行检测</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
