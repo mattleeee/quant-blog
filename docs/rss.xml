@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Python请求频率控制：从sleep到令牌桶的演进</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/23.html</link>
+            <description>Python请求频率控制：从sleep到令牌桶的演进
+
+在量化交易和爬虫开发中，API请求频率控制是绕不开的坎。交易所的REST接口通常有严格的限频（rate limit）策略，比如每秒最多5次请求，或者每30秒最多120次。一旦超限，轻则返回429错误，重则封禁IP。...</description>
+            <pubDate>2026-08-25</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>信号扫描模块设计与实现：多指标并行检测</title>
             <link>https://hkcode.eu.org/quant-blog/posts/22.html</link>
             <description>信号扫描模块设计与实现：多指标并行检测
@@ -180,15 +189,6 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
             <description>多任务定时调度的冲突解决：错峰执行方案
 
 定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...</description>
-            <pubDate>2026-08-06</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>SQLite管理定时任务执行记录的最佳实践</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/6.html</link>
-            <description>SQLite管理定时任务执行记录的最佳实践
-
-定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...</description>
             <pubDate>2026-08-06</pubDate>
             <category>定时任务</category>
         </item>
