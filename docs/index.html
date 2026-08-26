@@ -31,52 +31,14 @@
             <h2>最新文章</h2>
             
         <article class="post-card">
-            <h2><a href="/quant-blog/posts/24.html">系统巡检模块设计：自动检查交易系统健康状态</a></h2>
+            <h2><a href="/quant-blog/posts/21.html">模拟交易系统架构设计：从信号扫描到自动执行</a></h2>
             <div class="post-meta">
                 <span class="date">2026-08-26</span>
                 <span class="tag-badge">Python自动化</span>
             </div>
-            <p class="excerpt">系统巡检模块设计：自动检查交易系统健康状态
-
-量化交易系统跑起来容易，稳定运行是另一回事。API断连、数据源停更、磁盘写满、定时任务静默失败——这些问题往往不会第一时间暴露，等到发现时，策略可能已经跑偏了几个小时。
-
-解决思路很简单：写一个巡检模块，定时检查各组件状态，异常时推告警。...</p>
-            <div class="post-tags"><span class="tag-badge">系统巡检</span><span class="tag-badge">健康检查</span><span class="tag-badge">自动化</span></div>
-            <a href="/quant-blog/posts/24.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/quant-blog/posts/23.html">Python请求频率控制：从sleep到令牌桶的演进</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-08-25</span>
-                <span class="tag-badge">Python自动化</span>
-            </div>
-            <p class="excerpt">Python请求频率控制：从sleep到令牌桶的演进
-
-在量化交易和爬虫开发中，API请求频率控制是绕不开的坎。交易所的REST接口通常有严格的限频（rate limit）策略，比如每秒最多5次请求，或者每30秒最多120次。一旦超限，轻则返回429错误，重则封禁IP。...</p>
-            <div class="post-tags"><span class="tag-badge">频率控制</span><span class="tag-badge">令牌桶</span><span class="tag-badge">API限频</span></div>
-            <a href="/quant-blog/posts/23.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/quant-blog/posts/22.html">信号扫描模块设计与实现：多指标并行检测</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-08-24</span>
-                <span class="tag-badge">Python自动化</span>
-            </div>
-            <p class="excerpt">信号扫描模块设计与实现：多指标并行检测
-
-行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。...</p>
-            <div class="post-tags"><span class="tag-badge">信号扫描</span><span class="tag-badge">技术指标</span><span class="tag-badge">并行检测</span></div>
-            <a href="/quant-blog/posts/22.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/quant-blog/posts/21.html">模拟交易系统架构设计：从信号扫描到自动执行</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-08-23</span>
-                <span class="tag-badge">Python自动化</span>
-            </div>
             <p class="excerpt">模拟交易系统架构设计：从信号扫描到自动执行
 
-在量化交易开发中，模拟交易（Paper Trading）系统是连接策略研究与实盘的关键桥梁。一个设计良好的模拟交易系统，不仅要能验证策略逻辑，还要能暴露实盘中可能遇到的延迟、滑点、数据异常等问题。...</p>
+实盘交易系统的核心难点不在策略，而在工程化。信号计算与自动执行之间的延迟、异常处理、状态一致性，每一项都可能让策略失效。本文分享一套完整的模拟交易系统架构，覆盖信号扫描、市场分析、模拟撮合与通知推送四大模块，代码可直接参考改造。...</p>
             <div class="post-tags"><span class="tag-badge">模拟交易</span><span class="tag-badge">系统架构</span><span class="tag-badge">信号扫描</span></div>
             <a href="/quant-blog/posts/21.html" class="read-more">阅读更多</a>
         </article>
