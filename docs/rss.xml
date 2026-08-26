@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>系统巡检模块设计：自动检查交易系统健康状态</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/24.html</link>
+            <description>系统巡检模块设计：自动检查交易系统健康状态
+
+量化交易系统跑起来容易，稳定运行是另一回事。API断连、数据源停更、磁盘写满、定时任务静默失败——这些问题往往不会第一时间暴露，等到发现时，策略可能已经跑偏了几个小时。
+
+解决思路很简单：写一个巡检模块，定时检查各组件状态，异常时推告警。...</description>
+            <pubDate>2026-08-26</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>Python请求频率控制：从sleep到令牌桶的演进</title>
             <link>https://hkcode.eu.org/quant-blog/posts/23.html</link>
             <description>Python请求频率控制：从sleep到令牌桶的演进
@@ -180,15 +191,6 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
             <description>Python脚本超时重试机制设计：失败立即重试，最多3次
 
 定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...</description>
-            <pubDate>2026-08-06</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>多任务定时调度的冲突解决：错峰执行方案</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/5.html</link>
-            <description>多任务定时调度的冲突解决：错峰执行方案
-
-定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...</description>
             <pubDate>2026-08-06</pubDate>
             <category>定时任务</category>
         </item>
