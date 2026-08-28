@@ -7,6 +7,19 @@
         <language>zh-CN</language>
         
         <item>
+            <title>技术指标实战：均线系统的参数选择与信号逻辑</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/26.html</link>
+            <description>均线系统的参数选择与信号逻辑
+
+均线系统可能是量化交易里被研究最多的技术指标，但大多数人只是简单调用 talib.SMA 然后画个图。真正的问题是：均线参数怎么定？信号怎么过滤？ 本文从实战角度拆解这三个问题。
+
+一、均线周期的选择逻辑
+
+均线周期的选择不是拍脑袋，它取决于你的交易周期和持仓目标。...</description>
+            <pubDate>2026-08-28</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>三层验证方法论：参数扫描+月度一致性+稳健性消融</title>
             <link>https://hkcode.eu.org/quant-blog/posts/25.html</link>
             <description>三层验证方法论：参数扫描+月度一致性+稳健性消融
@@ -183,15 +196,6 @@
 
 WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...</description>
             <pubDate>2026-08-07</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>Windows批处理文件中文乱码导致267009错误的解决方案</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/3.html</link>
-            <description>Windows批处理文件中文乱码导致267009错误的解决方案
-
-在Windows定时任务（Task Scheduler）中运行Python脚本时，退出码267009是一个典型的“任务启动失败”信号。...</description>
-            <pubDate>2026-08-06</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
