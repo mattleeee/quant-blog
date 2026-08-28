@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>技术指标实战：均线系统的参数选择与信号逻辑 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="均线系统的参数选择与信号逻辑
+
+均线系统可能是量化交易里被研究最多的技术指标，但大多数人只是简单调用 talib.SMA 然后画个图。真正的问题是：均线参数怎么定？信号怎么过滤？ 本文从实战角度拆解这三个问题。...">
+    <meta name="keywords" content="均线系统,技术指标,参数选择,信号">
+    <meta property="og:title" content="技术指标实战：均线系统的参数选择与信号逻辑">
+    <meta property="og:description" content="均线系统的参数选择与信号逻辑
+
+均线系统可能是量化交易里被研究最多的技术指标，但大多数人只是简单调用 talib.SMA 然后画个图。真正的问题是：均线参数怎么定？信号怎么过滤？ 本文从实战角度拆解这三个问题。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/26.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>技术指标实战：均线系统的参数选择与信号逻辑</h1>
+            <div class="post-meta">
+                <span class="date">2026-08-28</span>
+                <span class="category"><span class="tag-badge">量化策略</span></span>
+            </div>
+            <div class="post-content">
+<p>均线系统可能是量化交易里被研究最多的技术指标，但大多数人只是简单调用 <code>talib.SMA</code> 然后画个图。真正的问题是：<strong>均线参数怎么定？信号怎么过滤？</strong> 本文从实战角度拆解这三个问题。</p>
+<h3 id="_1">一、均线周期的选择逻辑</h3>
+<p>均线周期的选择不是拍脑袋，它取决于你的<strong>交易周期</strong>和<strong>持仓目标</strong>。</p>
+<h4 id="11">1.1 短、中、长周期的划分</h4>
+<table>
+<thead>
+<tr>
+<th>周期类型</th>
+<th>常用参数</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>短线</td>
+<td>5, 10, 20</td>
+<td>日内或1-5天持仓</td>
+</tr>
+<tr>
+<td>中线</td>
+<td>30, 60, 90</td>
+<td>5-20天持仓</td>
+</tr>
+<tr>
+<td>长线</td>
+<td>120, 250</td>
+<td>季度级持仓</td>
+</tr>
+</tbody>
+</table>
+<p>关键原则：<strong>均线周期必须与K线周期匹配</strong>。如果你用日线数据，5日均线代表一周的持仓成本；如果你用小时线，5小时均线只代表半天。</p>
+<h4 id="12">1.2 参数选择的两个实用方法</h4>
+<p><strong>方法一：基于市场波动率（ATR）自适应</strong></p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+
+def adaptive_ma_period(close, atr_period=14, base_period=20):
+    &quot;&quot;&quot;
+    根据ATR波动率调整均线周期
+    波动大时用短周期，波动小时用长周期
+    &quot;&quot;&quot;
+    # 计算ATR
+    high = close.rolling(2).max()
+    low = close.rolling(2).min()
+    tr = pd.concat([high - low, 
+                    (high - close.shift(1)).abs(),
+                    (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(atr_period).mean()
+
+    # 归一化ATR到合理范围
+    atr_norm = atr / close
+    # 波动率越大，周期越短
+    period = base_period * (atr_norm.mean() / atr_norm)
+    return period.clip(5, 60).round().fillna(base_period)
+</code></pre>
+
+<p><strong>方法二：参数网格扫描（Walk-forward）</strong></p>
+<pre class="codehilite"><code class="language-python">def scan_ma_params(close, param_range=range(5, 100, 5)):
+    &quot;&quot;&quot;
+    遍历不同均线参数，计算收益风险比
+    返回最优参数
+    &quot;&quot;&quot;
+    results = {}
+    for period in param_range:
+        ma = close.rolling(period).mean()
+        # 简单的信号：价格在均线上方做多，下方做空
+        signal = np.where(close &gt; ma, 1, -1)
+        returns = close.pct_change().fillna(0)
+        strategy_returns = signal * returns
+
+        # 计算夏普比率（年化）
+        sharpe = strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
+        results[period] = sharpe
+
+    best_period = max(results, key=results.get)
+    return best_period, results
+</code></pre>
+
+<h3 id="_2">二、金叉死叉信号逻辑</h3>
+<p>金叉死叉是最基础的均线信号，但直接使用效果很差。原因在于：<strong>信号太频繁，噪音太大</strong>。</p>
+<h4 id="21">2.1 基础信号实现</h4>
+<pre class="codehilite"><code class="language-python">def golden_cross_signal(df, fast_period=5, slow_period=20):
+    &quot;&quot;&quot;
+    金叉死叉信号生成
+    df: DataFrame with 'close' column
+    返回: signal (1=做多, -1=做空, 0=无信号)
+    &quot;&quot;&quot;
+    df = df.copy()
+    df['ma_fast'] = df['close'].rolling(fast_period).mean()
+    df['ma_slow'] = df['close'].rolling(slow_period).mean()
+
+    # 金叉: fast上穿slow
+    df['cross_up'] = (df['ma_fast'] &gt; df['ma_slow']) &amp; (df['ma_fast'].shift(1) &lt;= df['ma_slow'].shift(1))
+    # 死叉: fast下穿slow
+    df['cross_down'] = (df['ma_fast'] &lt; df['ma_slow']) &amp; (df['ma_fast'].shift(1) &gt;= df['ma_slow'].shift(1))
+
+    # 生成信号，死叉优先
+    df['signal'] = 0
+    df.loc[df['cross_up'], 'signal'] = 1
+    df.loc[df['cross_down'], 'signal'] = -1
+
+    # 持仓状态（直到反向信号出现）
+    df['position'] = df['signal'].replace(0, np.nan).ffill().fillna(0)
+
+    return df
+</code></pre>
+
+<h4 id="22">2.2 信号过滤的三个实用技巧</h4>
+<p><strong>技巧1：斜率过滤</strong></p>
+<p>只接受均线本身方向一致的交叉信号：</p>
+<pre class="codehilite"><code class="language-python">def filtered_cross_signal(df, fast=5, slow=20, slope_period=3):
+    &quot;&quot;&quot;
+    带斜率过滤的金叉死叉
+    要求慢线本身也在向上/向下
+    &quot;&quot;&quot;
+    df = df.copy()
+    df['ma_slow'] = df['close'].rolling(slow).mean()
+    # 计算慢线斜率
+    df['slope'] = df['ma_slow'].diff(slope_period)
+
+    # 基础交叉信号
+    df = golden_cross_signal(df, fast, slow)
+
+    # 过滤：金叉时要求慢线向上，死叉时要求慢线向下
+    df['signal_filtered'] = np.where(
+        (df['signal'] == 1) &amp; (df['slope'] &gt; 0), 1,
+        np.where((df['signal'] == -1) &amp; (df['slope'] &lt; 0), -1, 0)
+    )
+
+    df['position_filtered'] = df['signal_filtered'].replace(0, np.nan).ffill().fillna(0)
+    return df
+</code></pre>
+
+<p><strong>技巧2：价格确认过滤</strong></p>
+<p>金叉后等待价格收盘价确认突破：</p>
+<pre class="codehilite"><code class="language-python">def confirmed_cross_signal(df, fast=5, slow=20, confirm_bars=2):
+    &quot;&quot;&quot;
+    金叉后等待N根K线确认
+    &quot;&quot;&quot;
+    df = df.copy()
+    df = golden_cross_signal(df, fast, slow)
+
+    # 记录交叉发生的位置
+    df['cross_idx'] = np.where(df['signal'] != 0, df.index, np.nan)
+    df['cross_idx'] = df['cross_idx'].ffill()
+
+    # 确认：交叉后价格持续站在快线上方/下方
+    df['ma_fast'] = df['close'].rolling(fast).mean()
+    df['above_fast'] = df['close'] &gt; df['ma_fast']
+
+    # 金叉后确认
+    df['confirm'] = 0
+    for i in range(1, len(df)):
+        if df['signal'].iloc[i] == 1:
+            # 检查后续confirm_bars根K线是否都在快线上方
+            future_above = df['above_fast'].iloc[i+1:i+1+confirm_bars].all()
+            if future_above:
+                df.loc[df.index[i+1], 'confirm'] = 1
+
+    return df
+</code></pre>
+
+<p><strong>技巧3：ATR波动率过滤</strong></p>
+<pre class="codehilite"><code class="language-python">def atr_filtered_signal(df, fast=5, slow=20, atr_mult=1.5):
+    &quot;&quot;&quot;
+    用ATR过滤假交叉
+    交叉发生时，价格变动幅度必须超过ATR的倍数
+    &quot;&quot;&quot;
+    df = df.copy()
+    df = golden_cross_signal(df, fast, slow)
+
+    # 计算ATR
+    high = df['close'].rolling(2).max()
+    low = df['close'].rolling(2).min()
+    tr = pd.concat([high - low,
+                    (high - df['close'].shift(1)).abs(),
+                    (low - df['close'].shift(1)).abs()], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(14).mean()
+
+    # 计算交叉时的价格变动
+    df['price_change'] = df['close'].diff()
+
+    # 过滤条件
+    df['signal_atr'] = np.where(
+        (df['signal'] == 1) &amp; (df['price_change'].abs() &gt; df['atr'] * atr_mult), 1,
+        np.where((df['signal'] == -1) &amp; (df['price_change'].abs() &gt; df['atr'] * atr_mult), -1, 0)
+    )
+
+    return df
+</code></pre>
+
+<h3 id="_3">三、多均线组合策略</h3>
+<p>单组均线信号太脆弱，实战中更推荐多均线组合。常见的有<strong>三均线系统</strong>和<strong>均线排列系统</strong>。</p>
+<h4 id="31">3.1 三均线系统</h4>
+<pre class="codehilite"><code class="language-python">def triple_ma_strategy(df, short=5, mid=20, long=60):
+    &quot;&quot;&quot;
+    三均线策略
+    做多条件: short &gt; mid &gt; long (多头排列)
+    做空条件: short &lt; mid &lt; long (空头排列)
+    &quot;&quot;&quot;
+    df = df.copy()
+    df['ma_short'] = df['close'].rolling(short).mean()
+    df['ma_mid'] = df['close'].rolling(mid).mean()
+    df['ma_long'] = df['close'].rolling(long).mean()
+
+    # 多头排列
+    df['bullish'] = (df['ma_short'] &gt; df['ma_mid']) &amp; (df['ma_mid'] &gt; df['ma_long'])
+    # 空头排列
+    df['bearish'] = (df['ma_short'] &lt; df['ma_mid']) &amp; (df['ma_mid'] &lt; df['ma_long'])
+
+    # 信号
+    df['signal'] = 0
+    df.loc[df['bullish'] &amp; ~df['bullish'].shift(1).fillna(False), 'signal'] = 1
+    df.loc[df['bearish'] &amp; ~df['bearish'].shift(1).fillna(False), 'signal'] = -1
+
+    df['position'] = df['signal'].replace(0, np.nan).ffill().fillna(0)
+    return df
+</code></pre>
+
+<h4 id="32">3.2 均线排列打分系统</h4>
+<pre class="codehilite"><code class="language-python">def ma_alignment_score(df, periods=[5, 10, 20, 30, 60]):
+    &quot;&quot;&quot;
+    均线排列打分
+    所有均线多头排列得5分，空头排列得-5分
+    中间状态按排列顺序打分
+    &quot;&quot;&quot;
+    df = df.copy()
+
+    # 计算所有均线
+    for p in periods:
+        df[f'ma_{p}'] = df['close'].rolling(p).mean()
+
+    # 计算排列得分
+    score = np.zeros(len(df))
+    ma_cols = [f'ma_{p}' for p in periods]
+
+    for i in range(len(df)):
+        ma_values = df[ma_cols].iloc[i].values
+        # 检查是否严格递增（多头排列）
+        if all(ma_values[j] &lt; ma_values[j+1] for j in range(len(ma_values)-1)):
+            score[i] = 5
+        # 严格递减（空头排列）
+        elif all(ma_values[j] &gt; ma_values[j+1] for j in range(len(ma_values)-1)):
+            score[i] = -5
+        else:
+            # 部分排列，按正序对数量打分
+            pairs = sum(1 for j in range(len(ma_values)-1) if ma_values[j] &lt; ma_values[j+1])
+            score[i] = pairs - (len(ma_values)-1-pairs)
+
+    df['ma_score'] = score
+    return df
+</code></pre>
+
+<h3 id="_4">四、参数优化方法</h3>
+<p>参数优化最怕<strong>过拟合</strong>。这里给两个实用方法。</p>
+<h4 id="41">4.1 滚动窗口优化</h4>
+<pre class="codehilite"><code class="language-python">def rolling_optimize(df, param_grid, window=250, step=50):
+    &quot;&quot;&quot;
+    滚动窗口参数优化
+    每step天重新优化一次参数
+    &quot;&quot;&quot;
+    results = []
+
+    for start in range(0, len(df)-window, step):
+        end = start + window
+        train_data = df.iloc[start:end]
+
+        # 在训练窗口内找最优参数
+        best_sharpe = -np.inf
+        best_param = None
+
+        for period in param_grid:
+            ma = train_data['close'].rolling(period).mean()
+            signal = np.where(train_data['close'] &gt; ma, 1, -1)
+            returns = train_data['close'].pct_change().fillna(0)
+            strategy_returns = signal * returns
+            sharpe = strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
+
+            if sharpe &gt; best_sharpe:
+                best_sharpe = sharpe
+                best_param = period
+
+        results.append({
+            'train_start': df.index[start],
+            'train_end': df.index[end],
+            'best_param': best_param,
+            'best_sharpe': best_sharpe
+        })
+
+    return pd.DataFrame(results)
+</code></pre>
+
+<h4 id="42">4.2 参数稳定性检验</h4>
+<pre class="codehilite"><code class="language-python">def parameter_stability_test(df, param_range=range(10, 50, 5)):
+    &quot;&quot;&quot;
+    检验参数的稳定性
+    如果相邻参数的表现差异过大，说明参数不稳定
+    &quot;&quot;&quot;
+    sharpe_dict = {}
+
+    for period in param_range:
+        ma = df['close'].rolling(period).mean()
+        signal = np.where(df['close'] &gt; ma, 1, -1)
+        returns = df['close'].pct_change().fillna(0)
+        strategy_returns = signal * returns
+        sharpe = strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)
+        sharpe_dict[period] = sharpe
+
+    # 计算相邻参数的表现差异
+    periods = list(sharpe_dict.keys())
+    diffs = []
+    for i in range(len(periods)-1):
+        diff = abs(sharpe_dict[periods[i+1]] - sharpe_dict[periods[i]])
+        diffs.append(diff)
+
+    avg_diff = np.mean(diffs)
+    # 如果平均差异小于0.1，说明参数比较稳定
+    stable = avg_diff &lt; 0.1
+
+    return sharpe_dict, avg_diff, stable
+</code></pre>
+
+<h3 id="_5">五、实战注意事项</h3>
+<ol>
+<li>
+<p><strong>数据频率</strong>：均线系统的参数必须与K线周期匹配。日线用20/60，小时线用20/60可能就不合适。</p>
+</li>
+<li>
+<p><strong>信号延迟</strong>：均线系统天然滞后。趋势越强，滞后越严重。可以结合价格突破来提前入场。</p>
+</li>
+<li>
+<p><strong>震荡市失效</strong>：均线系统在震荡市会被反复打脸。建议加一个趋势过滤器（比如ADX&gt;25才算趋势）。</p>
+</li>
+<li>
+<p><strong>参数敏感性</strong>：如果参数从20改成21，策略表现就大变，说明参数不稳定，容易过拟合。</p>
+</li>
+<li>
+<p><strong>组合使用</strong>：单组均线信号胜率有限，建议多周期均线共振（比如日线多头+小时线多头）。</p>
+</li>
+</ol>
+<h3 id="_6">六、完整示例代码</h3>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+import yfinance as yf
+
+# 获取数据（示例用，实际替换成自己的数据源）
+df = yf.download('000300.SS', start='2020-01-01', end='2024-01-01')
+df.columns = ['open', 'high', 'low', 'close', 'adj_close', 'volume']
+
+# 1. 基础金叉死叉
+basic_signal = golden_cross_signal(df, 5, 20)
+
+# 2. 带斜率过滤
+filtered_signal = filtered_cross_signal(df, 5, 20)
+
+# 3. 三均线策略
+triple_signal = triple_ma_strategy(df, 5, 20, 60)
+
+# 4. 参数优化
+best_param, sharpe_results = scan_ma_params(df['close'])
+
+# 5. 参数稳定性检验
+stability_test = parameter_stability_test(df)
+
+# 输出结果对比
+print(f&quot;基础信号年化收益: {basic_signal['position'].shift(1) * df['close'].pct_change().fillna(0):.4f}&quot;)
+print(f&quot;最优均线参数: {best_param}&quot;)
+print(f&quot;参数稳定性: {'稳定' if stability_test[2] else '不稳定'}&quot;)
+</code></pre>
+
+<p>均线系统的核心在于<strong>参数选择与信号过滤</strong>。参数选择要考虑市场特性，信号过滤要控制交易频率。多均线组合和稳定性检验是避免过拟合的有效手段。更多内容请关注本站后续更新。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">均线系统</span><span class="tag-badge">技术指标</span><span class="tag-badge">参数选择</span><span class="tag-badge">信号</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
