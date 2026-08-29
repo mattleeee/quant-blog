@@ -7,63 +7,12 @@
         <language>zh-CN</language>
         
         <item>
-            <title>技术指标实战：均线系统的参数选择与信号逻辑</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/26.html</link>
-            <description>均线系统的参数选择与信号逻辑
-
-均线系统可能是量化交易里被研究最多的技术指标，但大多数人只是简单调用 talib.SMA 然后画个图。真正的问题是：均线参数怎么定？信号怎么过滤？ 本文从实战角度拆解这三个问题。
-
-一、均线周期的选择逻辑
-
-均线周期的选择不是拍脑袋，它取决于你的交易周期和持仓目标。...</description>
-            <pubDate>2026-08-28</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>三层验证方法论：参数扫描+月度一致性+稳健性消融</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/25.html</link>
-            <description>三层验证方法论：参数扫描+月度一致性+稳健性消融
-
-回测曲线好看，实盘就翻车，这是量化开发中最常见的问题。原因很简单：大部分回测只验证了“单一路径下的最优结果”，而没有验证策略在参数空间、时间切片和逻辑结构上的稳健性。...</description>
-            <pubDate>2026-08-27</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>系统巡检模块设计：自动检查交易系统健康状态</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/24.html</link>
-            <description>系统巡检模块设计：自动检查交易系统健康状态
-
-量化交易系统跑起来容易，稳定运行是另一回事。API断连、数据源停更、磁盘写满、定时任务静默失败——这些问题往往不会第一时间暴露，等到发现时，策略可能已经跑偏了几个小时。
-
-解决思路很简单：写一个巡检模块，定时检查各组件状态，异常时推告警。...</description>
-            <pubDate>2026-08-26</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>Python请求频率控制：从sleep到令牌桶的演进</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/23.html</link>
-            <description>Python请求频率控制：从sleep到令牌桶的演进
-
-在量化交易和爬虫开发中，API请求频率控制是绕不开的坎。交易所的REST接口通常有严格的限频（rate limit）策略，比如每秒最多5次请求，或者每30秒最多120次。一旦超限，轻则返回429错误，重则封禁IP。...</description>
-            <pubDate>2026-08-25</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>信号扫描模块设计与实现：多指标并行检测</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/22.html</link>
-            <description>信号扫描模块设计与实现：多指标并行检测
-
-行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。...</description>
-            <pubDate>2026-08-24</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
             <title>模拟交易系统架构设计：从信号扫描到自动执行</title>
             <link>https://hkcode.eu.org/quant-blog/posts/21.html</link>
             <description>模拟交易系统架构设计：从信号扫描到自动执行
 
-在量化交易开发中，模拟交易（Paper Trading）系统是连接策略研究与实盘的关键桥梁。一个设计良好的模拟交易系统，不仅要能验证策略逻辑，还要能暴露实盘中可能遇到的延迟、滑点、数据异常等问题。...</description>
-            <pubDate>2026-08-23</pubDate>
+实盘交易系统与模拟交易系统最大的区别在于：前者需要处理券商接口、风控、滑点、成交回报等复杂逻辑，而后者可以专注于策略逻辑本身。但模拟交易系统并非简单地把信号打印出来——它需要一套完整的架构来支撑信号产生、分析、执行和通知的闭环。...</description>
+            <pubDate>2026-08-29</pubDate>
             <category>Python自动化</category>
         </item>
         <item>
@@ -196,6 +145,51 @@
 
 WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...</description>
             <pubDate>2026-08-07</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>Windows批处理文件中文乱码导致267009错误的解决方案</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/3.html</link>
+            <description>Windows批处理文件中文乱码导致267009错误的解决方案
+
+在Windows定时任务（Task Scheduler）中运行Python脚本时，退出码267009是一个典型的“任务启动失败”信号。...</description>
+            <pubDate>2026-08-06</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>Python脚本超时重试机制设计：失败立即重试，最多3次</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/4.html</link>
+            <description>Python脚本超时重试机制设计：失败立即重试，最多3次
+
+定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...</description>
+            <pubDate>2026-08-06</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>多任务定时调度的冲突解决：错峰执行方案</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/5.html</link>
+            <description>多任务定时调度的冲突解决：错峰执行方案
+
+定时任务在量化系统里是标配。但任务多了以后，冲突就来了——不是逻辑冲突，是资源争抢。今天聊聊我们系统里一个实际踩过的坑，以及怎么用错峰解决。...</description>
+            <pubDate>2026-08-06</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>SQLite管理定时任务执行记录的最佳实践</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/6.html</link>
+            <description>SQLite管理定时任务执行记录的最佳实践
+
+定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...</description>
+            <pubDate>2026-08-06</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>PowerShell调用Python脚本的编码踩坑全记录</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/2.html</link>
+            <description>PowerShell调用Python脚本的编码踩坑全记录
+
+在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。上个月我把一个数据清洗脚本挂到任务计划里，结果每天凌晨3点准时收到退出码267009的告警邮件。...</description>
+            <pubDate>2026-08-05</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
