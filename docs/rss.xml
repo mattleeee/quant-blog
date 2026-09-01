@@ -11,8 +11,8 @@
             <link>https://hkcode.eu.org/quant-blog/posts/21.html</link>
             <description>模拟交易系统架构设计：从信号扫描到自动执行
 
-模拟交易系统是量化策略从研究走向实盘的关键桥梁。它不仅要验证策略逻辑的可行性，还要暴露延迟、滑点、数据源稳定性等实战问题。本文分享一套完整的模拟交易系统架构，覆盖信号扫描、市场分析、模拟撮合与通知推送四大模块，并给出可直接参考的 Python 代码骨架。...</description>
-            <pubDate>2026-08-30</pubDate>
+模拟交易系统（Paper Trading System）的价值不在于帮你赚钱，而在于验证你的策略逻辑、参数稳定性以及执行链路是否可靠。实盘与模拟最大的差异在于滑点、延迟和撮合规则，但架构设计的核心——模块解耦、数据流管理、异常处理——是完全一致的。...</description>
+            <pubDate>2026-09-01</pubDate>
             <category>Python自动化</category>
         </item>
         <item>
