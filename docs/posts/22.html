@@ -7,12 +7,12 @@
     <meta name="author" content="mattleeee">
         <meta name="description" content="信号扫描模块设计与实现：多指标并行检测
 
-行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。...">
+行情数据每时每刻都在变动，人工盯盘去验证指标条件，既低效又容易遗漏。信号扫描模块的价值在于，将“指标计算”和“条件判定”从人工观察中剥离出来，交给程序去循环执行。...">
     <meta name="keywords" content="信号扫描,技术指标,并行检测,Python">
     <meta property="og:title" content="信号扫描模块设计与实现：多指标并行检测">
     <meta property="og:description" content="信号扫描模块设计与实现：多指标并行检测
 
-行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。...">
+行情数据每时每刻都在变动，人工盯盘去验证指标条件，既低效又容易遗漏。信号扫描模块的价值在于，将“指标计算”和“条件判定”从人工观察中剥离出来，交给程序去循环执行。...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/22.html">
@@ -36,284 +36,326 @@
         <article class="post">
             <h1>信号扫描模块设计与实现：多指标并行检测</h1>
             <div class="post-meta">
-                <span class="date">2026-08-24</span>
+                <span class="date">2026-09-03</span>
                 <span class="category"><span class="tag-badge">Python自动化</span></span>
             </div>
             <div class="post-content">
-<p>行情数据是静态的，但机会是动态的。手动盯盘在3个标的以内还能应付，一旦超过10个，人的注意力就成了瓶颈。信号扫描模块就是干这个的：让代码替我们盯着所有标的，一旦技术指标满足预设条件，立刻输出信号。</p>
-<p>这篇文章分享一个实战可用的信号扫描模块，核心设计思路：</p>
-<ul>
-<li>多标的并行扫描（<code>ThreadPoolExecutor</code> 实现）</li>
-<li>指标计算与信号判定分离</li>
-<li>规则可配置，新增策略不用改扫描主逻辑</li>
-</ul>
-<h3 id="1">1. 整体架构与扫描流程</h3>
-<p>模块分三层：</p>
-<pre class="codehilite"><code>数据层 -&gt; 指标层 -&gt; 信号层
-</code></pre>
-
-<ul>
-<li><strong>数据层</strong>：负责拉取K线数据，统一格式（<code>pd.DataFrame</code>，列名统一）</li>
-<li><strong>指标层</strong>：计算均线、RSI、MACD，输出指标DataFrame</li>
-<li><strong>信号层</strong>：根据规则判定是否触发信号，输出信号列表</li>
-</ul>
-<p>扫描流程：</p>
-<pre class="codehilite"><code>初始化标的列表
-  -&gt; 加载历史数据
-  -&gt; 计算技术指标
-  -&gt; 应用信号规则
-  -&gt; 输出结果
-</code></pre>
-
-<p>关键设计决策：<strong>并行扫描</strong>。每个标的的指标计算和信号判定是独立的，天然适合并行。用 <code>concurrent.futures.ThreadPoolExecutor</code> 做并发，I/O密集（数据拉取）和CPU密集（指标计算）都能受益。</p>
-<h3 id="2">2. 数据层：统一数据接口</h3>
-<p>所有标的的数据格式必须一致，否则指标计算代码没法复用。定义一个简单的数据加载函数：</p>
+<p>行情数据每时每刻都在变动，人工盯盘去验证指标条件，既低效又容易遗漏。信号扫描模块的价值在于，将“指标计算”和“条件判定”从人工观察中剥离出来，交给程序去循环执行。本文讨论的是一个通用扫描框架，它负责对多个标的（股票、期货、加密货币等）计算技术指标，并在指标满足预设规则时输出信号。</p>
+<p>先明确模块的输入输出：
+- <strong>输入</strong>：一组标的的K线数据（OHLCV），以及一组信号规则。
+- <strong>输出</strong>：格式化的信号记录，包含标的代码、信号类型、触发时间、当时的价格及指标值。</p>
+<h3 id="_1">扫描流程设计</h3>
+<p>整个扫描流程分为四个阶段，形成一个闭环：</p>
+<ol>
+<li><strong>数据准备</strong>：获取或更新K线数据，统一格式。</li>
+<li><strong>指标计算</strong>：对每个标的计算所需的全部技术指标。</li>
+<li><strong>规则判定</strong>：将最新计算出的指标值与预设规则进行比对，判断是否触发信号。</li>
+<li><strong>信号输出</strong>：将触发的信号写入日志、数据库或消息队列。</li>
+</ol>
+<p>这里有一个关键设计决策：<strong>指标计算与规则判定分离</strong>。指标计算是纯函数式的，输入K线，输出指标序列；规则判定则负责逻辑组合。这样做的好处是，新增一个指标不需要改动判定逻辑，反之亦然。</p>
+<h3 id="_2">指标计算逻辑</h3>
+<p>我们使用 <code>pandas</code> 和 <code>numpy</code> 进行向量化计算，避免使用循环。为了保证代码可复用，将指标计算封装在一个独立的类中。</p>
 <pre class="codehilite"><code class="language-python">import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional
+
+class TechnicalIndicators:
+    &quot;&quot;&quot;技术指标计算器，使用向量化计算提升性能&quot;&quot;&quot;
+
+    @staticmethod
+    def SMA(series: pd.Series, period: int) -&gt; pd.Series:
+        &quot;&quot;&quot;简单移动平均线&quot;&quot;&quot;
+        return series.rolling(window=period).mean()
+
+    @staticmethod
+    def EMA(series: pd.Series, period: int) -&gt; pd.Series:
+        &quot;&quot;&quot;指数移动平均线&quot;&quot;&quot;
+        return series.ewm(span=period, adjust=False).mean()
+
+    @staticmethod
+    def RSI(series: pd.Series, period: int = 14) -&gt; pd.Series:
+        &quot;&quot;&quot;相对强弱指数 (RSI)&quot;&quot;&quot;
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    @staticmethod
+    def MACD(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+        &quot;&quot;&quot;MACD指标，返回 (DIF, DEA, HIST)&quot;&quot;&quot;
+        ema_fast = TechnicalIndicators.EMA(series, fast)
+        ema_slow = TechnicalIndicators.EMA(series, slow)
+        dif = ema_fast - ema_slow
+        dea = TechnicalIndicators.EMA(dif, signal)
+        hist = (dif - dea) * 2
+        return dif, dea, hist
+
+    @staticmethod
+    def BOLL(series: pd.Series, period: int = 20, num_std: float = 2.0):
+        &quot;&quot;&quot;布林带，返回 (上轨, 中轨, 下轨)&quot;&quot;&quot;
+        middle = TechnicalIndicators.SMA(series, period)
+        std = series.rolling(window=period).std()
+        upper = middle + (std * num_std)
+        lower = middle - (std * num_std)
+        return upper, middle, lower
+</code></pre>
+
+<h3 id="_3">信号规则定义</h3>
+<p>规则定义是整个模块的灵魂。我们采用<strong>声明式</strong>的规则结构，用字典描述条件，而不是硬编码 <code>if-else</code>。这样，调整策略只需要修改配置文件，不需要动代码。</p>
+<p>规则结构设计如下：</p>
+<pre class="codehilite"><code class="language-python">{
+    &quot;name&quot;: &quot;均线多头排列&quot;,
+    &quot;conditions&quot;: [
+        {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 5}, &quot;target&quot;: &quot;close&quot;,
+         &quot;operator&quot;: &quot;&gt;&quot;, &quot;compare_to&quot;: {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 20}, &quot;target&quot;: &quot;close&quot;}},
+        {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 20}, &quot;target&quot;: &quot;close&quot;,
+         &quot;operator&quot;: &quot;&gt;&quot;, &quot;compare_to&quot;: {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 60}, &quot;target&quot;: &quot;close&quot;}}
+    ],
+    &quot;logic&quot;: &quot;AND&quot;  # 所有条件同时满足才触发
+}
+</code></pre>
+
+<p>判定引擎负责解析这个规则字典。它从指标缓存中取出对应的指标序列，取最后一个值（最新值）进行比较。</p>
+<h3 id="_4">信号判定引擎</h3>
+<pre class="codehilite"><code class="language-python">import importlib
+from typing import Dict, List, Any
+
+class SignalEngine:
+    &quot;&quot;&quot;信号判定引擎，解析规则并执行比较&quot;&quot;&quot;
+
+    def __init__(self, data: pd.DataFrame):
+        &quot;&quot;&quot;
+        :param data: 包含OHLCV的DataFrame，索引为时间
+        &quot;&quot;&quot;
+        self.data = data
+        self._indicator_cache: Dict[str, pd.Series] = {}
+
+    def _compute_indicator(self, indicator_name: str, params: Dict, target: str):
+        &quot;&quot;&quot;计算指标并缓存结果，避免重复计算&quot;&quot;&quot;
+        cache_key = f&quot;{indicator_name}_{target}_{str(params)}&quot;
+        if cache_key in self._indicator_cache:
+            return self._indicator_cache[cache_key]
+
+        indicator_func = getattr(TechnicalIndicators, indicator_name)
+        series = self.data[target]
+
+        # 处理返回多个值的情况（如MACD、BOLL）
+        result = indicator_func(series, **params)
+        if isinstance(result, tuple):
+            # 对于多返回值指标，需要指定取第几个，这里简化处理
+            # 实际应用中可通过 params 中的 'output_index' 指定
+            result = result[0]
+
+        self._indicator_cache[cache_key] = result
+        return result
+
+    def _get_value(self, spec: Dict) -&gt; float:
+        &quot;&quot;&quot;根据规格获取指标的最新值或指定值&quot;&quot;&quot;
+        if 'indicator' in spec:
+            series = self._compute_indicator(spec['indicator'], spec.get('params', {}), spec['target'])
+            return series.iloc[-1]  # 取最新值
+        elif 'value' in spec:
+            return float(spec['value'])
+        else:
+            raise ValueError(f&quot;无法解析的规格: {spec}&quot;)
+
+    def check_rule(self, rule: Dict) -&gt; bool:
+        &quot;&quot;&quot;检查单条规则是否触发&quot;&quot;&quot;
+        conditions = rule['conditions']
+        logic = rule.get('logic', 'AND')
+
+        results = []
+        for cond in conditions:
+            left_val = self._get_value(cond)
+            right_spec = cond.get('compare_to')
+            if right_spec:
+                right_val = self._get_value(right_spec)
+            else:
+                right_val = cond.get('threshold')  # 直接阈值比较
+
+            operator = cond['operator']
+            if operator == '&gt;':
+                results.append(left_val &gt; right_val)
+            elif operator == '&lt;':
+                results.append(left_val &lt; right_val)
+            elif operator == '&gt;=':
+                results.append(left_val &gt;= right_val)
+            elif operator == '&lt;=':
+                results.append(left_val &lt;= right_val)
+            elif operator == '==':
+                results.append(abs(left_val - right_val) &lt; 1e-8)  # 浮点数比较
+            elif operator == 'cross_above':
+                # 上穿：前一个值小于等于，当前值大于
+                series_left = self._compute_indicator(cond['indicator'], cond.get('params', {}), cond['target'])
+                series_right = self._compute_indicator(right_spec['indicator'], right_spec.get('params', {}), right_spec['target'])
+                results.append(series_left.iloc[-2] &lt;= series_right.iloc[-2] and series_left.iloc[-1] &gt; series_right.iloc[-1])
+            elif operator == 'cross_below':
+                series_left = self._compute_indicator(cond['indicator'], cond.get('params', {}), cond['target'])
+                series_right = self._compute_indicator(right_spec['indicator'], right_spec.get('params', {}), right_spec['target'])
+                results.append(series_left.iloc[-2] &gt;= series_right.iloc[-2] and series_left.iloc[-1] &lt; series_right.iloc[-1])
+            else:
+                raise ValueError(f&quot;未知操作符: {operator}&quot;)
+
+        if logic == 'AND':
+            return all(results)
+        elif logic == 'OR':
+            return any(results)
+        else:
+            raise ValueError(f&quot;未知逻辑: {logic}&quot;)
+</code></pre>
+
+<h3 id="_5">并行扫描控制</h3>
+<p>单线程循环扫描几百个标的，速度瓶颈不在CPU而在I/O。但如果标的数量上千，指标计算本身也会成为瓶颈。此时使用 <code>concurrent.futures</code> 进行进程级并行是合适的。</p>
+<pre class="codehilite"><code class="language-python">from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import List, Dict
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
-def load_kline_data(symbol: str, period: str = '1d', limit: int = 200) -&gt; Optional[pd.DataFrame]:
-    &quot;&quot;&quot;
-    加载K线数据，统一列名和格式。
-    这里用模拟数据演示，实际场景替换为交易所API、数据库或本地文件。
-    &quot;&quot;&quot;
-    # 模拟数据：生成随机价格序列
-    np.random.seed(hash(symbol) % 2**32)
-    dates = pd.date_range(end=pd.Timestamp.today(), periods=limit, freq=period)
-    base_price = 100 + np.random.rand() * 50
-    prices = base_price * (1 + np.random.randn(limit).cumsum() * 0.02)
+class ParallelScanner:
+    &quot;&quot;&quot;并行扫描控制器&quot;&quot;&quot;
 
-    df = pd.DataFrame({
-        'date': dates,
-        'open': prices * (1 + np.random.randn(limit) * 0.005),
-        'high': prices * (1 + np.abs(np.random.randn(limit)) * 0.01),
-        'low': prices * (1 - np.abs(np.random.randn(limit)) * 0.01),
-        'close': prices,
-        'volume': np.random.randint(10000, 100000, size=limit)
-    })
-    df.set_index('date', inplace=True)
-    return df
-</code></pre>
-
-<p>实际项目中，这里通常对接 <code>ccxt</code>、<code>akshare</code> 或本地数据库。关键是返回的DataFrame必须包含 <code>open/high/low/close/volume</code> 五列，索引是时间。</p>
-<h3 id="3">3. 指标层：计算技术指标</h3>
-<p>指标计算用 <code>pandas</code> 向量化操作，性能好且代码简洁。核心指标：均线（MA）、RSI、MACD。</p>
-<pre class="codehilite"><code class="language-python">def calculate_indicators(df: pd.DataFrame) -&gt; pd.DataFrame:
-    &quot;&quot;&quot;
-    计算技术指标，返回包含原始数据和指标列的DataFrame。
-    &quot;&quot;&quot;
-    if df is None or df.empty:
-        return df
-
-    result = df.copy()
-
-    # 均线系统：MA5, MA10, MA20, MA60
-    for window in [5, 10, 20, 60]:
-        result[f'ma_{window}'] = result['close'].rolling(window=window).mean()
-
-    # RSI (14日)
-    delta = result['close'].diff()
-    gain = delta.where(delta &gt; 0, 0.0)
-    loss = -delta.where(delta &lt; 0, 0.0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
-    result['rsi_14'] = 100 - (100 / (1 + rs))
-
-    # MACD (12, 26, 9)
-    ema_12 = result['close'].ewm(span=12, adjust=False).mean()
-    ema_26 = result['close'].ewm(span=26, adjust=False).mean()
-    result['macd_dif'] = ema_12 - ema_26
-    result['macd_dea'] = result['macd_dif'].ewm(span=9, adjust=False).mean()
-    result['macd_hist'] = result['macd_dif'] - result['macd_dea']
-
-    return result
-</code></pre>
-
-<p>注意几个细节：</p>
-<ul>
-<li><code>rolling(window).mean()</code> 计算移动平均，前N-1个值是NaN</li>
-<li>RSI 计算里 <code>delta.where(delta &gt; 0, 0.0)</code> 把负变动置0，避免负数干扰</li>
-<li>MACD 用 <code>ewm</code> 指数加权，比SMA更贴近实际交易软件的计算方式</li>
-</ul>
-<h3 id="4">4. 信号层：规则判定</h3>
-<p>信号判定是整个模块的核心。设计思路：<strong>规则函数接收指标DataFrame，返回布尔值（True=触发信号）</strong>。这样每种策略就是一个独立函数，互不干扰。</p>
-<pre class="codehilite"><code class="language-python">def check_ma_cross(df: pd.DataFrame) -&gt; bool:
-    &quot;&quot;&quot;金叉信号：MA5上穿MA20&quot;&quot;&quot;
-    if len(df) &lt; 20:
-        return False
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    # 前一根K线 MA5 &lt;= MA20，当前K线 MA5 &gt; MA20
-    return (prev['ma_5'] &lt;= prev['ma_20'] and latest['ma_5'] &gt; latest['ma_20'])
-
-
-def check_rsi_oversold(df: pd.DataFrame) -&gt; bool:
-    &quot;&quot;&quot;超卖反弹信号：RSI从低于30回升到30以上&quot;&quot;&quot;
-    if len(df) &lt; 15:
-        return False
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    return (prev['rsi_14'] &lt; 30 and latest['rsi_14'] &gt;= 30)
-
-
-def check_macd_golden_cross(df: pd.DataFrame) -&gt; bool:
-    &quot;&quot;&quot;MACD金叉：DIF上穿DEA&quot;&quot;&quot;
-    if len(df) &lt; 26:
-        return False
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    return (prev['macd_dif'] &lt;= prev['macd_dea'] and latest['macd_dif'] &gt; latest['macd_dea'])
-</code></pre>
-
-<p>每个函数只做一件事：判断当前时刻是否满足信号条件。注意边界处理：数据长度不够时直接返回 <code>False</code>，避免 NaN 比较出错。</p>
-<h3 id="5">5. 并行扫描主逻辑</h3>
-<p>扫描模块的核心：对每个标的执行 <code>加载数据 -&gt; 计算指标 -&gt; 跑所有信号规则</code>。</p>
-<pre class="codehilite"><code class="language-python">class SignalScanner:
-    &quot;&quot;&quot;信号扫描器&quot;&quot;&quot;
-
-    def __init__(self, symbols: List[str], signal_rules: Dict[str, callable], 
-                 max_workers: int = 4):
-        self.symbols = symbols
-        self.signal_rules = signal_rules  # {'规则名': 函数}
+    def __init__(self, rules: List[Dict], max_workers: int = 4):
+        self.rules = rules
         self.max_workers = max_workers
 
-    def scan_symbol(self, symbol: str) -&gt; Dict:
-        &quot;&quot;&quot;扫描单个标的，返回信号结果&quot;&quot;&quot;
-        try:
-            # 1. 加载数据
-            df = load_kline_data(symbol)
-            if df is None or len(df) &lt; 60:
-                return {'symbol': symbol, 'signals': [], 'error': '数据不足'}
+    def _scan_single_symbol(self, symbol: str, kline_data: pd.DataFrame) -&gt; List[Dict]:
+        &quot;&quot;&quot;扫描单个标的，返回信号列表&quot;&quot;&quot;
+        signals = []
+        engine = SignalEngine(kline_data)
 
-            # 2. 计算指标
-            df_indicators = calculate_indicators(df)
+        for rule in self.rules:
+            try:
+                if engine.check_rule(rule):
+                    signal = {
+                        'symbol': symbol,
+                        'rule_name': rule['name'],
+                        'time': kline_data.index[-1],
+                        'close': kline_data['close'].iloc[-1]
+                    }
+                    signals.append(signal)
+            except Exception as e:
+                logging.warning(f&quot;标的 {symbol} 检查规则 {rule['name']} 时出错: {e}&quot;)
+                continue
 
-            # 3. 运行所有信号规则
-            triggered = []
-            for rule_name, rule_func in self.signal_rules.items():
+        return signals
+
+    def scan_all(self, data_map: Dict[str, pd.DataFrame]) -&gt; List[Dict]:
+        &quot;&quot;&quot;
+        并行扫描所有标的
+        :param data_map: 键为标的代码，值为K线DataFrame
+        &quot;&quot;&quot;
+        all_signals = []
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_symbol = {
+                executor.submit(self._scan_single_symbol, symbol, data): symbol
+                for symbol, data in data_map.items()
+            }
+
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
                 try:
-                    if rule_func(df_indicators):
-                        triggered.append(rule_name)
+                    signals = future.result()
+                    all_signals.extend(signals)
+                    if signals:
+                        logging.info(f&quot;标的 {symbol} 触发了 {len(signals)} 个信号&quot;)
                 except Exception as e:
-                    logger.warning(f&quot;[{symbol}] 规则 {rule_name} 执行异常: {e}&quot;)
+                    logging.error(f&quot;扫描标的 {symbol} 时发生异常: {e}&quot;)
 
-            return {'symbol': symbol, 'signals': triggered, 'error': None}
-
-        except Exception as e:
-            logger.error(f&quot;[{symbol}] 扫描异常: {e}&quot;)
-            return {'symbol': symbol, 'signals': [], 'error': str(e)}
-
-    def scan_all(self) -&gt; List[Dict]:
-        &quot;&quot;&quot;并行扫描所有标的&quot;&quot;&quot;
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # 提交所有任务
-            future_map = {executor.submit(self.scan_symbol, sym): sym 
-                         for sym in self.symbols}
-
-            # 收集结果
-            for future in as_completed(future_map):
-                symbol = future_map[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                    # 打印日志
-                    if result['signals']:
-                        logger.info(f&quot;[{symbol}] 触发信号: {result['signals']}&quot;)
-                except Exception as e:
-                    logger.error(f&quot;[{symbol}] 任务执行失败: {e}&quot;)
-
-        return results
+        return all_signals
 </code></pre>
 
-<p><strong>关键点：</strong></p>
-<ul>
-<li><code>ThreadPoolExecutor</code> 控制并发数，避免请求过多被交易所限流</li>
-<li><code>as_completed</code> 按完成顺序处理结果，不用等所有任务结束</li>
-<li>单个标的异常不影响其他标的的扫描</li>
-<li>信号规则用字典传入，新增策略只需加一个函数和一个键值对</li>
-</ul>
-<h3 id="6">6. 使用示例</h3>
-<pre class="codehilite"><code class="language-python">if __name__ == &quot;__main__&quot;:
-    # 定义要扫描的标的
-    symbols = ['BTC_USDT', 'ETH_USDT', 'BNB_USDT', 'SOL_USDT', 'XRP_USDT']
+<h3 id="_6">完整调用示例</h3>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+from datetime import datetime, timedelta
 
-    # 注册信号规则
-    rules = {
-        'MA金叉': check_ma_cross,
-        'RSI超卖反弹': check_rsi_oversold,
-        'MACD金叉': check_macd_golden_cross,
+def generate_demo_data(symbol: str, base_price: float, trend: float = 0.001, volatility: float = 0.02):
+    &quot;&quot;&quot;生成模拟K线数据用于演示&quot;&quot;&quot;
+    dates = pd.date_range(end=datetime.now(), periods=200, freq='1h')
+    np.random.seed(hash(symbol) % 1000)  # 不同标的生成不同序列
+
+    returns = np.random.normal(trend, volatility, len(dates))
+    price = base_price * np.exp(np.cumsum(returns))
+    df = pd.DataFrame({
+        'open': price * (1 + np.random.normal(0, 0.005, len(dates))),
+        'high': price * (1 + abs(np.random.normal(0, 0.01, len(dates)))),
+        'low': price * (1 - abs(np.random.normal(0, 0.01, len(dates)))),
+        'close': price,
+        'volume': np.random.randint(1000, 10000, len(dates))
+    }, index=dates)
+    return df
+
+if __name__ == &quot;__main__&quot;:
+    # 准备数据：模拟3个标的
+    symbols = [&quot;BTC_USDT&quot;, &quot;ETH_USDT&quot;, &quot;SOL_USDT&quot;]
+    data_map = {
+        &quot;BTC_USDT&quot;: generate_demo_data(&quot;BTC_USDT&quot;, 50000),
+        &quot;ETH_USDT&quot;: generate_demo_data(&quot;ETH_USDT&quot;, 3000),
+        &quot;SOL_USDT&quot;: generate_demo_data(&quot;SOL_USDT&quot;, 150)
     }
 
-    # 创建扫描器并执行
-    scanner = SignalScanner(symbols, rules, max_workers=3)
-    results = scanner.scan_all()
+    # 定义规则集
+    rules = [
+        {
+            &quot;name&quot;: &quot;RSI超卖反弹&quot;,
+            &quot;conditions&quot;: [
+                {&quot;indicator&quot;: &quot;RSI&quot;, &quot;params&quot;: {&quot;period&quot;: 14}, &quot;target&quot;: &quot;close&quot;,
+                 &quot;operator&quot;: &quot;&lt;&quot;, &quot;threshold&quot;: 30}
+            ],
+            &quot;logic&quot;: &quot;AND&quot;
+        },
+        {
+            &quot;name&quot;: &quot;MACD金叉&quot;,
+            &quot;conditions&quot;: [
+                {&quot;indicator&quot;: &quot;MACD&quot;, &quot;params&quot;: {&quot;fast&quot;: 12, &quot;slow&quot;: 26, &quot;signal&quot;: 9},
+                 &quot;target&quot;: &quot;close&quot;, &quot;operator&quot;: &quot;cross_above&quot;,
+                 &quot;compare_to&quot;: {&quot;indicator&quot;: &quot;MACD&quot;, &quot;params&quot;: {&quot;fast&quot;: 12, &quot;slow&quot;: 26, &quot;signal&quot;: 9},
+                                &quot;target&quot;: &quot;close&quot;}}
+            ],
+            &quot;logic&quot;: &quot;AND&quot;
+        },
+        {
+            &quot;name&quot;: &quot;均线多头排列&quot;,
+            &quot;conditions&quot;: [
+                {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 5}, &quot;target&quot;: &quot;close&quot;,
+                 &quot;operator&quot;: &quot;&gt;&quot;, &quot;compare_to&quot;: {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 20}, &quot;target&quot;: &quot;close&quot;}},
+                {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 20}, &quot;target&quot;: &quot;close&quot;,
+                 &quot;operator&quot;: &quot;&gt;&quot;, &quot;compare_to&quot;: {&quot;indicator&quot;: &quot;SMA&quot;, &quot;params&quot;: {&quot;period&quot;: 60}, &quot;target&quot;: &quot;close&quot;}}
+            ],
+            &quot;logic&quot;: &quot;AND&quot;
+        }
+    ]
+
+    # 执行扫描
+    scanner = ParallelScanner(rules, max_workers=2)
+    signals = scanner.scan_all(data_map)
 
     # 输出结果
-    print(&quot;\n=== 扫描结果 ===&quot;)
-    for res in results:
-        status = &quot;✅&quot; if res['signals'] else &quot;❌&quot;
-        print(f&quot;{status} {res['symbol']}: {res['signals'] if res['signals'] else '无信号'}&quot;)
+    print(&quot;\n===== 扫描结果 =====&quot;)
+    for sig in signals:
+        print(f&quot;[{sig['time']}] {sig['symbol']} - {sig['rule_name']} @ {sig['close']:.2f}&quot;)
+
+    if not signals:
+        print(&quot;本次扫描未触发任何信号&quot;)
 </code></pre>
 
-<p>输出效果：</p>
-<pre class="codehilite"><code>2024-11-20 10:30:01 - INFO - [BTC_USDT] 触发信号: ['MA金叉', 'MACD金叉']
-2024-11-20 10:30:02 - INFO - [ETH_USDT] 触发信号: ['RSI超卖反弹']
-2024-11-20 10:30:02 - INFO - [SOL_USDT] 触发信号: ['MA金叉']
-
-=== 扫描结果 ===
-✅ BTC_USDT: ['MA金叉', 'MACD金叉']
-❌ ETH_USDT: ['RSI超卖反弹']
-✅ BNB_USDT: []
-...
-</code></pre>
-
-<h3 id="7">7. 性能与扩展性优化</h3>
-<p><strong>性能瓶颈</strong>：指标计算是纯CPU操作，数据拉取是I/O操作。<code>ThreadPoolExecutor</code> 对I/O密集型任务提升明显，但对纯CPU计算受GIL限制。如果扫描几百个标的且数据量大，可以考虑：</p>
-<ul>
-<li><code>ProcessPoolExecutor</code> 做CPU密集型指标计算</li>
-<li>数据层加缓存（<code>functools.lru_cache</code> 或 Redis），避免重复拉取</li>
-<li>增量更新：只计算最新K线，而不是每次全量重算</li>
-</ul>
-<p><strong>扩展方向</strong>：</p>
-<ol>
-<li><strong>信号规则组合</strong>：目前每个规则独立判定，可以增加组合逻辑（如 <code>MA金叉 AND RSI&gt;50</code>）</li>
-<li><strong>信号优先级</strong>：多个信号同时触发时，按权重排序输出</li>
-<li><strong>实时扫描</strong>：配合定时器或WebSocket，做到分钟级扫描</li>
-<li><strong>结果持久化</strong>：把信号写入数据库或消息队列，供下游策略模块消费</li>
-</ol>
-<p><strong>一个比较实用的增量更新示例</strong>：</p>
-<pre class="codehilite"><code class="language-python">def incremental_indicators(df: pd.DataFrame, last_indicators: Dict) -&gt; pd.DataFrame:
-    &quot;&quot;&quot;
-    增量计算指标：传入上次的指标结果，只更新最新数据。
-    大幅减少计算量，适合高频扫描场景。
-    &quot;&quot;&quot;
-    # 简化版：只保留最近200根K线
-    df = df.tail(200)
-    return calculate_indicators(df)
-</code></pre>
-
-<h3 id="8">8. 踩坑记录</h3>
-<p>写这个模块时遇到的几个实际问题：</p>
-<ol>
-<li><strong>NaN 比较陷阱</strong>：<code>rolling</code> 计算前N-1个值是NaN，直接比较会报错。处理方式：数据长度不足时提前返回 <code>False</code>。</li>
-<li><strong>时区问题</strong>：不同交易所返回的K线时间戳时区不一致，统一转UTC再处理。</li>
-<li><strong>并发数控制</strong>：线程数不是越多越好，交易所API有频率限制。建议并发数 = 标的数开根号，或者根据API限制动态调整。</li>
-<li><strong>异常隔离</strong>：一个标的的数据异常（如停牌、数据缺失）不应该影响其他标的的扫描。用 <code>try-except</code> 包裹每个标的的处理逻辑。</li>
-</ol>
-<h3 id="9">9. 结语</h3>
-<p>信号扫描模块的核心价值在于：<strong>把人工盯盘的经验转化为可重复执行的代码逻辑</strong>。通过并行扫描，把注意力从"盯盘"解放出来，留给真正的策略优化和风控。</p>
-<p>这个模块的设计是通用的，指标公式和信号规则都可以按需替换。后续可以在此基础上扩展：信号历史统计、回测验证、多时间框架扫描等。</p>
-<p>更多内容请关注本站。</p>
+<h3 id="_7">性能优化与注意事项</h3>
+<p><strong>1. 指标缓存策略</strong>
+<code>SignalEngine</code> 内部维护了指标缓存。当多个规则都使用 <code>SMA(20)</code> 时，只需计算一次。但要注意，缓存是针对单个标的的，扫描完一个标的后，<code>SignalEngine</code> 实例会被丢弃，不会造成内存泄漏。</p>
+<p><strong>2. 数据对齐问题</strong>
+并行计算时，不同标的的K线长度可能不一致。确保传入的 DataFrame 已经按时间排序，且没有缺失值。建议在数据准备阶段做统一清洗。</p>
+<p><strong>3. 规则设计陷阱</strong>
+定义 <code>cross_above</code> 这类穿越条件时，需要前一根K线的数据。如果数据长度不足（比如刚上市的新标的），<code>iloc[-2]</code> 会抛异常。在 <code>_scan_single_symbol</code> 中已经用 <code>try-except</code> 捕获了异常，但更好的做法是在规则定义时声明 <code>min_bars</code> 要求。</p>
+<p><strong>4. 进程池与内存</strong>
+<code>ProcessPoolExecutor</code> 会将数据序列化后传给子进程。如果 <code>data_map</code> 很大，序列化开销可能超过并行计算带来的收益。对于中小规模数据（几百个标的），可以考虑使用 <code>ThreadPoolExecutor</code>，因为 <code>pandas</code> 的底层计算会释放GIL，线程也能获得加速效果。</p>
+<h3 id="_8">扩展方向</h3>
+<p>这个模块的核心在于规则引擎的灵活性。你可以通过扩展 <code>TechnicalIndicators</code> 类来加入更多指标，比如ATR、CCI、KDJ等。也可以修改 <code>SignalEngine</code> 的 <code>_get_value</code> 方法，让它支持从外部数据源（如基本面数据）取值，实现多维度信号扫描。</p>
+<p>此外，输出端可以对接数据库或消息队列，将信号实时推送出去。扫描频率可以设定为定时任务，也可以对接WebSocket实时数据流，实现Tick级别的信号监控。</p>
+<hr />
+<p>更多内容请关注本站，后续将深入讨论信号回测模块、策略参数优化以及实盘接口对接等实战技术。</p>
             </div>
             <div class="post-tags"><span class="tag-badge">信号扫描</span><span class="tag-badge">技术指标</span><span class="tag-badge">并行检测</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
