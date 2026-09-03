@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>信号扫描模块设计与实现：多指标并行检测</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/22.html</link>
+            <description>信号扫描模块设计与实现：多指标并行检测
+
+行情数据每时每刻都在变动，人工盯盘去验证指标条件，既低效又容易遗漏。信号扫描模块的价值在于，将“指标计算”和“条件判定”从人工观察中剥离出来，交给程序去循环执行。...</description>
+            <pubDate>2026-09-03</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
             <title>模拟交易系统架构设计：从信号扫描到自动执行</title>
             <link>https://hkcode.eu.org/quant-blog/posts/21.html</link>
             <description>模拟交易系统架构设计：从信号扫描到自动执行
@@ -181,15 +190,6 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
 
 定时任务跑完就忘，这是很多量化脚本的通病。任务失败、重复执行、耗时异常，全靠人工盯日志，效率太低。用SQLite做任务执行记录，轻量、零配置、单文件，非常适合个人量化项目的任务管理。...</description>
             <pubDate>2026-08-06</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>PowerShell调用Python脚本的编码踩坑全记录</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/2.html</link>
-            <description>PowerShell调用Python脚本的编码踩坑全记录
-
-在Windows任务计划程序里跑Python量化脚本，最隐蔽的坑往往不是策略逻辑，而是编码问题。上个月我把一个数据清洗脚本挂到任务计划里，结果每天凌晨3点准时收到退出码267009的告警邮件。...</description>
-            <pubDate>2026-08-05</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
