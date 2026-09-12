@@ -7,12 +7,12 @@
     <meta name="author" content="mattleeee">
         <meta name="description" content="模拟交易系统架构设计：从信号扫描到自动执行
 
-模拟交易系统（Paper Trading System）的价值不在于帮你赚钱，而在于验证你的策略逻辑、参数稳定性以及执行链路是否可靠。...">
+做量化策略开发时，最痛苦的事情不是写策略逻辑，而是没有一个稳定的模拟环境来验证信号质量和执行效果。直接上实盘风险太大，纯回测又无法反映实时数据的真实表现。...">
     <meta name="keywords" content="模拟交易,系统架构,信号扫描,Python">
     <meta property="og:title" content="模拟交易系统架构设计：从信号扫描到自动执行">
     <meta property="og:description" content="模拟交易系统架构设计：从信号扫描到自动执行
 
-模拟交易系统（Paper Trading System）的价值不在于帮你赚钱，而在于验证你的策略逻辑、参数稳定性以及执行链路是否可靠。...">
+做量化策略开发时，最痛苦的事情不是写策略逻辑，而是没有一个稳定的模拟环境来验证信号质量和执行效果。直接上实盘风险太大，纯回测又无法反映实时数据的真实表现。...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/21.html">
@@ -36,418 +36,498 @@
         <article class="post">
             <h1>模拟交易系统架构设计：从信号扫描到自动执行</h1>
             <div class="post-meta">
-                <span class="date">2026-09-01</span>
+                <span class="date">2026-09-12</span>
                 <span class="category"><span class="tag-badge">Python自动化</span></span>
             </div>
             <div class="post-content">
-<p>模拟交易系统（Paper Trading System）的价值不在于帮你赚钱，而在于验证你的策略逻辑、参数稳定性以及执行链路是否可靠。实盘与模拟最大的差异在于<strong>滑点、延迟和撮合规则</strong>，但架构设计的核心——模块解耦、数据流管理、异常处理——是完全一致的。本文分享一套我在实战中打磨过的架构，直接面向Python，代码可参考运行。</p>
-<h3 id="1">1. 系统总体架构</h3>
-<p>整个系统分为四个核心模块，外加一个调度中枢：</p>
-<pre class="codehilite"><code>+-------------------+      +-------------------+      +-------------------+
-|   信号扫描模块     | ---&gt; |   市场分析模块     | ---&gt; |   模拟交易引擎     |
-| (Signal Scanner)  |      | (Market Analyzer) |      | (Paper Engine)    |
-+-------------------+      +-------------------+      +-------------------+
-         ^                         ^                         |
-         |                         |                         v
-+-------------------+      +-------------------+      +-------------------+
-|   数据源适配器     |      |   特征计算器       |      |   推送通知模块     |
-| (Data Feeder)     |      | (Feature Calc)    |      | (Notifier)        |
-+-------------------+      +-------------------+      +-------------------+
+<p>做量化策略开发时，最痛苦的事情不是写策略逻辑，而是没有一个稳定的模拟环境来验证信号质量和执行效果。直接上实盘风险太大，纯回测又无法反映实时数据的真实表现。这篇文章分享一套我实际在用的模拟交易系统架构，从信号扫描到自动执行完整跑通。</p>
+<h2 id="_1">整体架构</h2>
+<p>系统分为四个核心模块，通过事件驱动的方式串联：</p>
+<pre class="codehilite"><code>┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  信号扫描    │────▶│  市场分析    │────▶│  模拟交易    │────▶│  推送通知    │
+│  Scanner    │     │  Analyzer   │     │  Engine     │     │  Notifier   │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │                   │
+       ▼                   ▼                   ▼                   ▼
+  行情数据源          指标计算库          虚拟账户            消息通道
+  (REST/WS)          (pandas-ta)        (SQLite)          (Webhook)
 </code></pre>
 
-<p><strong>数据流向</strong>：外部行情数据 → 数据源适配器 → 信号扫描模块 → 市场分析模块（特征计算）→ 模拟交易引擎（撮合/持仓管理）→ 推送通知模块（Telegram/邮件/日志）。</p>
-<p><strong>核心原则</strong>：模块之间不直接调用，通过消息队列（或简单的<code>queue.Queue</code>）解耦。这样任何一个模块崩溃或升级，不影响其他模块运行。</p>
-<h3 id="2">2. 模块职责划分与代码骨架</h3>
-<h4 id="21-data-feeder">2.1 数据源适配器（Data Feeder）</h4>
-<p>这个模块负责对接不同数据源（行情API、CSV文件、数据库），统一输出标准化的<code>Tick</code>或<code>Bar</code>对象。这是整个系统的“地基”。</p>
-<pre class="codehilite"><code class="language-python"># data_feeder.py
-import time
-import queue
-from dataclasses import dataclass
+<p>数据流向很清晰：Scanner 负责定时拉取行情并生成原始信号，Analyzer 对信号做二次过滤和打分，Engine 根据分析结果执行模拟买卖并更新虚拟账户，Notifier 把关键事件推送到手机或群组。</p>
+<p>模块之间通过一个轻量级的事件总线解耦，不直接互相调用。这样每个模块可以独立测试和替换。</p>
+<h2 id="_2">事件总线设计</h2>
+<p>先定义事件总线和基础事件类型，这是整个系统的骨架：</p>
+<pre class="codehilite"><code class="language-python">import asyncio
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Callable, Any
+from collections import defaultdict
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Event:
+    topic: str
+    payload: dict
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+class EventBus:
+    &quot;&quot;&quot;异步事件总线，模块间通过发布/订阅通信&quot;&quot;&quot;
+
+    def __init__(self):
+        self._subscribers: dict[str, list[Callable]] = defaultdict(list)
+
+    def subscribe(self, topic: str, handler: Callable):
+        self._subscribers[topic].append(handler)
+
+    async def publish(self, topic: str, payload: dict):
+        event = Event(topic=topic, payload=payload)
+        handlers = self._subscribers.get(topic, [])
+        if not handlers:
+            return
+        await asyncio.gather(
+            *[self._safe_call(h, event) for h in handlers]
+        )
+
+    async def _safe_call(self, handler: Callable, event: Event):
+        try:
+            result = handler(event)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception(f&quot;Handler {handler.__name__} failed on {event.topic}&quot;)
+
+
+bus = EventBus()
+</code></pre>
+
+<p>事件主题统一定义为常量，避免拼写错误：</p>
+<pre class="codehilite"><code class="language-python">class Topics:
+    RAW_SIGNAL = &quot;signal.raw&quot;          # 扫描器产出原始信号
+    ANALYZED_SIGNAL = &quot;signal.analyzed&quot; # 分析器产出过滤后的信号
+    ORDER_FILLED = &quot;order.filled&quot;       # 模拟成交
+    ORDER_REJECTED = &quot;order.rejected&quot;   # 订单被拒
+    ACCOUNT_UPDATE = &quot;account.update&quot;   # 账户变动
+</code></pre>
+
+<h2 id="_3">信号扫描模块</h2>
+<p>Scanner 的职责很单一：按固定间隔拉取行情数据，跑一遍预设的信号规则，把命中的结果发布出去。</p>
+<pre class="codehilite"><code class="language-python">import aiohttp
+import asyncio
 from typing import Optional
 
-@dataclass
-class Bar:
-    symbol: str
-    timestamp: int  # Unix timestamp (s)
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
 
-class BaseFeeder:
-    &quot;&quot;&quot;所有数据源的基类，定义统一接口&quot;&quot;&quot;
-    def __init__(self, symbol: str, queue: queue.Queue):
-        self.symbol = symbol
-        self.queue = queue
+class MarketDataFetcher:
+    &quot;&quot;&quot;行情数据获取，这里用 REST 轮询，实际可换成 WebSocket&quot;&quot;&quot;
 
-    def run(self):
-        raise NotImplementedError
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self._session: Optional[aiohttp.ClientSession] = None
 
-    def _push(self, bar: Bar):
-        self.queue.put(bar)
+    async def start(self):
+        self._session = aiohttp.ClientSession()
 
-class CSVFeeder(BaseFeeder):
-    &quot;&quot;&quot;从CSV文件读取历史数据，模拟实时推送&quot;&quot;&quot;
-    def __init__(self, symbol: str, csv_path: str, queue: queue.Queue):
-        super().__init__(symbol, queue)
-        self.csv_path = csv_path
+    async def stop(self):
+        if self._session:
+            await self._session.close()
 
-    def run(self):
-        import pandas as pd
-        df = pd.read_csv(self.csv_path, parse_dates=['timestamp'])
-        for _, row in df.iterrows():
-            bar = Bar(
-                symbol=self.symbol,
-                timestamp=int(row['timestamp'].timestamp()),
-                open=row['open'],
-                high=row['high'],
-                low=row['low'],
-                close=row['close'],
-                volume=row['volume']
-            )
-            self._push(bar)
-            time.sleep(1)  # 模拟实时推送间隔，实际行情用 websocket 不需要 sleep
-</code></pre>
+    async def fetch_klines(self, symbol: str, interval: str = &quot;1m&quot;, limit: int = 100) -&gt; list:
+        url = f&quot;{self.base_url}/api/v1/klines&quot;
+        params = {&quot;symbol&quot;: symbol, &quot;interval&quot;: interval, &quot;limit&quot;: limit}
+        async with self._session.get(url, params=params) as resp:
+            resp.raise_for_status()
+            return await resp.json()
 
-<h4 id="22-signal-scanner">2.2 信号扫描模块（Signal Scanner）</h4>
-<p>该模块从队列中消费Bar数据，运行策略逻辑，产出“信号”对象。信号只包含方向（多/空/平）和强度，不包含仓位大小——仓位管理交给交易引擎。</p>
-<pre class="codehilite"><code class="language-python"># signal_scanner.py
-import queue
-import threading
-from dataclasses import dataclass
-from enum import Enum
 
-class SignalType(Enum):
-    BUY = 1
-    SELL = -1
-    EXIT = 0
+class SignalScanner:
+    &quot;&quot;&quot;信号扫描器：定时拉行情，跑规则，发信号&quot;&quot;&quot;
 
-@dataclass
-class Signal:
-    symbol: str
-    type: SignalType
-    strength: float  # 0~1，用于仓位计算
-    timestamp: int
+    def __init__(self, fetcher: MarketDataFetcher, bus: EventBus,
+                 symbols: list[str], interval_sec: int = 60):
+        self.fetcher = fetcher
+        self.bus = bus
+        self.symbols = symbols
+        self.interval_sec = interval_sec
+        self._rules: list[Callable] = []
 
-class BaseStrategy:
-    &quot;&quot;&quot;策略基类，子类实现 generate_signal 方法&quot;&quot;&quot;
-    def generate_signal(self, bar: Bar) -&gt; Optional[Signal]:
-        raise NotImplementedError
+    def register_rule(self, rule_fn: Callable):
+        &quot;&quot;&quot;注册信号规则，规则函数接收 klines 返回 signal dict 或 None&quot;&quot;&quot;
+        self._rules.append(rule_fn)
 
-class MaCrossStrategy(BaseStrategy):
-    &quot;&quot;&quot;双均线策略示例：快线上穿慢线做多，下穿做空&quot;&quot;&quot;
-    def __init__(self, fast_window: int = 5, slow_window: int = 20):
-        self.fast_window = fast_window
-        self.slow_window = slow_window
-        self._prices = []
-
-    def generate_signal(self, bar: Bar) -&gt; Optional[Signal]:
-        self._prices.append(bar.close)
-        if len(self._prices) &lt; self.slow_window:
-            return None
-
-        # 只保留最近 slow_window 个价格
-        self._prices = self._prices[-self.slow_window:]
-
-        fast_ma = sum(self._prices[-self.fast_window:]) / self.fast_window
-        slow_ma = sum(self._prices[-self.slow_window:]) / self.slow_window
-
-        # 判断交叉
-        if len(self._prices) &gt;= self.slow_window + 1:
-            prev_fast = sum(self._prices[-self.fast_window-1:-1]) / self.fast_window
-            prev_slow = sum(self._prices[-self.slow_window-1:-1]) / self.slow_window
-            if prev_fast &lt;= prev_slow and fast_ma &gt; slow_ma:
-                return Signal(symbol=bar.symbol, type=SignalType.BUY, strength=0.5, timestamp=bar.timestamp)
-            elif prev_fast &gt;= prev_slow and fast_ma &lt; slow_ma:
-                return Signal(symbol=bar.symbol, type=SignalType.SELL, strength=0.5, timestamp=bar.timestamp)
-        return None
-
-class SignalScanner(threading.Thread):
-    def __init__(self, data_queue: queue.Queue, signal_queue: queue.Queue, strategy: BaseStrategy):
-        super().__init__()
-        self.data_queue = data_queue
-        self.signal_queue = signal_queue
-        self.strategy = strategy
-        self._stop_event = threading.Event()
-
-    def run(self):
-        while not self._stop_event.is_set():
+    async def run(self):
+        while True:
             try:
-                bar = self.data_queue.get(timeout=1)
-            except queue.Empty:
-                continue
+                await self._scan_once()
+            except Exception:
+                logger.exception(&quot;Scan cycle failed&quot;)
+            await asyncio.sleep(self.interval_sec)
 
-            signal = self.strategy.generate_signal(bar)
+    async def _scan_once(self):
+        tasks = [self._scan_symbol(s) for s in self.symbols]
+        await asyncio.gather(*tasks)
+
+    async def _scan_symbol(self, symbol: str):
+        klines = await self.fetcher.fetch_klines(symbol)
+        if not klines or len(klines) &lt; 20:
+            return
+        for rule in self._rules:
+            signal = rule(symbol, klines)
             if signal:
-                self.signal_queue.put(signal)
-                print(f&quot;[Signal] {signal.timestamp} {signal.symbol} {signal.type.name} strength={signal.strength}&quot;)
-
-    def stop(self):
-        self._stop_event.set()
+                await self.bus.publish(Topics.RAW_SIGNAL, signal)
+                logger.info(f&quot;Raw signal: {signal}&quot;)
 </code></pre>
 
-<h4 id="23-market-analyzer">2.3 市场分析模块（Market Analyzer）</h4>
-<p>这个模块不是必须的，但建议独立出来。它负责计算技术指标、市场状态（趋势/震荡）、风险指标（波动率、最大回撤），供信号扫描模块和交易引擎共同调用。这里做一个简单的特征计算器：</p>
-<pre class="codehilite"><code class="language-python"># market_analyzer.py
-import numpy as np
+<p>一个简单的规则示例，检测放量突破：</p>
+<pre class="codehilite"><code class="language-python">def volume_breakout_rule(symbol: str, klines: list) -&gt; dict | None:
+    &quot;&quot;&quot;最近一根K线成交量超过前20根均量的2倍，且收盘价创近期新高&quot;&quot;&quot;
+    closes = [float(k[4]) for k in klines]
+    volumes = [float(k[5]) for k in klines]
+
+    avg_vol = sum(volumes[-21:-1]) / 20
+    last_vol = volumes[-1]
+    last_close = closes[-1]
+    recent_high = max(closes[-20:-1])
+
+    if last_vol &gt; avg_vol * 2 and last_close &gt; recent_high:
+        return {
+            &quot;symbol&quot;: symbol,
+            &quot;type&quot;: &quot;volume_breakout&quot;,
+            &quot;price&quot;: last_close,
+            &quot;volume_ratio&quot;: round(last_vol / avg_vol, 2),
+            &quot;ts&quot;: klines[-1][0],
+        }
+    return None
+</code></pre>
+
+<h2 id="_4">市场分析模块</h2>
+<p>Analyzer 订阅原始信号，做进一步过滤。比如检查趋势方向、计算波动率、给出信号评分。只有评分超过阈值的信号才会被放行到交易引擎。</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
 
 class MarketAnalyzer:
-    &quot;&quot;&quot;计算市场特征，供策略和风控使用&quot;&quot;&quot;
-    def __init__(self, max_window: int = 100):
-        self.max_window = max_window
-        self._close_prices = []
+    &quot;&quot;&quot;对原始信号做二次过滤和评分&quot;&quot;&quot;
 
-    def update(self, close: float):
-        self._close_prices.append(close)
-        if len(self._close_prices) &gt; self.max_window:
-            self._close_prices.pop(0)
+    def __init__(self, bus: EventBus, min_score: float = 0.6):
+        self.bus = bus
+        self.min_score = min_score
+        bus.subscribe(Topics.RAW_SIGNAL, self.on_raw_signal)
 
-    def volatility(self) -&gt; float:
-        &quot;&quot;&quot;最近20根K线的年化波动率&quot;&quot;&quot;
-        if len(self._close_prices) &lt; 20:
-            return 0.0
-        returns = np.diff(self._close_prices[-20:]) / self._close_prices[-20:-1]
-        return float(np.std(returns) * np.sqrt(252))
+    async def on_raw_signal(self, event: Event):
+        signal = event.payload
+        score = self._score(signal)
+        if score &lt; self.min_score:
+            logger.debug(f&quot;Signal {signal['symbol']} scored {score:.2f}, filtered&quot;)
+            return
+        signal[&quot;score&quot;] = round(score, 3)
+        await self.bus.publish(Topics.ANALYZED_SIGNAL, signal)
 
-    def trend_direction(self) -&gt; int:
-        &quot;&quot;&quot;简单线性回归斜率判断趋势方向&quot;&quot;&quot;
-        if len(self._close_prices) &lt; 30:
-            return 0
-        x = np.arange(len(self._close_prices[-30:]))
-        y = np.array(self._close_prices[-30:])
-        slope = np.polyfit(x, y, 1)[0]
-        if slope &gt; 0.01:
-            return 1
-        elif slope &lt; -0.01:
-            return -1
-        return 0
+    def _score(self, signal: dict) -&gt; float:
+        &quot;&quot;&quot;多因子打分，返回 0~1&quot;&quot;&quot;
+        scores = []
+
+        # 因子1：量比越高越好，3倍以上满分
+        vol_ratio = signal.get(&quot;volume_ratio&quot;, 1.0)
+        scores.append(min(vol_ratio / 3.0, 1.0))
+
+        # 因子2：信号类型权重
+        type_weight = {&quot;volume_breakout&quot;: 0.8, &quot;ma_cross&quot;: 0.6}
+        scores.append(type_weight.get(signal[&quot;type&quot;], 0.5))
+
+        # 因子3：价格动量（可扩展）
+        # 这里留空，实际接入更多数据后补充
+
+        return float(np.mean(scores))
 </code></pre>
 
-<h4 id="24-paper-engine">2.4 模拟交易引擎（Paper Engine）</h4>
-<p>这是系统的核心。它接收信号，维护虚拟账户（余额、持仓、订单），模拟撮合（按当前Bar收盘价成交，可加滑点），并生成交易记录。</p>
-<pre class="codehilite"><code class="language-python"># paper_engine.py
-import queue
-import threading
-from dataclasses import dataclass, field
-from typing import Dict, List
+<p>这个模块的设计要点是：<strong>打分逻辑和信号生成逻辑分离</strong>。规则负责"发现"，分析器负责"判断"。这样调整过滤条件时不需要动扫描器。</p>
+<h2 id="_5">模拟交易引擎</h2>
+<p>引擎是核心模块，维护虚拟账户、持仓、订单，处理成交逻辑。数据落地用 SQLite，轻量且方便查询。</p>
+<pre class="codehilite"><code class="language-python">import sqlite3
+from dataclasses import dataclass
+
 
 @dataclass
 class Position:
     symbol: str
-    quantity: float = 0.0
-    avg_price: float = 0.0
-
-@dataclass
-class TradeRecord:
-    timestamp: int
-    symbol: str
-    side: str  # 'buy' / 'sell'
-    price: float
     quantity: float
-    pnl: float = 0.0
+    avg_price: float
 
-class PaperEngine(threading.Thread):
-    def __init__(self, signal_queue: queue.Queue, initial_cash: float = 100000.0, slippage: float = 0.001):
-        super().__init__()
-        self.signal_queue = signal_queue
-        self.cash = initial_cash
-        self.positions: Dict[str, Position] = {}
-        self.trades: List[TradeRecord] = []
-        self.slippage = slippage  # 模拟滑点比例
-        self._stop_event = threading.Event()
-        self._lock = threading.Lock()
+    @property
+    def cost(self) -&gt; float:
+        return self.quantity * self.avg_price
 
-    def run(self):
-        while not self._stop_event.is_set():
-            try:
-                signal = self.signal_queue.get(timeout=1)
-            except queue.Empty:
-                continue
-            self._execute_signal(signal)
 
-    def _execute_signal(self, signal: Signal):
-        with self._lock:
-            pos = self.positions.get(signal.symbol, Position(symbol=signal.symbol))
-            # 这里简化：每次信号只操作固定仓位比例，实际可以用ATR或风险模型
-            trade_qty = 100  # 固定100股/张
+class VirtualAccount:
+    &quot;&quot;&quot;虚拟账户，记录余额、持仓、成交历史&quot;&quot;&quot;
 
-            if signal.type == SignalType.BUY:
-                # 模拟成交价 = 当前价 + 滑点
-                # 注意：这里没有直接获取当前价，需要从信号或外部传入，实际中可维护最新价表
-                # 为简化，我们假设信号携带了价格（实际实现中应传入）
-                price = signal.strength  # 仅作演示，实际应传入最新价格
-                cost = price * trade_qty
-                if self.cash &gt;= cost:
-                    self.cash -= cost
-                    # 更新持仓
-                    total_qty = pos.quantity + trade_qty
-                    pos.avg_price = (pos.avg_price * pos.quantity + cost) / total_qty if total_qty &gt; 0 else price
-                    pos.quantity = total_qty
-                    self.positions[signal.symbol] = pos
-                    self.trades.append(TradeRecord(signal.timestamp, signal.symbol, 'buy', price, trade_qty))
-                    print(f&quot;[Trade] BUY {trade_qty} {signal.symbol} @ {price:.2f}&quot;)
+    def __init__(self, db_path: str = &quot;paper_trading.db&quot;,
+                 initial_balance: float = 100_000):
+        self.conn = sqlite3.connect(db_path)
+        self._init_tables()
+        self._ensure_account(initial_balance)
 
-            elif signal.type == SignalType.SELL:
-                if pos.quantity &gt;= trade_qty:
-                    price = signal.strength
-                    revenue = price * trade_qty
-                    self.cash += revenue
-                    # 计算 PnL
-                    pnl = (price - pos.avg_price) * trade_qty
-                    pos.quantity -= trade_qty
-                    if pos.quantity == 0:
-                        del self.positions[signal.symbol]
-                    else:
-                        self.positions[signal.symbol] = pos
-                    self.trades.append(TradeRecord(signal.timestamp, signal.symbol, 'sell', price, trade_qty, pnl))
-                    print(f&quot;[Trade] SELL {trade_qty} {signal.symbol} @ {price:.2f} PnL={pnl:.2f}&quot;)
+    def _init_tables(self):
+        cur = self.conn.cursor()
+        cur.executescript(&quot;&quot;&quot;
+            CREATE TABLE IF NOT EXISTS account (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                balance REAL NOT NULL,
+                frozen REAL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS positions (
+                symbol TEXT PRIMARY KEY,
+                quantity REAL NOT NULL,
+                avg_price REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                fee REAL NOT NULL,
+                ts DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        &quot;&quot;&quot;)
+        self.conn.commit()
 
-            elif signal.type == SignalType.EXIT:
-                # 平仓逻辑
-                if pos.quantity &gt; 0:
-                    price = signal.strength
-                    revenue = price * pos.quantity
-                    self.cash += revenue
-                    pnl = (price - pos.avg_price) * pos.quantity
-                    self.trades.append(TradeRecord(signal.timestamp, signal.symbol, 'exit', price, pos.quantity, pnl))
-                    print(f&quot;[Trade] EXIT {pos.quantity} {signal.symbol} @ {price:.2f} PnL={pnl:.2f}&quot;)
-                    del self.positions[signal.symbol]
+    def _ensure_account(self, initial_balance: float):
+        cur = self.conn.cursor()
+        cur.execute(&quot;SELECT COUNT(*) FROM account&quot;)
+        if cur.fetchone()[0] == 0:
+            cur.execute(&quot;INSERT INTO account (id, balance) VALUES (1, ?)&quot;,
+                        (initial_balance,))
+            self.conn.commit()
 
-    def get_account_summary(self) -&gt; dict:
-        with self._lock:
-            total_value = self.cash
-            for sym, pos in self.positions.items():
-                # 实际中需要最新价格，这里用 avg_price 代替
-                total_value += pos.quantity * pos.avg_price
-            return {
-                &quot;cash&quot;: self.cash,
-                &quot;positions&quot;: {k: (v.quantity, v.avg_price) for k, v in self.positions.items()},
-                &quot;total_value&quot;: total_value,
-                &quot;trade_count&quot;: len(self.trades)
-            }
+    @property
+    def balance(self) -&gt; float:
+        cur = self.conn.cursor()
+        cur.execute(&quot;SELECT balance FROM account WHERE id = 1&quot;)
+        return cur.fetchone()[0]
 
-    def stop(self):
-        self._stop_event.set()
+    def get_position(self, symbol: str) -&gt; Position | None:
+        cur = self.conn.cursor()
+        cur.execute(&quot;SELECT quantity, avg_price FROM positions WHERE symbol = ?&quot;,
+                    (symbol,))
+        row = cur.fetchone()
+        if row and row[0] &gt; 0:
+            return Position(symbol, row[0], row[1])
+        return None
+
+    def execute_buy(self, symbol: str, price: float,
+                    quantity: float, fee_rate: float = 0.001) -&gt; bool:
+        cost = price * quantity
+        fee = cost * fee_rate
+        total = cost + fee
+        if total &gt; self.balance:
+            return False
+
+        cur = self.conn.cursor()
+        cur.execute(&quot;UPDATE account SET balance = balance - ? WHERE id = 1&quot;,
+                    (total,))
+
+        pos = self.get_position(symbol)
+        if pos:
+            new_qty = pos.quantity + quantity
+            new_avg = (pos.cost + cost) / new_qty
+            cur.execute(&quot;UPDATE positions SET quantity = ?, avg_price = ? WHERE symbol = ?&quot;,
+                        (new_qty, new_avg, symbol))
+        else:
+            cur.execute(&quot;INSERT INTO positions (symbol, quantity, avg_price) VALUES (?, ?, ?)&quot;,
+                        (symbol, quantity, price))
+
+        cur.execute(&quot;INSERT INTO trades (symbol, side, price, quantity, fee) VALUES (?, 'BUY', ?, ?, ?)&quot;,
+                    (symbol, price, quantity, fee))
+        self.conn.commit()
+        return True
+
+    def execute_sell(self, symbol: str, price: float,
+                     quantity: float, fee_rate: float = 0.001) -&gt; bool:
+        pos = self.get_position(symbol)
+        if not pos or pos.quantity &lt; quantity:
+            return False
+
+        proceeds = price * quantity
+        fee = proceeds * fee_rate
+        net = proceeds - fee
+
+        cur = self.conn.cursor()
+        cur.execute(&quot;UPDATE account SET balance = balance + ? WHERE id = 1&quot;, (net,))
+
+        remaining = pos.quantity - quantity
+        if remaining &lt;= 0:
+            cur.execute(&quot;DELETE FROM positions WHERE symbol = ?&quot;, (symbol,))
+        else:
+            cur.execute(&quot;UPDATE positions SET quantity = ? WHERE symbol = ?&quot;,
+                        (remaining, symbol))
+
+        cur.execute(&quot;INSERT INTO trades (symbol, side, price, quantity, fee) VALUES (?, 'SELL', ?, ?, ?)&quot;,
+                    (symbol, price, quantity, fee))
+        self.conn.commit()
+        return True
 </code></pre>
 
-<h4 id="25-notifier">2.5 推送通知模块（Notifier）</h4>
-<p>用于实时推送信号和交易结果，避免盯盘。这里以Telegram为例，但为了不引入外部依赖，先提供一个抽象接口和日志实现：</p>
-<pre class="codehilite"><code class="language-python"># notifier.py
-import logging
-from typing import Optional
+<p>交易引擎订阅分析后的信号，根据信号类型决定买卖方向和仓位：</p>
+<pre class="codehilite"><code class="language-python">class TradingEngine:
+    &quot;&quot;&quot;模拟交易引擎：接收分析信号，执行模拟买卖&quot;&quot;&quot;
 
-class BaseNotifier:
-    def send(self, message: str):
-        raise NotImplementedError
+    def __init__(self, bus: EventBus, account: VirtualAccount,
+                 position_size_pct: float = 0.1):
+        self.bus = bus
+        self.account = account
+        self.position_size_pct = position_size_pct
+        bus.subscribe(Topics.ANALYZED_SIGNAL, self.on_signal)
 
-class LogNotifier(BaseNotifier):
-    &quot;&quot;&quot;默认实现：输出到日志文件和控制台&quot;&quot;&quot;
-    def __init__(self, log_file: str = &quot;trading.log&quot;):
-        logging.basicConfig(
-            filename=log_file,
-            level=logging.INFO,
-            format='%(asctime)s - %(message)s'
-        )
-        self.logger = logging.getLogger(&quot;paper_trading&quot;)
+    async def on_signal(self, event: Event):
+        signal = event.payload
+        symbol = signal[&quot;symbol&quot;]
+        price = signal[&quot;price&quot;]
+        score = signal.get(&quot;score&quot;, 0.5)
 
-    def send(self, message: str):
-        self.logger.info(message)
-        print(f&quot;[Notifier] {message}&quot;)
+        # 仓位大小随评分线性调整
+        alloc = self.account.balance * self.position_size_pct * score
+        quantity = round(alloc / price, 6)
 
-# 可选：Telegram 实现
-class TelegramNotifier(BaseNotifier):
-    def __init__(self, token: str, chat_id: str):
-        # 这里需要 requests 库，可按需安装
-        self.token = token
-        self.chat_id = chat_id
+        if quantity &lt;= 0:
+            return
 
-    def send(self, message: str):
-        import requests
-        url = f&quot;https://api.telegram.org/bot{self.token}/sendMessage&quot;
-        params = {&quot;chat_id&quot;: self.chat_id, &quot;text&quot;: message}
-        requests.post(url, data=params)
+        success = self.account.execute_buy(symbol, price, quantity)
+        if success:
+            await self.bus.publish(Topics.ORDER_FILLED, {
+                &quot;symbol&quot;: symbol, &quot;side&quot;: &quot;BUY&quot;,
+                &quot;price&quot;: price, &quot;quantity&quot;: quantity,
+                &quot;score&quot;: score,
+            })
+        else:
+            await self.bus.publish(Topics.ORDER_REJECTED, {
+                &quot;symbol&quot;: symbol, &quot;reason&quot;: &quot;insufficient_balance&quot;,
+            })
 </code></pre>
 
-<h3 id="3">3. 系统调度与启动</h3>
-<p>我们用一个主脚本来组装所有模块，并启动线程。这是整个系统的“总装线”：</p>
-<pre class="codehilite"><code class="language-python"># main.py
-import queue
-import time
+<h2 id="_6">推送通知模块</h2>
+<p>通知模块订阅成交和拒单事件，通过 Webhook 推送到手机或群组。这里用飞书/钉钉的 Webhook 格式举例：</p>
+<pre class="codehilite"><code class="language-python">class Notifier:
+    &quot;&quot;&quot;事件推送到 Webhook&quot;&quot;&quot;
 
-from data_feeder import CSVFeeder
-from signal_scanner import SignalScanner, MaCrossStrategy
-from paper_engine import PaperEngine
-from notifier import LogNotifier
+    def __init__(self, bus: EventBus, webhook_url: str):
+        self.webhook_url = webhook_url
+        self._session: Optional[aiohttp.ClientSession] = None
+        bus.subscribe(Topics.ORDER_FILLED, self.on_filled)
+        bus.subscribe(Topics.ORDER_REJECTED, self.on_rejected)
 
-def main():
-    # 创建消息队列
-    data_queue = queue.Queue(maxsize=1000)
-    signal_queue = queue.Queue(maxsize=100)
+    async def start(self):
+        self._session = aiohttp.ClientSession()
 
-    # 初始化模块
-    feeder = CSVFeeder(
-        symbol=&quot;BTCUSDT&quot;,
-        csv_path=&quot;./data/btc_1h.csv&quot;,  # 假设有历史数据文件
-        queue=data_queue
+    async def stop(self):
+        if self._session:
+            await self._session.close()
+
+    async def on_filled(self, event: Event):
+        d = event.payload
+        text = (f&quot;[模拟成交] {d['side']} {d['symbol']}\n&quot;
+                f&quot;价格: {d['price']}  数量: {d['quantity']}\n&quot;
+                f&quot;信号评分: {d.get('score', 'N/A')}&quot;)
+        await self._send(text)
+
+    async def on_rejected(self, event: Event):
+        d = event.payload
+        text = f&quot;[订单拒绝] {d['symbol']}  原因: {d['reason']}&quot;
+        await self._send(text)
+
+    async def _send(self, text: str):
+        if not self._session:
+            return
+        payload = {&quot;msg_type&quot;: &quot;text&quot;, &quot;content&quot;: {&quot;text&quot;: text}}
+        try:
+            async with self._session.post(self.webhook_url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.warning(f&quot;Webhook returned {resp.status}&quot;)
+        except Exception:
+            logger.exception(&quot;Failed to send notification&quot;)
+</code></pre>
+
+<h2 id="_7">主入口与启动</h2>
+<p>把所有模块组装起来：</p>
+<pre class="codehilite"><code class="language-python">async def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format=&quot;%(asctime)s [%(levelname)s] %(name)s: %(message)s&quot;,
     )
 
-    strategy = MaCrossStrategy(fast_window=5, slow_window=20)
-    scanner = SignalScanner(data_queue=data_queue, signal_queue=signal_queue, strategy=strategy)
+    fetcher = MarketDataFetcher(base_url=&quot;https://api.example.com&quot;)
+    await fetcher.start()
 
-    engine = PaperEngine(signal_queue=signal_queue, initial_cash=100000.0, slippage=0.001)
+    scanner = SignalScanner(
+        fetcher=fetcher,
+        bus=bus,
+        symbols=[&quot;BTCUSDT&quot;, &quot;ETHUSDT&quot;],
+        interval_sec=60,
+    )
+    scanner.register_rule(volume_breakout_rule)
 
-    notifier = LogNotifier(log_file=&quot;./paper_trading.log&quot;)
+    analyzer = MarketAnalyzer(bus=bus, min_score=0.6)
+    account = VirtualAccount(db_path=&quot;paper.db&quot;, initial_balance=100_000)
+    engine = TradingEngine(bus=bus, account=account, position_size_pct=0.1)
 
-    # 启动线程
-    scanner.start()
-    engine.start()
+    notifier = Notifier(bus=bus, webhook_url=&quot;https://hook.example.com/xxx&quot;)
+    await notifier.start()
 
-    # 运行数据源（这里用主线程跑，方便 Ctrl+C 退出）
     try:
-        feeder.run()
-    except KeyboardInterrupt:
-        print(&quot;Shutting down...&quot;)
+        await scanner.run()
     finally:
-        scanner.stop()
-        engine.stop()
-        scanner.join()
-        engine.join()
+        await fetcher.stop()
+        await notifier.stop()
 
-    # 输出账户汇总
-    summary = engine.get_account_summary()
-    notifier.send(f&quot;Final Summary: {summary}&quot;)
 
 if __name__ == &quot;__main__&quot;:
-    main()
+    asyncio.run(main())
 </code></pre>
 
-<h3 id="4">4. 关键技术选型与架构决策</h3>
-<p><strong>4.1 为什么用线程而不是多进程？</strong></p>
-<ul>
-<li>模拟交易系统I/O密集（等待行情、网络推送），线程足够，且共享内存方便（持仓、账户数据）。</li>
-<li>如果策略是CPU密集型（如机器学习预测），建议将信号扫描模块独立为多进程，通过ZeroMQ或Redis队列通信。</li>
-</ul>
-<p><strong>4.2 队列的作用</strong></p>
-<p>队列在这里不仅解耦模块，还起到了<strong>流量削峰</strong>的作用。当行情波动大时，数据队列会堆积，但信号扫描模块消费速度跟不上时，可以丢弃旧数据（<code>queue.Queue</code>的<code>maxsize</code> + <code>put_nowait</code>），避免内存爆炸。</p>
-<p><strong>4.3 模拟撮合的关键细节</strong></p>
-<ul>
-<li><strong>滑点</strong>：用<code>slippage</code>参数模拟，实际中可以根据波动率动态调整。</li>
-<li><strong>成交价</strong>：真实系统中，信号应该携带<code>bar</code>对象，交易引擎用<code>bar.close</code>作为成交价。上面的代码为了简化，用<code>signal.strength</code>代替，实际中务必传入价格。</li>
-<li><strong>手续费</strong>：在<code>_execute_signal</code>中，每次成交扣除<code>commission</code>，例如<code>cost = price * qty * (1 + commission_rate)</code>。</li>
-</ul>
-<p><strong>4.4 扩展性设计</strong></p>
-<ul>
-<li>新策略：只需继承<code>BaseStrategy</code>，实现<code>generate_signal</code>，然后在<code>main.py</code>中替换即可。</li>
-<li>新数据源：继承<code>BaseFeeder</code>，重写<code>run</code>方法。</li>
-<li>新通知渠道：实现<code>BaseNotifier</code>接口。</li>
-</ul>
-<h3 id="5">5. 运行效果与日志输出</h3>
-<p>假设你有一个<code>btc_1h.csv</code>文件（列名：timestamp, open, high, low, close, volume），运行<code>python main.py</code>后，输出类似：</p>
-<p>```
-[Signal] 1720000000 BTCUSDT BUY strength=0.5
-[Trade] BUY 100 BTCUSDT @</p>
+<h2 id="_8">关键技术选型说明</h2>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>选型</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>异步框架</td>
+<td>asyncio</td>
+<td>扫描+推送天然并发，无需引入Celery</td>
+</tr>
+<tr>
+<td>事件总线</td>
+<td>自实现</td>
+<td>模块少，不需要Kafka/RabbitMQ</td>
+</tr>
+<tr>
+<td>数据存储</td>
+<td>SQLite</td>
+<td>单机模拟够用，零配置，方便查询</td>
+</tr>
+<tr>
+<td>行情获取</td>
+<td>aiohttp</td>
+<td>轻量，支持REST和WebSocket</td>
+</tr>
+<tr>
+<td>指标计算</td>
+<td>numpy/pandas</td>
+<td>成熟稳定，无需重复造轮子</td>
+</tr>
+<tr>
+<td>通知</td>
+<td>Web</td>
+<td></td>
+</tr>
+</tbody>
+</table>
             </div>
             <div class="post-tags"><span class="tag-badge">模拟交易</span><span class="tag-badge">系统架构</span><span class="tag-badge">信号扫描</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
