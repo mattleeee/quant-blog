@@ -7,12 +7,12 @@
     <meta name="author" content="mattleeee">
         <meta name="description" content="模拟交易系统架构设计：从信号扫描到自动执行
 
-做一个模拟交易系统，最怕的不是策略不赚钱，而是架构混乱——信号、分析、执行、通知四块逻辑搅在一起，改一个参数要动五个文件。这篇文章拆解一套我正在用的架构，四个模块各司其职，通过明确的数据流串联。...">
+做量化策略开发时，最头疼的问题不是策略本身，而是验证环节。回测跑得再好，实盘前总得有个过渡阶段——模拟交易。...">
     <meta name="keywords" content="模拟交易,系统架构,信号扫描,Python">
     <meta property="og:title" content="模拟交易系统架构设计：从信号扫描到自动执行">
     <meta property="og:description" content="模拟交易系统架构设计：从信号扫描到自动执行
 
-做一个模拟交易系统，最怕的不是策略不赚钱，而是架构混乱——信号、分析、执行、通知四块逻辑搅在一起，改一个参数要动五个文件。这篇文章拆解一套我正在用的架构，四个模块各司其职，通过明确的数据流串联。...">
+做量化策略开发时，最头疼的问题不是策略本身，而是验证环节。回测跑得再好，实盘前总得有个过渡阶段——模拟交易。...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/21.html">
@@ -36,460 +36,448 @@
         <article class="post">
             <h1>模拟交易系统架构设计：从信号扫描到自动执行</h1>
             <div class="post-meta">
-                <span class="date">2026-09-16</span>
+                <span class="date">2026-09-20</span>
                 <span class="category"><span class="tag-badge">Python自动化</span></span>
             </div>
             <div class="post-content">
-<p>做一个模拟交易系统，最怕的不是策略不赚钱，而是架构混乱——信号、分析、执行、通知四块逻辑搅在一起，改一个参数要动五个文件。这篇文章拆解一套我正在用的架构，四个模块各司其职，通过明确的数据流串联。</p>
+<p>做量化策略开发时，最头疼的问题不是策略本身，而是验证环节。回测跑得再好，实盘前总得有个过渡阶段——模拟交易。这篇文章拆解一套我实际在用的模拟交易系统架构，四个核心模块：信号扫描、市场分析、模拟交易引擎、推送通知。整套系统用 Python 实现，可以跑在单机上，也可以拆成微服务。</p>
 <h2 id="_1">整体架构</h2>
-<p>先看全局。系统采用事件驱动 + 定时轮询的混合模式：</p>
-<pre class="codehilite"><code>┌─────────────────────────────────────────────────────┐
-│                    Scheduler (APScheduler)           │
-│              定时触发 / 事件驱动                      │
-└──────┬──────────────────────────────────────────────┘
-       │
-       ▼
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  信号扫描模块  │───▶│  市场分析模块  │───▶│ 模拟交易引擎  │
-│ SignalScanner│    │MarketAnalyzer│    │ TradeEngine  │
-└──────────────┘    └──────────────┘    └──────┬───────┘
-       │                    │                   │
-       │                    │                   ▼
-       │                    │            ┌──────────────┐
-       │                    │            │  推送通知模块  │
-       │                    │            │  Notifier    │
-       │                    │            └──────────────┘
-       ▼                    ▼                   ▼
-┌─────────────────────────────────────────────────────┐
-│              数据层 (SQLite + 内存缓存)               │
-└─────────────────────────────────────────────────────┘
+<p>先看架构图：</p>
+<pre class="codehilite"><code>┌─────────────────────────────────────────────────────────┐
+│                    调度层 (Scheduler)                     │
+│                  APScheduler / Cron                       │
+└────────────┬────────────────────────────┬────────────────┘
+             │                            │
+             ▼                            ▼
+┌────────────────────────┐   ┌────────────────────────┐
+│   信号扫描模块          │   │   市场分析模块          │
+│   SignalScanner        │   │   MarketAnalyzer       │
+│   - 定时拉取行情        │   │   - 技术指标计算        │
+│   - 条件判断            │   │   - 趋势判断            │
+│   - 生成信号            │   │   - 波动率评估          │
+└───────────┬────────────┘   └───────────┬────────────┘
+            │                            │
+            └──────────┬─────────────────┘
+                       ▼
+            ┌────────────────────────┐
+            │   模拟交易引擎          │
+            │   PaperTradingEngine   │
+            │   - 订单管理            │
+            │   - 持仓跟踪            │
+            │   - 盈亏计算            │
+            │   - 风控检查            │
+            └───────────┬────────────┘
+                        │
+                        ▼
+            ┌────────────────────────┐
+            │   推送通知模块          │
+            │   Notifier             │
+            │   - 信号通知            │
+            │   - 成交回报            │
+            │   - 日报汇总            │
+            └────────────────────────┘
 </code></pre>
 
-<p>数据流向很清晰：<strong>扫描 → 分析 → 执行 → 通知</strong>，单向流动，不回头。每个模块只依赖数据层，模块之间通过数据结构（dataclass）通信，不直接调用。</p>
+<p>数据流向很清晰：扫描模块产出原始信号 → 分析模块补充市场上下文 → 交易引擎执行模拟下单 → 通知模块推送结果。每个模块之间通过消息队列或直接函数调用解耦。</p>
 <h2 id="_2">模块职责划分</h2>
-<table>
-<thead>
-<tr>
-<th>模块</th>
-<th>职责</th>
-<th>输入</th>
-<th>输出</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>SignalScanner</td>
-<td>拉取行情、计算指标、产生原始信号</td>
-<td>行情API</td>
-<td>List[Signal]</td>
-</tr>
-<tr>
-<td>MarketAnalyzer</td>
-<td>过滤信号、评估市场状态、打分</td>
-<td>List[Signal]</td>
-<td>List[TradeIntent]</td>
-</tr>
-<tr>
-<td>TradeEngine</td>
-<td>模拟下单、持仓管理、盈亏计算</td>
-<td>TradeIntent</td>
-<td>TradeResult</td>
-</tr>
-<tr>
-<td>Notifier</td>
-<td>格式化消息、推送</td>
-<td>TradeResult</td>
-<td>通知</td>
-</tr>
-</tbody>
-</table>
-<p>关键原则：<strong>每个模块可以独立测试</strong>。SignalScanner 不需要知道 TradeEngine 的存在。</p>
-<h2 id="_3">数据模型定义</h2>
-<p>先用 dataclass 把模块间的通信协议定死：</p>
-<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+<h3 id="_3">信号扫描模块</h3>
+<p>核心任务只有一个：在合适的时间点，判断是否满足开仓条件。不要在这个模块里做仓位计算、不要做风控，保持单一职责。</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from typing import Optional
+import logging
 
-class SignalDirection(Enum):
-    LONG = &quot;long&quot;
-    SHORT = &quot;short&quot;
-    CLOSE = &quot;close&quot;
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Signal:
-    &quot;&quot;&quot;信号扫描模块的输出&quot;&quot;&quot;
     symbol: str
-    direction: SignalDirection
+    direction: str  # 'long' or 'short'
     price: float
-    indicator_values: dict
-    timestamp: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class TradeIntent:
-    &quot;&quot;&quot;市场分析模块的输出，准备执行的意图&quot;&quot;&quot;
-    symbol: str
-    direction: SignalDirection
-    price: float
-    confidence: float  # 0~1
-    reason: str
-    timestamp: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class TradeResult:
-    &quot;&quot;&quot;交易引擎的输出&quot;&quot;&quot;
-    intent: TradeIntent
-    executed: bool
-    fill_price: Optional[float] = None
-    position_size: float = 0.0
-    error: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.now)
-</code></pre>
-
-<p>这套数据结构的好处是：序列化方便、类型检查友好、日志清晰。</p>
-<h2 id="_4">信号扫描模块</h2>
-<p>核心逻辑：拉行情 → 算指标 → 匹配条件 → 产出 Signal。</p>
-<pre class="codehilite"><code class="language-python">import pandas as pd
-import numpy as np
-from typing import List
+    timestamp: datetime
+    strategy: str
+    metadata: dict
 
 class SignalScanner:
-    def __init__(self, data_fetcher):
-        &quot;&quot;&quot;
-        data_fetcher: 行情获取接口，需实现 fetch(symbol, timeframe, limit) -&gt; DataFrame
-        &quot;&quot;&quot;
-        self.fetcher = data_fetcher
+    def __init__(self, data_fetcher, strategies: list):
+        self.data_fetcher = data_fetcher
+        self.strategies = strategies
 
-    def _calc_indicators(self, df: pd.DataFrame) -&gt; pd.DataFrame:
-        df = df.copy()
-        df[&quot;ma_fast&quot;] = df[&quot;close&quot;].rolling(10).mean()
-        df[&quot;ma_slow&quot;] = df[&quot;close&quot;].rolling(30).mean()
-        df[&quot;atr&quot;] = (df[&quot;high&quot;] - df[&quot;low&quot;]).rolling(14).mean()
-        # RSI
-        delta = df[&quot;close&quot;].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan)
-        df[&quot;rsi&quot;] = 100 - 100 / (1 + rs)
-        return df
-
-    def scan(self, symbols: List[str], timeframe: str = &quot;1h&quot;) -&gt; List[Signal]:
+    def scan(self, symbols: list) -&gt; list[Signal]:
         signals = []
         for symbol in symbols:
             try:
-                df = self.fetcher.fetch(symbol, timeframe, limit=100)
-                if df is None or len(df) &lt; 35:
+                df = self.data_fetcher.get_kline(symbol, interval='1h', limit=200)
+                if df is None or len(df) &lt; 50:
                     continue
-                df = self._calc_indicators(df)
-                last = df.iloc[-1]
-
-                # 金叉 + RSI 未超买
-                if (last[&quot;ma_fast&quot;] &gt; last[&quot;ma_slow&quot;]
-                        and df.iloc[-2][&quot;ma_fast&quot;] &lt;= df.iloc[-2][&quot;ma_slow&quot;]
-                        and last[&quot;rsi&quot;] &lt; 70):
-                    signals.append(Signal(
-                        symbol=symbol,
-                        direction=SignalDirection.LONG,
-                        price=last[&quot;close&quot;],
-                        indicator_values={
-                            &quot;ma_fast&quot;: round(last[&quot;ma_fast&quot;], 4),
-                            &quot;ma_slow&quot;: round(last[&quot;ma_slow&quot;], 4),
-                            &quot;rsi&quot;: round(last[&quot;rsi&quot;], 2),
-                            &quot;atr&quot;: round(last[&quot;atr&quot;], 4),
-                        },
-                    ))
-
-                # 死叉
-                elif (last[&quot;ma_fast&quot;] &lt; last[&quot;ma_slow&quot;]
-                      and df.iloc[-2][&quot;ma_fast&quot;] &gt;= df.iloc[-2][&quot;ma_slow&quot;]
-                      and last[&quot;rsi&quot;] &gt; 30):
-                    signals.append(Signal(
-                        symbol=symbol,
-                        direction=SignalDirection.SHORT,
-                        price=last[&quot;close&quot;],
-                        indicator_values={
-                            &quot;ma_fast&quot;: round(last[&quot;ma_fast&quot;], 4),
-                            &quot;ma_slow&quot;: round(last[&quot;ma_slow&quot;], 4),
-                            &quot;rsi&quot;: round(last[&quot;rsi&quot;], 2),
-                            &quot;atr&quot;: round(last[&quot;atr&quot;], 4),
-                        },
-                    ))
+                for strategy in self.strategies:
+                    sig = strategy.check(symbol, df)
+                    if sig:
+                        signals.append(sig)
+                        logger.info(f&quot;信号触发: {symbol} {sig.direction} @ {sig.price}&quot;)
             except Exception as e:
-                print(f&quot;[Scanner] {symbol} 扫描异常: {e}&quot;)
+                logger.error(f&quot;扫描 {symbol} 失败: {e}&quot;)
         return signals
 </code></pre>
 
-<p>注意 <code>data_fetcher</code> 是注入的，方便替换成真实 API 或本地回测数据。指标计算用 pandas 向量化，100 根 K 线毫秒级完成。</p>
-<h2 id="_5">市场分析模块</h2>
-<p>扫描出的原始信号不能直接执行，需要二次过滤。这个模块做三件事：<strong>趋势确认、波动率过滤、信号打分</strong>。</p>
-<pre class="codehilite"><code class="language-python">class MarketAnalyzer:
-    def __init__(self, min_confidence: float = 0.6,
-                 min_atr_ratio: float = 0.002):
-        self.min_confidence = min_confidence
-        self.min_atr_ratio = min_atr_ratio
+<p>策略基类定义：</p>
+<pre class="codehilite"><code class="language-python">class BaseStrategy:
+    name = &quot;base&quot;
 
-    def _score(self, signal: Signal) -&gt; float:
-        &quot;&quot;&quot;基于指标值给出 0~1 的置信度&quot;&quot;&quot;
-        score = 0.5
-        iv = signal.indicator_values
+    def check(self, symbol: str, df: pd.DataFrame) -&gt; Optional[Signal]:
+        raise NotImplementedError
 
-        # 均线发散度：越大趋势越强
-        ma_spread = abs(iv[&quot;ma_fast&quot;] - iv[&quot;ma_slow&quot;]) / iv[&quot;ma_slow&quot;]
-        score += min(ma_spread * 10, 0.2)
+class MaCrossStrategy(BaseStrategy):
+    name = &quot;ma_cross&quot;
 
-        # RSI 位置：中位区最健康
-        rsi = iv[&quot;rsi&quot;]
-        if signal.direction == SignalDirection.LONG:
-            if 40 &lt;= rsi &lt;= 65:
-                score += 0.2
-            elif rsi &gt; 70:
-                score -= 0.3
-        elif signal.direction == SignalDirection.SHORT:
-            if 35 &lt;= rsi &lt;= 60:
-                score += 0.2
-            elif rsi &lt; 30:
-                score -= 0.3
+    def __init__(self, fast=10, slow=30):
+        self.fast = fast
+        self.slow = slow
 
-        # 波动率过滤
-        atr_ratio = iv[&quot;atr&quot;] / signal.price
-        if atr_ratio &lt; self.min_atr_ratio:
-            score -= 0.3
+    def check(self, symbol, df):
+        df = df.copy()
+        df['ma_fast'] = df['close'].rolling(self.fast).mean()
+        df['ma_slow'] = df['close'].rolling(self.slow).mean()
+        last, prev = df.iloc[-1], df.iloc[-2]
 
-        return max(0.0, min(1.0, score))
-
-    def analyze(self, signals: List[Signal]) -&gt; List[TradeIntent]:
-        intents = []
-        for sig in signals:
-            confidence = self._score(sig)
-            if confidence &lt; self.min_confidence:
-                continue
-            intents.append(TradeIntent(
-                symbol=sig.symbol,
-                direction=sig.direction,
-                price=sig.price,
-                confidence=round(confidence, 3),
-                reason=f&quot;MA交叉 RSI={sig.indicator_values['rsi']} &quot;
-                       f&quot;ATR={sig.indicator_values['atr']}&quot;,
-            ))
-        return intents
+        # 金叉
+        if prev['ma_fast'] &lt;= prev['ma_slow'] and last['ma_fast'] &gt; last['ma_slow']:
+            return Signal(
+                symbol=symbol, direction='long',
+                price=last['close'], timestamp=datetime.now(),
+                strategy=self.name,
+                metadata={'ma_fast': last['ma_fast'], 'ma_slow': last['ma_slow']}
+            )
+        # 死叉
+        if prev['ma_fast'] &gt;= prev['ma_slow'] and last['ma_fast'] &lt; last['ma_slow']:
+            return Signal(
+                symbol=symbol, direction='short',
+                price=last['close'], timestamp=datetime.now(),
+                strategy=self.name,
+                metadata={'ma_fast': last['ma_fast'], 'ma_slow': last['ma_slow']}
+            )
+        return None
 </code></pre>
 
-<p>打分逻辑是策略可插拔的——换成机器学习模型输出概率也行，只要返回 0~1 的 confidence。</p>
-<h2 id="_6">模拟交易引擎</h2>
-<p>这是核心。需要处理：<strong>仓位计算、滑点模拟、手续费、持仓跟踪、盈亏统计</strong>。</p>
-<pre class="codehilite"><code class="language-python">from collections import defaultdict
+<p>这里的关键设计：策略只负责"发现信号"，不负责"决定是否交易"。后续模块会做二次过滤。</p>
+<h3 id="_4">市场分析模块</h3>
+<p>信号出来了不代表能直接下单。需要分析模块提供市场环境判断——当前波动率是否适合开仓、趋势强度如何、是否处于异常状态。</p>
+<pre class="codehilite"><code class="language-python">class MarketAnalyzer:
+    def __init__(self, data_fetcher):
+        self.data_fetcher = data_fetcher
 
-class TradeEngine:
-    def __init__(self, initial_balance: float = 100000.0,
-                 fee_rate: float = 0.0005,
-                 slippage: float = 0.0002,
-                 risk_per_trade: float = 0.02):
+    def analyze(self, symbol: str) -&gt; dict:
+        df = self.data_fetcher.get_kline(symbol, interval='1h', limit=100)
+        if df is None or len(df) &lt; 50:
+            return {'valid': False}
+
+        close = df['close']
+        high, low = df['high'], df['low']
+
+        # ATR 波动率
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean().iloc[-1]
+        atr_pct = atr / close.iloc[-1]
+
+        # ADX 趋势强度
+        adx = self._calc_adx(df, 14)
+
+        # 布林带宽度
+        ma20 = close.rolling(20).mean()
+        std20 = close.rolling(20).std()
+        bb_width = (4 * std20 / ma20).iloc[-1]
+
+        return {
+            'valid': True,
+            'atr_pct': round(atr_pct, 4),
+            'adx': round(adx, 2),
+            'bb_width': round(bb_width, 4),
+            'trend_strength': 'strong' if adx &gt; 25 else 'weak',
+            'volatility': 'high' if atr_pct &gt; 0.02 else 'normal'
+        }
+
+    def _calc_adx(self, df, period=14):
+        high, low, close = df['high'], df['low'], df['close']
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm[plus_dm &lt; 0] = 0
+        minus_dm[minus_dm &lt; 0] = 0
+
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+
+        atr = tr.rolling(period).mean()
+        plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+        return dx.rolling(period).mean().iloc[-1]
+</code></pre>
+
+<p>分析模块的输出是一个"市场状态字典"，交易引擎根据这个字典决定是否放行信号。</p>
+<h3 id="_5">模拟交易引擎</h3>
+<p>这是整个系统最核心的部分。要处理订单生命周期、持仓管理、盈亏计算、风控。</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+from enum import Enum
+
+class OrderStatus(Enum):
+    PENDING = 'pending'
+    FILLED = 'filled'
+    REJECTED = 'rejected'
+    CANCELLED = 'cancelled'
+
+@dataclass
+class Position:
+    symbol: str
+    direction: str
+    entry_price: float
+    size: float
+    entry_time: datetime
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
+
+    def unrealized_pnl(self, current_price: float) -&gt; float:
+        if self.direction == 'long':
+            return (current_price - self.entry_price) * self.size
+        return (self.entry_price - current_price) * self.size
+
+@dataclass
+class Order:
+    symbol: str
+    direction: str
+    price: float
+    size: float
+    status: OrderStatus = OrderStatus.PENDING
+    created_at: datetime = field(default_factory=datetime.now)
+    filled_at: Optional[datetime] = None
+
+class PaperTradingEngine:
+    def __init__(self, initial_balance=100000, commission_rate=0.0005,
+                 max_positions=5, risk_per_trade=0.02):
         self.balance = initial_balance
         self.initial_balance = initial_balance
-        self.fee_rate = fee_rate
-        self.slippage = slippage
+        self.commission_rate = commission_rate
+        self.max_positions = max_positions
         self.risk_per_trade = risk_per_trade
-        self.positions = {}  # symbol -&gt; dict
-        self.trade_log = []
+        self.positions: dict[str, Position] = {}
+        self.orders: list[Order] = []
+        self.closed_trades: list[dict] = []
 
-    def _calc_position_size(self, intent: TradeIntent,
-                            atr: float) -&gt; float:
-        &quot;&quot;&quot;基于 ATR 的风险仓位法：单笔亏损不超过总资金的 risk_per_trade&quot;&quot;&quot;
-        if atr &lt;= 0:
-            return 0.0
-        risk_amount = self.balance * self.risk_per_trade
-        # 假设止损距离为 2 倍 ATR
-        stop_distance = atr * 2
-        size = risk_amount / stop_distance
-        # 不超过可用资金
-        max_size = self.balance / intent.price
-        return round(min(size, max_size), 6)
+    def execute_signal(self, signal: Signal, market_state: dict) -&gt; Optional[Order]:
+        # 风控检查
+        if not self._risk_check(signal, market_state):
+            return None
 
-    def execute(self, intent: TradeIntent,
-                atr: float = 0.0) -&gt; TradeResult:
-        symbol = intent.symbol
-
-        # 平仓逻辑
-        if intent.direction == SignalDirection.CLOSE:
-            return self._close_position(symbol, intent.price)
-
-        # 已有持仓则跳过
-        if symbol in self.positions:
-            return TradeResult(intent=intent, executed=False,
-                               error=&quot;已有持仓&quot;)
-
-        size = self._calc_position_size(intent, atr)
+        size = self._calc_position_size(signal)
         if size &lt;= 0:
-            return TradeResult(intent=intent, executed=False,
-                               error=&quot;仓位计算为0&quot;)
+            return None
 
-        # 模拟滑点
-        direction_mult = 1 if intent.direction == SignalDirection.LONG else -1
-        fill_price = intent.price * (1 + direction_mult * self.slippage)
-        cost = fill_price * size
-        fee = cost * self.fee_rate
+        order = Order(
+            symbol=signal.symbol, direction=signal.direction,
+            price=signal.price, size=size
+        )
 
-        if cost + fee &gt; self.balance:
-            return TradeResult(intent=intent, executed=False,
-                               error=&quot;余额不足&quot;)
+        # 模拟即时成交（可改为滑点模型）
+        order.status = OrderStatus.FILLED
+        order.filled_at = datetime.now()
+        self.orders.append(order)
 
-        self.balance -= (cost + fee)
-        self.positions[symbol] = {
-            &quot;direction&quot;: intent.direction,
-            &quot;entry_price&quot;: fill_price,
-            &quot;size&quot;: size,
-            &quot;entry_time&quot;: datetime.now(),
-            &quot;fee_paid&quot;: fee,
+        # 更新持仓
+        self._update_position(order)
+        return order
+
+    def _risk_check(self, signal, market_state) -&gt; bool:
+        # 持仓数量限制
+        if len(self.positions) &gt;= self.max_positions:
+            return False
+        # 同标的同方向不重复开仓
+        if signal.symbol in self.positions:
+            return False
+        # 波动率过高时拒绝开仓
+        if market_state.get('atr_pct', 0) &gt; 0.05:
+            return False
+        return True
+
+    def _calc_position_size(self, signal) -&gt; float:
+        risk_amount = self.balance * self.risk_per_trade
+        # 简化处理：按固定比例
+        size = risk_amount / signal.price
+        return round(size, 4)
+
+    def _update_position(self, order: Order):
+        pos = Position(
+            symbol=order.symbol, direction=order.direction,
+            entry_price=order.price, size=order.size,
+            entry_time=order.filled_at
+        )
+        self.positions[order.symbol] = pos
+        cost = order.price * order.size * self.commission_rate
+        self.balance -= cost
+
+    def close_position(self, symbol: str, price: float) -&gt; Optional[dict]:
+        pos = self.positions.pop(symbol, None)
+        if not pos:
+            return None
+        pnl = pos.unrealized_pnl(price)
+        commission = price * pos.size * self.commission_rate
+        self.balance += pnl - commission
+        trade = {
+            'symbol': symbol, 'direction': pos.direction,
+            'entry': pos.entry_price, 'exit': price,
+            'size': pos.size, 'pnl': round(pnl - commission, 2),
+            'entry_time': pos.entry_time, 'exit_time': datetime.now()
         }
+        self.closed_trades.append(trade)
+        return trade
 
-        result = TradeResult(intent=intent, executed=True,
-                             fill_price=fill_price,
-                             position_size=size)
-        self.trade_log.append(result)
-        return result
-
-    def _close_position(self, symbol: str, price: float) -&gt; TradeResult:
-        if symbol not in self.positions:
-            return TradeResult(
-                intent=TradeIntent(symbol, SignalDirection.CLOSE,
-                                   price, 0, &quot;无持仓&quot;),
-                executed=False, error=&quot;无持仓可平&quot;)
-
-        pos = self.positions.pop(symbol)
-        direction_mult = 1 if pos[&quot;direction&quot;] == SignalDirection.LONG else -1
-        exit_price = price * (1 - direction_mult * self.slippage)
-        proceeds = exit_price * pos[&quot;size&quot;]
-        exit_fee = proceeds * self.fee_rate
-        pnl = (exit_price - pos[&quot;entry_price&quot;]) * direction_mult * pos[&quot;size&quot;] \
-              - pos[&quot;fee_paid&quot;] - exit_fee
-
-        self.balance += (proceeds - exit_fee)
-
-        intent = TradeIntent(symbol, SignalDirection.CLOSE, price,
-                            1.0, f&quot;平仓 PnL={pnl:.2f}&quot;)
-        result = TradeResult(intent=intent, executed=True,
-                             fill_price=exit_price,
-                             position_size=pos[&quot;size&quot;])
-        self.trade_log.append(result)
-        return result
-
-    def stats(self) -&gt; dict:
-        total_pnl = self.balance - self.initial_balance
+    def get_stats(self) -&gt; dict:
+        total_pnl = sum(t['pnl'] for t in self.closed_trades)
+        wins = [t for t in self.closed_trades if t['pnl'] &gt; 0]
+        win_rate = len(wins) / len(self.closed_trades) if self.closed_trades else 0
         return {
-            &quot;balance&quot;: round(self.balance, 2),
-            &quot;total_pnl&quot;: round(total_pnl, 2),
-            &quot;return_pct&quot;: round(total_pnl / self.initial_balance * 100, 2),
-            &quot;open_positions&quot;: len(self.positions),
-            &quot;total_trades&quot;: len(self.trade_log),
+            'balance': round(self.balance, 2),
+            'total_pnl': round(total_pnl, 2),
+            'return_pct': round((self.balance - self.initial_balance) / self.initial_balance * 100, 2),
+            'total_trades': len(self.closed_trades),
+            'win_rate': round(win_rate * 100, 2)
         }
 </code></pre>
 
-<p>仓位用 ATR 风险法，比固定金额合理得多。滑点和手续费虽小，但长期累积影响巨大，模拟阶段就要算进去。</p>
-<h2 id="_7">推送通知模块</h2>
-<p>通知模块要解耦——换渠道不影响业务逻辑。</p>
-<pre class="codehilite"><code class="language-python">import json
-from abc import ABC, abstractmethod
+<p>引擎的设计要点：</p>
+<ol>
+<li><strong>风控前置</strong>：<code>execute_signal</code> 入口就做检查，不满足直接返回 None</li>
+<li><strong>仓位计算独立</strong>：<code>_calc_position_size</code> 可以换成凯利公式、固定比例、波动率倒数等</li>
+<li><strong>成交模型可插拔</strong>：目前是即时成交，可以扩展成滑点模型、部分成交模型</li>
+</ol>
+<h3 id="_6">推送通知模块</h3>
+<p>信号和成交结果需要及时推送到手机或群组。推荐用 Server酱、钉钉 Webhook 或 Telegram Bot。</p>
+<pre class="codehilite"><code class="language-python">import requests
+import json
 
-class BaseNotifier(ABC):
-    @abstractmethod
-    def send(self, title: str, content: str): ...
-
-class ConsoleNotifier(BaseNotifier):
-    def send(self, title: str, content: str):
-        print(f&quot;\n{'='*40}\n[{title}]\n{content}\n{'='*40}&quot;)
-
-class WebhookNotifier(BaseNotifier):
-    &quot;&quot;&quot;通用 webhook，适配钉钉/飞书/Slack&quot;&quot;&quot;
-    def __init__(self, webhook_url: str):
-        self.url = webhook_url
+class Notifier:
+    def __init__(self, channels: list):
+        self.channels = channels
 
     def send(self, title: str, content: str):
-        import requests
-        payload = {&quot;msgtype&quot;: &quot;text&quot;,
-                   &quot;text&quot;: {&quot;content&quot;: f&quot;{title}\n{content}&quot;}}
-        try:
-            requests.post(self.url, json=payload, timeout=5)
-        except Exception as e:
-            print(f&quot;[Notifier] 推送失败: {e}&quot;)
+        for ch in self.channels:
+            try:
+                ch.send(title, content)
+            except Exception as e:
+                logging.error(f&quot;推送失败 {ch.__class__.__name__}: {e}&quot;)
 
-class NotifyService:
-    def __init__(self, notifiers: list):
-        self.notifiers = notifiers
+class DingTalkChannel:
+    def __init__(self, webhook: str):
+        self.webhook = webhook
 
-    def notify_trade(self, result: TradeResult):
-        if not result.executed:
-            return
-        title = f&quot;模拟成交 {result.intent.symbol}&quot;
-        content = (f&quot;方向: {result.intent.direction.value}\n&quot;
-                   f&quot;价格: {result.fill_price}\n&quot;
-                   f&quot;数量: {result.position_size}\n&quot;
-                   f&quot;理由: {result.intent.reason}&quot;)
-        for n in self.notifiers:
-            n.send(title, content)
+    def send(self, title, content):
+        payload = {
+            &quot;msgtype&quot;: &quot;markdown&quot;,
+            &quot;markdown&quot;: {
+                &quot;title&quot;: title,
+                &quot;text&quot;: f&quot;### {title}\n\n{content}&quot;
+            }
+        }
+        requests.post(self.webhook, json=payload, timeout=5)
 
-    def notify_stats(self, stats: dict):
-        content = json.dumps(stats, ensure_ascii=False, indent=2)
-        for n in self.notifiers:
-            n.send(&quot;账户统计&quot;, content)
+class TelegramChannel:
+    def __init__(self, bot_token: str, chat_id: str):
+        self.url = f&quot;https://api.telegram.org/bot{bot_token}/sendMessage&quot;
+        self.chat_id = chat_id
+
+    def send(self, title, content):
+        requests.post(self.url, json={
+            &quot;chat_id&quot;: self.chat_id,
+            &quot;text&quot;: f&quot;*{title}*\n\n{content}&quot;,
+            &quot;parse_mode&quot;: &quot;Markdown&quot;
+        }, timeout=5)
+
+
+def format_signal(sig: Signal, market: dict) -&gt; str:
+    return (
+        f&quot;**标的**: {sig.symbol}\n&quot;
+        f&quot;**方向**: {sig.direction}\n&quot;
+        f&quot;**价格**: {sig.price}\n&quot;
+        f&quot;**策略**: {sig.strategy}\n&quot;
+        f&quot;**波动率**: {market.get('atr_pct', 'N/A')}\n&quot;
+        f&quot;**趋势强度**: {market.get('trend_strength', 'N/A')}&quot;
+    )
+
+
+def format_trade(trade: dict) -&gt; str:
+    emoji = &quot;🟢&quot; if trade['pnl'] &gt; 0 else &quot;🔴&quot;
+    return (
+        f&quot;{emoji} **平仓** {trade['symbol']}\n&quot;
+        f&quot;方向: {trade['direction']}\n&quot;
+        f&quot;入场: {trade['entry']} → 出场: {trade['exit']}\n&quot;
+        f&quot;盈亏: {trade['pnl']}&quot;
+    )
 </code></pre>
 
-<h2 id="_8">主循环组装</h2>
+<h2 id="_7">主流程串联</h2>
 <p>用 APScheduler 把四个模块串起来：</p>
-<pre class="codehilite"><code class="language-python">from apscheduler.schedulers.blocking import BlockingScheduler
-
-class TradingSystem:
-    def __init__(self, scanner, analyzer, engine, notifier, symbols):
+<p>```python
+from apscheduler.schedulers.blocking import BlockingScheduler</p>
+<p>class TradingSystem:
+    def <strong>init</strong>(self, scanner, analyzer, engine, notifier):
         self.scanner = scanner
         self.analyzer = analyzer
         self.engine = engine
         self.notifier = notifier
-        self.symbols = symbols
+        self.watch_symbols = []</p>
+<pre class="codehilite"><code>def run_scan_cycle(self):
+    signals = self.scanner.scan(self.watch_symbols)
+    for sig in signals:
+        market = self.analyzer.analyze(sig.symbol)
+        if not market.get('valid'):
+            continue
 
-    def run_once(self):
-        print(f&quot;\n[{datetime.now():%H:%M:%S}] 开始扫描...&quot;)
-        signals = self.scanner.scan(self.symbols)
-        print(f&quot;  原始信号: {len(signals)}&quot;)
+        order = self.engine.execute_signal(sig, market)
+        if order:
+            self.notifier.send(
+                f&quot;模拟开仓 - {sig.symbol}&quot;,
+                format_signal(sig, market)
+            )
 
-        intents = self.analyzer.analyze(signals)
-        print(f&quot;  过滤后意图: {len(intents)}&quot;)
+def check_positions(self):
+    &quot;&quot;&quot;检查持仓，触发止盈止损&quot;&quot;&quot;
+    for symbol in list(self.engine.positions.keys()):
+        pos = self.engine.positions[symbol]
+        df = self.scanner.data_fetcher.get_kline(symbol, '1h', 5)
+        if df is None:
+            continue
+        current = df['close'].iloc[-1]
 
-        for intent in intents:
-            atr = 0.0
-            # 从信号里取 ATR（实际项目可缓存）
-            result = self.engine.execute(intent, atr=atr)
-            self.notifier.notify_trade(result)
+        # 简单止损逻辑：亏损超过 3% 平仓
+        pnl_pct = pos.unrealized_pnl(current) / (pos.entry_price * pos.size)
+        if pnl_pct &lt; -0.03:
+            trade = self.engine.close_position(symbol, current)
+            if trade:
+                self.notifier.send(&quot;模拟平仓&quot;, format_trade(trade))
 
-        self.notifier.notify_stats(self.engine.stats())
-
-    def start(self, interval_minutes: int = 5):
-        scheduler = BlockingScheduler()
-        scheduler.add_job(self.run_once, &quot;interval&quot;,
-                          minutes=interval_minutes)
-        print(f&quot;系统启动，每 {interval_minutes} 分钟扫描一次&quot;)
-        try:
-            scheduler.start()
-        except (KeyboardInterrupt, SystemExit):
-            print(&quot;系统停止&quot;)
+def daily_report(self):
+    stats = self.engine.get_stats()
+    content = (
+        f&quot;余额: {stats['balance']}\n&quot;
+        f&quot;总盈亏: {stats['total_pnl']}\n&quot;
+        f&quot;收益率: {stats['return_pct']}%\n&quot;
+        f&quot;交易次数: {stats['total_trades']}\n&quot;
+        f&quot;胜率: {stats['win_rate']}%&quot;
+    )
+    self.notifier.send(&quot;模拟交易日报&quot;, content)
 </code></pre>
 
-<h2 id="_9">关键技术选型说明</h2>
-<ul>
-<li><strong>调度</strong>：APScheduler，比手写 <code>while True + sleep</code> 稳，支持 cron 表达式</li>
-<li><strong>数据层</strong>：SQLite 足够，单文件、零配置；高频场景换 TimescaleDB</li>
-<li><strong>指标计算</strong>：pandas 向量化，不要用 for 循环逐行算</li>
-<li><strong>HTTP 请求</strong>：requests + 重试装饰器，或 httpx（支持异步）</li>
-<li><strong>配置管理</strong>：pydantic-settings 读环境变量，别硬编码 API Key</li>
-<li><strong>日志</strong>：loguru 或标准 logging，输出到文件 + 控制台</li>
-</ul>
-<h2 id="_10">扩展方向</h2>
-<p>这套架构的扩展点都在模块边界上：</p>
-<ol>
-<li><strong>信号扫描</strong>：加新策略只需新增 scan 方法，不影响其他模块</li>
-<li><strong>市场分析</strong>：换成 ML 模型打分，接口不变</li>
-<li><strong>交易引擎</strong>：接真实交易所 API，替换 execute 内部实现</li>
-<li><strong>通知</strong>：加 Telegram、邮件，实现 BaseNotifier 即可</li>
-</ol>
-<p>架构的价值不在于代码多复杂，而在于<strong>改动成本可控</strong>。一个新策略从想法到上线，只动 SignalScanner 一个文件——</p>
+<p>def main():
+    # 初始化各模块
+    fetcher = DataFetcher()  # 自行实现数据获取
+    scanner = SignalScanner</p>
             </div>
             <div class="post-tags"><span class="tag-badge">模拟交易</span><span class="tag-badge">系统架构</span><span class="tag-badge">信号扫描</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
