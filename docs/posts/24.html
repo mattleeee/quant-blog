@@ -7,12 +7,12 @@
     <meta name="author" content="mattleeee">
         <meta name="description" content="系统巡检模块设计：自动检查交易系统健康状态
 
-量化交易系统跑起来容易，稳定运行是另一回事。API断连、数据源停更、磁盘写满、定时任务静默失败——这些问题往往不会第一时间暴露，等到发现时，策略可能已经跑偏了几个小时。...">
+交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。...">
     <meta name="keywords" content="系统巡检,健康检查,自动化,Python">
     <meta property="og:title" content="系统巡检模块设计：自动检查交易系统健康状态">
     <meta property="og:description" content="系统巡检模块设计：自动检查交易系统健康状态
 
-量化交易系统跑起来容易，稳定运行是另一回事。API断连、数据源停更、磁盘写满、定时任务静默失败——这些问题往往不会第一时间暴露，等到发现时，策略可能已经跑偏了几个小时。...">
+交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/24.html">
@@ -36,336 +36,293 @@
         <article class="post">
             <h1>系统巡检模块设计：自动检查交易系统健康状态</h1>
             <div class="post-meta">
-                <span class="date">2026-08-26</span>
+                <span class="date">2026-09-23</span>
                 <span class="category"><span class="tag-badge">Python自动化</span></span>
             </div>
             <div class="post-content">
-<p>量化交易系统跑起来容易，稳定运行是另一回事。API断连、数据源停更、磁盘写满、定时任务静默失败——这些问题往往不会第一时间暴露，等到发现时，策略可能已经跑偏了几个小时。</p>
-<p>解决思路很简单：写一个巡检模块，定时检查各组件状态，异常时推告警。本文分享这套巡检模块的设计与实现。</p>
-<h3 id="_1">巡检项设计</h3>
-<p>巡检不是漫无目的地到处看，而是针对交易系统的关键路径做定点检查。我归纳了五个核心巡检项：</p>
+<p>交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。</p>
+<p>解决办法是写一个系统巡检模块，定时检查各模块健康状态，异常时主动推送告警。这篇文章拆解一下我的实现方案。</p>
+<h2 id="_1">一、巡检项设计</h2>
+<p>巡检不是越多越好，要覆盖关键链路。我的清单如下：</p>
 <table>
 <thead>
 <tr>
 <th>巡检项</th>
 <th>检查内容</th>
-<th>异常判定</th>
+<th>异常后果</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>API连接</td>
-<td>行情/交易接口连通性</td>
-<td>连续N次请求失败</td>
+<td>API 连接</td>
+<td>交易/行情接口连通性、延迟</td>
+<td>无法下单或收不到行情</td>
 </tr>
 <tr>
 <td>数据更新</td>
-<td>最新K线/ tick 时间戳</td>
-<td>数据延迟超过阈值</td>
+<td>最新 tick/K线时间戳</td>
+<td>策略基于过期数据决策</td>
 </tr>
 <tr>
 <td>缓存状态</td>
-<td>Redis/内存队列积压量</td>
-<td>积压量超过上限</td>
+<td>Redis 连接、内存占用、key 数量</td>
+<td>状态丢失、读写失败</td>
 </tr>
 <tr>
 <td>磁盘空间</td>
-<td>数据目录、日志目录使用率</td>
-<td>使用率 &gt; 85%</td>
+<td>各挂载点使用率</td>
+<td>日志写不进、数据库崩溃</td>
 </tr>
 <tr>
 <td>任务执行</td>
-<td>定时任务最近执行时间</td>
-<td>超过执行周期未运行</td>
+<td>定时任务最近一次执行时间与结果</td>
+<td>数据未同步、对账未跑</td>
 </tr>
 </tbody>
 </table>
-<p>每个巡检项对应一个检查函数，返回<code>CheckResult</code>对象，包含状态和详情。后续加巡检项只需新增一个函数，不影响整体结构。</p>
-<h3 id="_2">健康判定逻辑</h3>
-<p>单次检查通过不代表系统健康，我用"连续失败次数"作为判定依据。比如API连接，偶尔一次超时可能是网络抖动，连续3次失败才判定为异常。</p>
-<pre class="codehilite"><code class="language-python">from enum import Enum
-from dataclasses import dataclass
-from typing import Optional
-import time
-
-class HealthStatus(Enum):
-    HEALTHY = &quot;healthy&quot;
-    WARNING = &quot;warning&quot;
-    CRITICAL = &quot;critical&quot;
-
-@dataclass
-class CheckResult:
-    item: str
-    status: HealthStatus
-    detail: str
-    timestamp: float = time.time()
+<p>设计原则：<strong>每项检查必须能在 5 秒内返回结果</strong>，超时就判定为异常。巡检本身不能拖垮系统。</p>
+<h2 id="_2">二、健康判定逻辑</h2>
+<p>健康状态分三档，避免"非黑即白"导致告警疲劳：</p>
+<ul>
+<li><code>OK</code>：正常</li>
+<li><code>WARN</code>：需要关注，但不影响交易</li>
+<li><code>CRIT</code>：影响交易，必须立即处理</li>
+</ul>
+<p>判定逻辑用阈值配置化，不要硬编码：</p>
+<pre class="codehilite"><code class="language-python">THRESHOLDS = {
+    &quot;api_latency_ms&quot;: {&quot;warn&quot;: 500, &quot;crit&quot;: 2000},
+    &quot;data_delay_sec&quot;: {&quot;warn&quot;: 30, &quot;crit&quot;: 120},
+    &quot;disk_usage_pct&quot;: {&quot;warn&quot;: 80, &quot;crit&quot;: 90},
+    &quot;redis_mem_pct&quot;: {&quot;warn&quot;: 80, &quot;crit&quot;: 95},
+    &quot;task_delay_min&quot;: {&quot;warn&quot;: 10, &quot;crit&quot;: 30},
+}
 </code></pre>
 
-<p>每个巡检项维护一个失败计数器，连续失败达到阈值才触发告警。同时设置恢复机制——连续成功2次后重置计数器，避免系统恢复后仍持续告警。</p>
-<pre class="codehilite"><code class="language-python">class HealthChecker:
-    def __init__(self, fail_threshold: int = 3, recover_threshold: int = 2):
-        self.fail_threshold = fail_threshold
-        self.recover_threshold = recover_threshold
-        self._fail_counts = {}
-        self._success_counts = {}
-        self._status_map = {}
-
-    def update_status(self, item: str, current_ok: bool) -&gt; HealthStatus:
-        if current_ok:
-            self._fail_counts[item] = 0
-            self._success_counts[item] = self._success_counts.get(item, 0) + 1
-            if self._success_counts[item] &gt;= self.recover_threshold:
-                self._status_map[item] = HealthStatus.HEALTHY
-        else:
-            self._success_counts[item] = 0
-            self._fail_counts[item] = self._fail_counts.get(item, 0) + 1
-            if self._fail_counts[item] &gt;= self.fail_threshold:
-                self._status_map[item] = HealthStatus.CRITICAL
-            elif self._fail_counts[item] &gt;= 1:
-                self._status_map[item] = HealthStatus.WARNING
-
-        return self._status_map.get(item, HealthStatus.HEALTHY)
+<p>统一封装一个判定函数，所有巡检项复用：</p>
+<pre class="codehilite"><code class="language-python">def judge(value, thresholds, reverse=False):
+    &quot;&quot;&quot;
+    reverse=True 表示值越小越危险（如剩余空间）
+    &quot;&quot;&quot;
+    warn, crit = thresholds[&quot;warn&quot;], thresholds[&quot;crit&quot;]
+    if not reverse:
+        if value &gt;= crit:
+            return &quot;CRIT&quot;
+        if value &gt;= warn:
+            return &quot;WARN&quot;
+    else:
+        if value &lt;= crit:
+            return &quot;CRIT&quot;
+        if value &lt;= warn:
+            return &quot;WARN&quot;
+    return &quot;OK&quot;
 </code></pre>
 
-<h3 id="_3">各巡检项实现</h3>
-<h4 id="api">API连接检查</h4>
-<pre class="codehilite"><code class="language-python">import aiohttp
-import asyncio
+<h2 id="_3">三、各项巡检实现</h2>
+<h3 id="31-api">3.1 API 连接检查</h3>
+<p>不要只 ping 通就算健康，要真正调用业务接口。比如查一次账户余额或最新行情，测端到端延迟。</p>
+<pre class="codehilite"><code class="language-python">import time
+import requests
 
-class APIConnectionCheck:
-    def __init__(self, endpoints: list, timeout: float = 5.0):
-        self.endpoints = endpoints  # [{&quot;name&quot;: &quot;market_api&quot;, &quot;url&quot;: &quot;https://api.example.com/ping&quot;}]
-        self.timeout = timeout
-
-    async def check(self) -&gt; CheckResult:
-        failed = []
-        for ep in self.endpoints:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(ep[&quot;url&quot;], timeout=self.timeout) as resp:
-                        if resp.status != 200:
-                            failed.append(f&quot;{ep['name']}: HTTP {resp.status}&quot;)
-            except Exception as e:
-                failed.append(f&quot;{ep['name']}: {str(e)[:50]}&quot;)
-
-        if not failed:
-            return CheckResult(&quot;api_connection&quot;, HealthStatus.HEALTHY, &quot;all endpoints ok&quot;)
-        return CheckResult(&quot;api_connection&quot;, HealthStatus.CRITICAL, &quot;; &quot;.join(failed))
+def check_api(url, timeout=3):
+    start = time.time()
+    try:
+        r = requests.get(url, timeout=timeout)
+        latency = (time.time() - start) * 1000
+        if r.status_code != 200:
+            return &quot;CRIT&quot;, f&quot;HTTP {r.status_code}&quot;, latency
+        status = judge(latency, THRESHOLDS[&quot;api_latency_ms&quot;])
+        return status, f&quot;latency={latency:.0f}ms&quot;, latency
+    except requests.RequestException as e:
+        return &quot;CRIT&quot;, f&quot;exception: {e}&quot;, -1
 </code></pre>
 
-<h4 id="_4">数据更新检查</h4>
-<p>数据更新检查的核心是判断最新数据的时间戳是否足够新。以K线数据为例：</p>
-<pre class="codehilite"><code class="language-python">class DataFreshnessCheck:
-    def __init__(self, db_conn, symbols: list, max_delay_seconds: int = 60):
-        self.db = db_conn
-        self.symbols = symbols
-        self.max_delay = max_delay_seconds
-
-    def check(self) -&gt; CheckResult:
-        stale_symbols = []
-        for symbol in self.symbols:
-            latest_time = self.db.get_latest_kline_time(symbol)
-            if latest_time is None:
-                stale_symbols.append(f&quot;{symbol}: no data&quot;)
-                continue
-            delay = time.time() - latest_time
-            if delay &gt; self.max_delay:
-                stale_symbols.append(f&quot;{symbol}: {delay:.0f}s delay&quot;)
-
-        if not stale_symbols:
-            return CheckResult(&quot;data_freshness&quot;, HealthStatus.HEALTHY, &quot;all symbols fresh&quot;)
-        return CheckResult(&quot;data_freshness&quot;, HealthStatus.CRITICAL, &quot;; &quot;.join(stale_symbols))
-</code></pre>
-
-<h4 id="_5">缓存状态检查</h4>
-<p>Redis 队列积压是常见问题。生产者和消费者的处理速度不匹配，积压量会持续增长，最终导致内存溢出或数据延迟。</p>
+<h3 id="32">3.2 数据更新检查</h3>
+<p>核心是比对最新数据时间戳和当前时间。数据源可以是数据库、Redis 或本地文件。</p>
 <pre class="codehilite"><code class="language-python">import redis
+from datetime import datetime
 
-class CacheQueueCheck:
-    def __init__(self, redis_client: redis.Redis, queues: dict, max_pending: int = 1000):
-        self.redis = redis_client
-        self.queues = queues  # {&quot;trade_queue&quot;: &quot;trade:queue&quot;, &quot;data_queue&quot;: &quot;data:queue&quot;}
-        self.max_pending = max_pending
-
-    def check(self) -&gt; CheckResult:
-        overflow_queues = []
-        for name, queue_key in self.queues.items():
-            pending = self.redis.llen(queue_key)
-            if pending &gt; self.max_pending:
-                overflow_queues.append(f&quot;{name}: {pending} pending&quot;)
-            # 检查消费速率，如果积压在增长，即使未超阈值也要关注
-            elif pending &gt; self.max_pending * 0.7:
-                overflow_queues.append(f&quot;{name}: {pending} pending (near limit)&quot;)
-
-        if not overflow_queues:
-            return CheckResult(&quot;cache_queue&quot;, HealthStatus.HEALTHY, &quot;queues normal&quot;)
-        return CheckResult(&quot;cache_queue&quot;, HealthStatus.WARNING, &quot;; &quot;.join(overflow_queues))
+def check_data_freshness(r: redis.Redis, key=&quot;last_tick_ts&quot;):
+    ts = r.get(key)
+    if ts is None:
+        return &quot;CRIT&quot;, &quot;no tick data&quot;
+    delay = time.time() - float(ts)
+    status = judge(delay, THRESHOLDS[&quot;data_delay_sec&quot;])
+    return status, f&quot;delay={delay:.1f}s&quot;
 </code></pre>
 
-<h4 id="_6">磁盘空间检查</h4>
+<h3 id="33">3.3 缓存状态检查</h3>
+<p>Redis 除了连接性，还要看内存使用率和 key 数量突变。key 数量骤降往往意味着被误清空。</p>
+<pre class="codehilite"><code class="language-python">def check_redis(r: redis.Redis, expected_keys_min=100):
+    try:
+        info = r.info(&quot;memory&quot;)
+        used_pct = info[&quot;used_memory&quot;] / info[&quot;maxmemory&quot;] * 100 if info.get(&quot;maxmemory&quot;) else 0
+        n_keys = r.dbsize()
+        msgs = []
+        status = &quot;OK&quot;
+
+        s1 = judge(used_pct, THRESHOLDS[&quot;redis_mem_pct&quot;])
+        if s1 != &quot;OK&quot;:
+            status = s1
+            msgs.append(f&quot;mem={used_pct:.1f}%&quot;)
+
+        if n_keys &lt; expected_keys_min:
+            status = &quot;CRIT&quot;
+            msgs.append(f&quot;keys={n_keys} &lt; {expected_keys_min}&quot;)
+
+        return status, &quot;; &quot;.join(msgs) or &quot;healthy&quot;
+    except redis.RedisError as e:
+        return &quot;CRIT&quot;, f&quot;redis error: {e}&quot;
+</code></pre>
+
+<h3 id="34">3.4 磁盘空间检查</h3>
+<p>用 <code>shutil.disk_usage</code>，遍历所有挂载点。注意排除 <code>tmpfs</code>、<code>overlay</code> 这类临时文件系统。</p>
 <pre class="codehilite"><code class="language-python">import shutil
+import psutil
 
-class DiskSpaceCheck:
-    def __init__(self, paths: list, warning_threshold: float = 0.85):
-        self.paths = paths
-        self.warning_threshold = warning_threshold
-
-    def check(self) -&gt; CheckResult:
-        full_paths = []
-        for path in self.paths:
-            usage = shutil.disk_usage(path)
-            percent = usage.used / usage.total
-            if percent &gt; self.warning_threshold:
-                full_paths.append(f&quot;{path}: {percent:.1%} used&quot;)
-
-        if not full_paths:
-            return CheckResult(&quot;disk_space&quot;, HealthStatus.HEALTHY, &quot;disk usage normal&quot;)
-        return CheckResult(&quot;disk_space&quot;, HealthStatus.CRITICAL, &quot;; &quot;.join(full_paths))
-</code></pre>
-
-<h4 id="_7">任务执行记录检查</h4>
-<p>定时任务可能因为异常退出而静默停止。检查最近一次执行时间，超过周期就告警。</p>
-<pre class="codehilite"><code class="language-python">class TaskExecutionCheck:
-    def __init__(self, task_store: dict, task_schedules: dict):
-        self.store = task_store  # {&quot;task_name&quot;: last_execution_timestamp}
-        self.schedules = task_schedules  # {&quot;task_name&quot;: interval_seconds}
-
-    def check(self) -&gt; CheckResult:
-        missing_tasks = []
-        for task_name, interval in self.schedules.items():
-            last_run = self.store.get(task_name)
-            if last_run is None:
-                missing_tasks.append(f&quot;{task_name}: never executed&quot;)
-                continue
-            elapsed = time.time() - last_run
-            if elapsed &gt; interval * 2:  # 超过2倍周期视为异常
-                missing_tasks.append(f&quot;{task_name}: {elapsed:.0f}s since last run&quot;)
-
-        if not missing_tasks:
-            return CheckResult(&quot;task_execution&quot;, HealthStatus.HEALTHY, &quot;all tasks running&quot;)
-        return CheckResult(&quot;task_execution&quot;, HealthStatus.CRITICAL, &quot;; &quot;.join(missing_tasks))
-</code></pre>
-
-<h3 id="_8">告警推送</h3>
-<p>告警推送要分级。WARNING 级别只记录日志，CRITICAL 级别推送即时消息。推送渠道用 Webhook，对接钉钉/企业微信/飞书都方便。</p>
-<pre class="codehilite"><code class="language-python">import requests
-import logging
-
-class AlertManager:
-    def __init__(self, webhook_url: str, alert_cooldown: int = 300):
-        self.webhook_url = webhook_url
-        self.alert_cooldown = alert_cooldown
-        self._last_alert_time = {}
-        self.logger = logging.getLogger(&quot;alert&quot;)
-
-    def send(self, result: CheckResult):
-        # 冷却期内不重复推送同一巡检项
-        now = time.time()
-        last_time = self._last_alert_time.get(result.item, 0)
-        if now - last_time &lt; self.alert_cooldown:
-            return
-
-        if result.status == HealthStatus.CRITICAL:
-            self._push_webhook(result)
-            self.logger.error(f&quot;[{result.item}] {result.detail}&quot;)
-        elif result.status == HealthStatus.WARNING:
-            self.logger.warning(f&quot;[{result.item}] {result.detail}&quot;)
-
-        self._last_alert_time[result.item] = now
-
-    def _push_webhook(self, result: CheckResult):
-        payload = {
-            &quot;msgtype&quot;: &quot;text&quot;,
-            &quot;text&quot;: {
-                &quot;content&quot;: f&quot;⚠️ 交易系统告警\n巡检项: {result.item}\n状态: {result.status.value}\n详情: {result.detail}&quot;
-            }
-        }
+def check_disk(mounts=(&quot;/&quot;, &quot;/data&quot;)):
+    results = []
+    status = &quot;OK&quot;
+    for m in mounts:
         try:
-            requests.post(self.webhook_url, json=payload, timeout=3)
-        except Exception as e:
-            self.logger.error(f&quot;webhook push failed: {e}&quot;)
+            usage = shutil.disk_usage(m)
+            pct = usage.used / usage.total * 100
+            s = judge(pct, THRESHOLDS[&quot;disk_usage_pct&quot;])
+            results.append(f&quot;{m}={pct:.1f}%&quot;)
+            if s == &quot;CRIT&quot;:
+                status = &quot;CRIT&quot;
+            elif s == &quot;WARN&quot; and status != &quot;CRIT&quot;:
+                status = &quot;WARN&quot;
+        except FileNotFoundError:
+            results.append(f&quot;{m}=missing&quot;)
+    return status, &quot;; &quot;.join(results)
 </code></pre>
 
-<h3 id="_9">调度与主流程</h3>
-<p>巡检任务用 <code>asyncio</code> 实现，每30秒跑一轮。每轮巡检各检查项并行执行，避免单项检查耗时阻塞整体。</p>
-<pre class="codehilite"><code class="language-python">import asyncio
+<h3 id="35">3.5 任务执行检查</h3>
+<p>定时任务用 Redis 或数据库记录每次执行时间。巡检时算距离上次执行的间隔，超过预期周期太多就是异常。</p>
+<pre class="codehilite"><code class="language-python">def check_task(r: redis.Redis, task_name, expected_interval_min):
+    key = f&quot;task_last_run:{task_name}&quot;
+    ts = r.get(key)
+    if ts is None:
+        return &quot;CRIT&quot;, f&quot;{task_name} never ran&quot;
+    delay_min = (time.time() - float(ts)) / 60
+    # 超过预期周期的 1.5 倍算 WARN，2 倍算 CRIT
+    if delay_min &gt; expected_interval_min * 2:
+        return &quot;CRIT&quot;, f&quot;{task_name} delay={delay_min:.1f}min&quot;
+    if delay_min &gt; expected_interval_min * 1.5:
+        return &quot;WARN&quot;, f&quot;{task_name} delay={delay_min:.1f}min&quot;
+    return &quot;OK&quot;, f&quot;{task_name} ok&quot;
+</code></pre>
 
-class InspectionScheduler:
-    def __init__(self, interval: int = 30):
-        self.interval = interval
-        self.checkers = []
-        self.alert_manager = AlertManager(webhook_url=&quot;https://your-webhook-url&quot;)
+<h2 id="_4">四、巡检调度与结果聚合</h2>
+<p>把所有检查项放进一个列表，统一执行。任何一项抛异常都不能影响其他项。</p>
+<pre class="codehilite"><code class="language-python">def run_all_checks(r: redis.Redis):
+    checks = [
+        (&quot;api_trade&quot;, lambda: check_api(&quot;https://api.example.com/ping&quot;)),
+        (&quot;api_market&quot;, lambda: check_api(&quot;https://quote.example.com/ping&quot;)),
+        (&quot;data_fresh&quot;, lambda: check_data_freshness(r)),
+        (&quot;redis&quot;, lambda: check_redis(r)),
+        (&quot;disk&quot;, lambda: check_disk()),
+        (&quot;task_sync&quot;, lambda: check_task(r, &quot;sync_data&quot;, 5)),
+        (&quot;task_recon&quot;, lambda: check_task(r, &quot;reconcile&quot;, 60)),
+    ]
 
-    def register_checker(self, checker):
-        self.checkers.append(checker)
-
-    async def run_once(self):
-        results = await asyncio.gather(*[self._run_checker(c) for c in self.checkers])
-        for result in results:
-            if result.status != HealthStatus.HEALTHY:
-                self.alert_manager.send(result)
-
-    async def _run_checker(self, checker):
+    report = []
+    for name, fn in checks:
         try:
-            if asyncio.iscoroutinefunction(checker.check):
-                return await checker.check()
-            return checker.check()
+            status, msg = fn()
         except Exception as e:
-            return CheckResult(checker.__class__.__name__, HealthStatus.CRITICAL, str(e))
-
-    async def start(self):
-        while True:
-            await self.run_once()
-            await asyncio.sleep(self.interval)
+            status, msg = &quot;CRIT&quot;, f&quot;check crashed: {e}&quot;
+        report.append({&quot;name&quot;: name, &quot;status&quot;: status, &quot;msg&quot;: msg})
+    return report
 </code></pre>
 
-<h3 id="_10">集成与部署</h3>
-<p>主程序启动时初始化调度器并注册各巡检项：</p>
-<pre class="codehilite"><code class="language-python">def setup_inspection():
-    scheduler = InspectionScheduler(interval=30)
+<p>调度用 <code>APScheduler</code>，每 60 秒跑一次：</p>
+<pre class="codehilite"><code class="language-python">from apscheduler.schedulers.blocking import BlockingScheduler
 
-    # 注册各巡检项
-    scheduler.register_checker(APIConnectionCheck([
-        {&quot;name&quot;: &quot;market_api&quot;, &quot;url&quot;: &quot;http://localhost:8080/ping&quot;}
-    ]))
+def job():
+    r = redis.Redis(host=&quot;localhost&quot;, port=6379, db=0)
+    report = run_all_checks(r)
+    handle_report(report)
 
-    scheduler.register_checker(DataFreshnessCheck(
-        db_conn=your_db_conn,
-        symbols=[&quot;BTC_USDT&quot;, &quot;ETH_USDT&quot;],
-        max_delay_seconds=60
-    ))
-
-    scheduler.register_checker(CacheQueueCheck(
-        redis_client=your_redis,
-        queues={&quot;trade_queue&quot;: &quot;trade:queue&quot;, &quot;data_queue&quot;: &quot;data:queue&quot;},
-        max_pending=1000
-    ))
-
-    scheduler.register_checker(DiskSpaceCheck([
-        &quot;/var/log/trading&quot;,
-        &quot;/data/market_data&quot;
-    ]))
-
-    scheduler.register_checker(TaskExecutionCheck(
-        task_store=your_task_store,
-        task_schedules={
-            &quot;fetch_kline&quot;: 60,
-            &quot;sync_order_status&quot;: 30
-        }
-    ))
-
-    return scheduler
+sched = BlockingScheduler()
+sched.add_job(job, &quot;interval&quot;, seconds=60)
+sched.start()
 </code></pre>
 
-<p>部署时用 <code>supervisor</code> 或 <code>systemd</code> 守护进程，确保巡检模块本身不挂。巡检模块的日志单独输出到独立文件，方便排查。</p>
-<h3 id="_11">实际运行中的几个注意点</h3>
-<p><strong>巡检模块自身不能成为单点</strong>。如果巡检进程挂了，系统就失去监控。用 <code>watchdog</code> 或外部监控（如云监控）做进程守护。</p>
-<p><strong>告警要设冷却期</strong>。网络抖动可能导致多个巡检项同时告警，冷却期避免告警风暴。上面代码里 <code>alert_cooldown</code> 参数控制了同一巡检项的告警频率。</p>
-<p><strong>巡检项要可配置</strong>。不同交易系统的关键路径不同，把巡检项做成配置驱动，上线新策略时只需改配置，不用改代码。</p>
-<p><strong>巡检结果要持久化</strong>。记录历史巡检数据，便于事后分析系统稳定性。可以存到 SQLite 或时序数据库，按天归档。</p>
-<hr />
-<p>巡检模块的价值在于把"系统是否正常"这个问题从主观判断变成客观指标。每次告警都是一次系统问题的提前暴露，省去的是半夜爬起来看日志的时间。</p>
-<p>更多内容请关注本站，后续会写告警通知渠道的扩展、巡检数据的可视化展示，以及如何把巡检结果接入监控大盘。</p>
+<h2 id="_5">五、告警推送与降噪</h2>
+<p>告警最忌讳两件事：<strong>漏报</strong>和<strong>刷屏</strong>。我的做法是：</p>
+<ol>
+<li><strong>只在状态变化时推送</strong>。上一轮是 OK，这一轮是 CRIT，才发。持续 CRIT 不重复发。</li>
+<li><strong>CRIT 立即推，WARN 聚合推</strong>。WARN 每 30 分钟汇总一次。</li>
+<li><strong>恢复时也推一条</strong>，让人知道问题解决了。</li>
+</ol>
+<p>状态用 Redis 存，key 是 <code>alert_state:{check_name}</code>：</p>
+<pre class="codehilite"><code class="language-python">def handle_report(report, r: redis.Redis, webhook=None):
+    for item in report:
+        name, status, msg = item[&quot;name&quot;], item[&quot;status&quot;], item[&quot;msg&quot;]
+        state_key = f&quot;alert_state:{name}&quot;
+        prev = r.get(state_key)
+        prev = prev.decode() if prev else &quot;OK&quot;
+
+        if status != prev:
+            r.set(state_key, status)
+            if status == &quot;CRIT&quot;:
+                send_alert(webhook, f&quot;[CRIT] {name}: {msg}&quot;)
+            elif status == &quot;WARN&quot;:
+                send_alert(webhook, f&quot;[WARN] {name}: {msg}&quot;)
+            elif prev in (&quot;CRIT&quot;, &quot;WARN&quot;) and status == &quot;OK&quot;:
+                send_alert(webhook, f&quot;[RECOVERED] {name}: {msg}&quot;)
+</code></pre>
+
+<p>推送用企业微信或飞书 webhook 最简单：</p>
+<pre class="codehilite"><code class="language-python">def send_alert(webhook, text):
+    if not webhook:
+        print(f&quot;[ALERT] {text}&quot;)
+        return
+    try:
+        requests.post(webhook, json={&quot;msgtype&quot;: &quot;text&quot;, &quot;text&quot;: {&quot;content&quot;: text}}, timeout=3)
+    except Exception as e:
+        print(f&quot;send alert failed: {e}&quot;)
+</code></pre>
+
+<h2 id="_6">六、几个实践细节</h2>
+<p><strong>1. 巡检自身要有心跳。</strong> 巡检脚本挂了没人知道。可以在巡检成功执行后写一个 Redis key，用外部监控（比如另一台机器）检查这个 key 是否更新。</p>
+<p><strong>2. 日志要留全量。</strong> 告警只推状态变化，但每次巡检结果都要落盘，方便事后复盘。用 <code>logging</code> 写到文件，按天切分。</p>
+<p><strong>3. 阈值要能热更新。</strong> 别把阈值写死在代码里。可以放 Redis 或配置文件，改完不用重启。</p>
+<p><strong>4. 检查项要能单独禁用。</strong> 遇到某个检查误报，可以临时关掉，不影响其他项。在 <code>run_all_checks</code> 里加一层配置过滤即可。</p>
+<p><strong>5. 时间同步。</strong> 数据延迟检查依赖服务器时间准确。部署时确保 NTP 正常，否则会误报。</p>
+<h2 id="_7">七、完整调用示例</h2>
+<pre class="codehilite"><code class="language-python">if __name__ == &quot;__main__&quot;:
+    import logging
+    logging.basicConfig(
+        filename=&quot;inspect.log&quot;,
+        level=logging.INFO,
+        format=&quot;%(asctime)s %(levelname)s %(message)s&quot;,
+    )
+
+    r = redis.Redis(host=&quot;localhost&quot;, port=6379, db=0, decode_responses=True)
+    report = run_all_checks(r)
+
+    for item in report:
+        logging.info(&quot;%s | %s | %s&quot;, item[&quot;name&quot;], item[&quot;status&quot;], item[&quot;msg&quot;])
+        print(f&quot;{item['status']:5} {item['name']:12} {item['msg']}&quot;)
+
+    handle_report(report, r, webhook=&quot;https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx&quot;)
+</code></pre>
+
+<p>跑起来之后，终端会输出类似：</p>
+<pre class="codehilite"><code>OK    api_trade    latency=45ms
+OK    api_market   latency=38ms
+WARN  data_fresh   delay=42.3s
+OK    redis        healthy
+OK    disk         /=45.2%; /data=62.1%
+OK    task_sync    task_sync ok
+CRIT  task_recon   reconcile delay=125.4min
+</code></pre>
+
+<p>一眼就能看出哪个环节出问题。</p>
+<p>这套巡检模块代码量不大，但能挡掉大部分"半夜系统挂了第二天才发现"的事故。核心思路就三点：<strong>检查要覆盖关键链路、判定要分级、告警要降噪</strong>。剩下的就是按自己的系统实际情况往里加检查项。</p>
+<p>更多内容请关注本站。</p>
             </div>
             <div class="post-tags"><span class="tag-badge">系统巡检</span><span class="tag-badge">健康检查</span><span class="tag-badge">自动化</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
