@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>三层验证方法论：参数扫描+月度一致性+稳健性消融</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/25.html</link>
+            <description>三层验证方法论：参数扫描+月度一致性+稳健性消融
+
+一个策略回测出来夏普2.0，不代表它能用。可能只是参数恰好踩中了历史噪声，可能只是某一个月贡献了全部收益，也可能去掉某个核心逻辑后表现反而更好——说明那个逻辑本来就没用。
+
+单次回测的信息量极低。...</description>
+            <pubDate>2026-09-24</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>系统巡检模块设计：自动检查交易系统健康状态</title>
             <link>https://hkcode.eu.org/quant-blog/posts/24.html</link>
             <description>系统巡检模块设计：自动检查交易系统健康状态
@@ -182,15 +193,6 @@ WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部�
             <description>Windows批处理文件中文乱码导致267009错误的解决方案
 
 在Windows定时任务（Task Scheduler）中运行Python脚本时，退出码267009是一个典型的“任务启动失败”信号。...</description>
-            <pubDate>2026-08-06</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>Python脚本超时重试机制设计：失败立即重试，最多3次</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/4.html</link>
-            <description>Python脚本超时重试机制设计：失败立即重试，最多3次
-
-定时任务跑挂是量化交易中最常见的事故来源。凌晨2点的行情数据抓取脚本，因为一次网络抖动直接退出，整个策略数据链断裂。解决这个问题不需要复杂的框架，一个设计良好的重试机制就够了。...</description>
             <pubDate>2026-08-06</pubDate>
             <category>定时任务</category>
         </item>
