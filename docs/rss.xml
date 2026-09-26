@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>止盈止损参数选择：RR盈亏比3:1背后的逻辑</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/27.html</link>
+            <description>止盈止损参数选择：RR盈亏比3:1背后的逻辑
+
+止盈止损参数不是拍脑袋定的。RR（RiskReward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。...</description>
+            <pubDate>2026-09-26</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>技术指标实战：均线系统的参数选择与信号逻辑</title>
             <link>https://hkcode.eu.org/quant-blog/posts/26.html</link>
             <description>技术指标实战：均线系统的参数选择与信号逻辑
@@ -185,15 +194,6 @@
 
 定时任务在量化交易和自动化运维中扮演着“无人值守”的角色。Windows 任务计划程序（Task Scheduler）虽然稳定，但脚本执行失败时，你往往只能在“上次运行结果”里看到一串冰冷的数字，比如 0x1 或 267009。...</description>
             <pubDate>2026-08-08</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>从WPS灵犀迁移到Windows计划任务的全过程</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/7.html</link>
-            <description>从WPS灵犀迁移到Windows计划任务的全过程
-
-WPS灵犀的守护进程被深信服安全软件拦截后，定时任务全部哑火。排查发现，灵犀的调度器依赖后台常驻进程，而深信服会将其识别为可疑行为并强制终止。...</description>
-            <pubDate>2026-08-07</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
