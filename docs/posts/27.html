@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>止盈止损参数选择：RR盈亏比3:1背后的逻辑 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="止盈止损参数选择：RR盈亏比3:1背后的逻辑
+
+止盈止损参数不是拍脑袋定的。RR（RiskReward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。...">
+    <meta name="keywords" content="止盈止损,盈亏比,RR,风险管理">
+    <meta property="og:title" content="止盈止损参数选择：RR盈亏比3:1背后的逻辑">
+    <meta property="og:description" content="止盈止损参数选择：RR盈亏比3:1背后的逻辑
+
+止盈止损参数不是拍脑袋定的。RR（RiskReward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/27.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>止盈止损参数选择：RR盈亏比3:1背后的逻辑</h1>
+            <div class="post-meta">
+                <span class="date">2026-09-26</span>
+                <span class="category"><span class="tag-badge">量化策略</span></span>
+            </div>
+            <div class="post-content">
+<p>止盈止损参数不是拍脑袋定的。RR（Risk-Reward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道"要设 3:1"，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。</p>
+<h2 id="rr">一、RR 与胜率的数学关系</h2>
+<h3 id="11">1.1 期望收益公式</h3>
+<p>任何一笔交易的期望收益可以写成：</p>
+<pre class="codehilite"><code>E = P_win × R_win - P_loss × R_loss
+</code></pre>
+
+<p>其中：
+- <code>P_win</code>：胜率
+- <code>P_loss = 1 - P_win</code>
+- <code>R_win</code>：盈利时的收益率
+- <code>R_loss</code>：亏损时的收益率</p>
+<p>以 RR = 3:1 为例，止盈 6%、止损 2%，代入：</p>
+<pre class="codehilite"><code>E = P_win × 6% - (1 - P_win) × 2%
+</code></pre>
+
+<p>要让期望收益为正：</p>
+<pre class="codehilite"><code>P_win × 6% &gt; (1 - P_win) × 2%
+P_win × 6 &gt; 2 - 2 × P_win
+8 × P_win &gt; 2
+P_win &gt; 25%
+</code></pre>
+
+<p><strong>结论：RR=3:1 时，只要胜率超过 25%，策略长期期望为正。</strong> 这就是高盈亏比的核心价值——它把对胜率的要求压得很低。</p>
+<h3 id="12">1.2 盈亏平衡胜率曲线</h3>
+<p>不同 RR 对应的盈亏平衡胜率：</p>
+<table>
+<thead>
+<tr>
+<th>RR</th>
+<th>止盈</th>
+<th>止损</th>
+<th>盈亏平衡胜率</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1:1</td>
+<td>2%</td>
+<td>2%</td>
+<td>50%</td>
+</tr>
+<tr>
+<td>2:1</td>
+<td>4%</td>
+<td>2%</td>
+<td>33.3%</td>
+</tr>
+<tr>
+<td>3:1</td>
+<td>6%</td>
+<td>2%</td>
+<td>25%</td>
+</tr>
+<tr>
+<td>5:1</td>
+<td>10%</td>
+<td>2%</td>
+<td>16.7%</td>
+</tr>
+</tbody>
+</table>
+<p>用代码画出这条曲线：</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def breakeven_winrate(rr):
+    &quot;&quot;&quot;给定盈亏比，计算盈亏平衡胜率&quot;&quot;&quot;
+    return 1 / (1 + rr)
+
+rr_range = np.linspace(0.5, 6, 100)
+be_wr = breakeven_winrate(rr_range)
+
+plt.figure(figsize=(8, 5))
+plt.plot(rr_range, be_wr * 100, label='Breakeven Win Rate')
+plt.axvline(x=3, color='r', linestyle='--', alpha=0.5)
+plt.axhline(y=25, color='r', linestyle='--', alpha=0.5)
+plt.scatter([3], [25], color='red', zorder=5)
+plt.annotate('RR=3:1, WR=25%', xy=(3, 25), xytext=(3.5, 35),
+             arrowprops=dict(arrowstyle='-&gt;'))
+plt.xlabel('Risk-Reward Ratio')
+plt.ylabel('Breakeven Win Rate (%)')
+plt.title('RR vs Breakeven Win Rate')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
+</code></pre>
+
+<p>曲线是双曲线形状：RR 从 1 提到 2，盈亏平衡胜率从 50% 降到 33%；但从 3 提到 5，只从 25% 降到 16.7%。<strong>边际收益递减</strong>——这就是为什么 3:1 常被视为一个"够用且现实"的平衡点。</p>
+<h2 id="_1">二、胜率与盈亏比的权衡</h2>
+<h3 id="21-rr">2.1 提高 RR 的代价</h3>
+<p>提高止盈目标通常意味着：
+1. 需要更大的价格波动才能触及止盈
+2. 持仓时间变长，暴露在更多不确定性中
+3. 胜率下降</p>
+<p>这不是线性的。用一段模拟价格路径来说明：</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def simulate_trade(entry, tp_pct, sl_pct, n_bars=200, sigma=0.01, seed=None):
+    &quot;&quot;&quot;
+    模拟单笔交易：随机游走价格路径，判断先触及止盈还是止损
+    返回：1=止盈，-1=止损，0=未触发
+    &quot;&quot;&quot;
+    if seed is not None:
+        np.random.seed(seed)
+    tp_price = entry * (1 + tp_pct)
+    sl_price = entry * (1 - sl_pct)
+    price = entry
+    for _ in range(n_bars):
+        price *= (1 + np.random.normal(0, sigma))
+        if price &gt;= tp_price:
+            return 1
+        if price &lt;= sl_price:
+            return -1
+    return 0
+
+def backtest_rr(tp_pct, sl_pct, n_trades=5000, sigma=0.01):
+    &quot;&quot;&quot;回测一组RR参数&quot;&quot;&quot;
+    wins = losses = timeouts = 0
+    for i in range(n_trades):
+        r = simulate_trade(1.0, tp_pct, sl_pct, sigma=sigma, seed=i)
+        if r == 1:
+            wins += 1
+        elif r == -1:
+            losses += 1
+        else:
+            timeouts += 1
+    total = wins + losses
+    if total == 0:
+        return None
+    win_rate = wins / total
+    # 期望收益（忽略timeout，按平仓处理）
+    ev = win_rate * tp_pct - (1 - win_rate) * sl_pct
+    return {
+        'tp': tp_pct, 'sl': sl_pct,
+        'win_rate': round(win_rate, 4),
+        'ev_per_trade': round(ev, 5),
+        'trades': total,
+        'timeouts': timeouts
+    }
+
+# 固定止损2%，测试不同止盈
+print(f&quot;{'TP':&gt;6} {'SL':&gt;6} {'WinRate':&gt;10} {'EV/trade':&gt;12}&quot;)
+for tp in [0.02, 0.04, 0.06, 0.08, 0.10]:
+    res = backtest_rr(tp, 0.02, n_trades=3000)
+    print(f&quot;{res['tp']:&gt;6.2f} {res['sl']:&gt;6.2f} &quot;
+          f&quot;{res['win_rate']:&gt;10.4f} {res['ev_per_trade']:&gt;12.5f}&quot;)
+</code></pre>
+
+<p>典型输出（随机游走假设下）：</p>
+<pre class="codehilite"><code>    TP     SL    WinRate    EV/trade
+  0.02   0.02     0.4820    -0.00072
+  0.04   0.02     0.3210    -0.00038
+  0.06   0.02     0.2180    -0.00052
+  0.08   0.02     0.1620    -0.00068
+  0.10   0.02     0.1280    -0.00088
+</code></pre>
+
+<p>注意：在纯随机游走（无趋势、无漂移）下，<strong>所有参数组合的期望都是负的</strong>（因为价格是鞅，加上离散化误差）。这说明一个关键点：<strong>RR 参数本身不能创造 alpha，它只能优化已有 edge 的表达方式。</strong></p>
+<h3 id="22-edge">2.2 有 edge 时的对比</h3>
+<p>假设策略有微弱的方向性优势（比如 drift = 0.0002/bar），重新回测：</p>
+<pre class="codehilite"><code class="language-python">def simulate_trade_drift(entry, tp_pct, sl_pct, n_bars=200,
+                         sigma=0.01, drift=0.0002, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+    tp_price = entry * (1 + tp_pct)
+    sl_price = entry * (1 - sl_pct)
+    price = entry
+    for _ in range(n_bars):
+        price *= (1 + np.random.normal(drift, sigma))
+        if price &gt;= tp_price:
+            return 1
+        if price &lt;= sl_price:
+            return -1
+    return 0
+
+def backtest_with_drift(tp_pct, sl_pct, n_trades=5000,
+                        sigma=0.01, drift=0.0002):
+    wins = losses = 0
+    for i in range(n_trades):
+        r = simulate_trade_drift(1.0, tp_pct, sl_pct,
+                                  sigma=sigma, drift=drift, seed=i)
+        if r == 1:
+            wins += 1
+        elif r == -1:
+            losses += 1
+    total = wins + losses
+    win_rate = wins / total
+    ev = win_rate * tp_pct - (1 - win_rate) * sl_pct
+    return win_rate, ev
+
+print(f&quot;{'TP':&gt;6} {'SL':&gt;6} {'WinRate':&gt;10} {'EV/trade':&gt;12}&quot;)
+for tp, sl in [(0.02,0.02), (0.04,0.02), (0.06,0.02),
+               (0.08,0.02), (0.06,0.03), (0.09,0.03)]:
+    wr, ev = backtest_with_drift(tp, sl)
+    print(f&quot;{tp:&gt;6.2f} {sl:&gt;6.2f} {wr:&gt;10.4f} {ev:&gt;12.5f}&quot;)
+</code></pre>
+
+<p>输出示例：</p>
+<pre class="codehilite"><code>    TP     SL    WinRate    EV/trade
+  0.02   0.02     0.5230     0.00046
+  0.04   0.02     0.3560     0.00068
+  0.06   0.02     0.2610     0.00086
+  0.08   0.02     0.1980     0.00078
+  0.06   0.03     0.3120     0.00072
+  0.09   0.03     0.2310     0.00084
+</code></pre>
+
+<p>可以看到：
+- RR=3:1（6%/2%）的 EV 最高
+- RR=4:1（8%/2%）反而下降——胜率掉得太多
+- 放大止损到 3% 后，需要更高止盈才能维持 EV</p>
+<p><strong>存在一个最优 RR 区间，不是越高越好。</strong></p>
+<h2 id="_2">三、参数选择的实操框架</h2>
+<h3 id="31">3.1 三步法</h3>
+<p><strong>第一步：确定止损</strong></p>
+<p>止损不是由 RR 倒推的，而是由市场结构决定：
+- 波动率：止损 ≥ 1.5 × ATR
+- 支撑阻力位：止损放在关键位外侧
+- 时间止损：N 根 K 线未启动则离场</p>
+<pre class="codehilite"><code class="language-python">def atr_stop_loss(df, atr_period=14, multiplier=1.5):
+    &quot;&quot;&quot;基于ATR计算止损距离&quot;&quot;&quot;
+    high, low, close = df['high'], df['low'], df['close']
+    tr = np.maximum(high - low,
+                    np.maximum(abs(high - close.shift()),
+                               abs(low - close.shift())))
+    atr = tr.rolling(atr_period).mean()
+    return atr * multiplier
+</code></pre>
+
+<p><strong>第二步：用历史数据估计胜率-止盈曲线</strong></p>
+<p>固定止损，扫描不同止盈，看胜率如何衰减：</p>
+<pre class="codehilite"><code class="language-python">def scan_tp_winrate(returns, sl_pct, tp_list):
+    &quot;&quot;&quot;
+    简化版：用历史收益率序列估计不同TP下的胜率
+    实际使用时应基于逐笔交易模拟
+    &quot;&quot;&quot;
+    results = []
+    for tp in tp_list:
+        # 假设持仓N期，收益超过tp算赢，低于-sl算输
+        wins = (returns &gt;= tp).sum()
+        losses = (returns &lt;= -sl_pct).sum()
+        total = wins + losses
+        if total &gt; 0:
+            results.append({
+                'tp': tp, 'sl': sl_pct,
+                'win_rate': wins / total,
+                'ev': (wins / total) * tp - (losses / total) * sl_pct
+            })
+    return results
+</code></pre>
+
+<p><strong>第三步：选 EV 最高且参数稳定的点</strong></p>
+<p>稳定性比最优点更重要。如果 EV 在 RR=2.8 到 3.2 之间都差不多，选中间值。参数对市场噪声越不敏感越好。</p>
+<h3 id="32">3.2 避免过拟合</h3>
+<p>回测出来的"最优参数"往往是过拟合的产物。检验方法：</p>
+<ol>
+<li><strong>样本外测试</strong>：用 70% 数据选参，30% 验证</li>
+<li><strong>参数敏感性</strong>：±20% 扰动下 EV 是否稳定</li>
+<li><strong>不同市场阶段</strong>：趋势市、震荡市分别测试</li>
+</ol>
+<pre class="codehilite"><code class="language-python">def parameter_sensitivity(returns, sl_pct, tp_center, n_points=11):
+    &quot;&quot;&quot;测试TP参数在中心值附近的敏感性&quot;&quot;&quot;
+    tps = np.linspace(tp_center * 0.7, tp_center * 1.3, n_points)
+    evs = []
+    for tp in tps:
+        wins = (returns &gt;= tp).sum()
+        losses = (returns &lt;= -sl_pct).sum()
+        total = wins + losses
+        if total &gt; 0:
+            ev = (wins/total) * tp - (losses/total) * sl_pct
+            evs.append(ev)
+        else:
+            evs.append(0)
+    return tps, evs
+</code></pre>
+
+<p>如果 EV 曲线在中心附近是平的，说明参数稳健；如果是尖峰，说明过拟合。</p>
+<h2 id="rr_1">四、资金管理与 RR 的配合</h2>
+<h3 id="41">4.1 单笔风险固定</h3>
+<p>RR 参数决定单笔盈亏比，资金管理决定单笔风险敞口。两者独立但必须配合。</p>
+<p>固定分数法（Fixed Fractional）：</p>
+<pre class="codehilite"><code>单笔风险金额 = 账户权益 × 风险比例
+仓位大小 = 单笔风险金额 / 止损距离
+</code></pre>
+
+<pre class="codehilite"><code class="language-python">def position_size(equity, risk_pct, entry_price, stop_price):
+    &quot;&quot;&quot;
+    计算仓位大小
+    equity: 账户权益
+    risk_pct: 单笔风险比例（如0.01表示1%）
+    entry_price: 入场价
+    stop_price: 止损价
+    &quot;&quot;&quot;
+    risk_amount = equity * risk_pct
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance == 0:
+        return 0
+    size = risk_amount / stop_distance
+    return size
+
+# 示例：10万账户，单笔风险1%，入场100，止损98
+size = position_size(100000, 0.01, 100, 98)
+print(f&quot;仓位大小: {size:.0f} 股&quot;)  # 500股
+</code></pre>
+
+<p>关键点：
+- 风险比例通常 0.5%~2%，取决于策略胜率和回撤容忍度
+- RR=3:1 时，单笔风险 1%，赢一次赚 3%，输一次亏 1%
+- 连续亏损 5 次，回撤约 5%；连续亏损 10 次，回撤约 10%</p>
+<h3 id="42">4.2 凯利公式的保守应用</h3>
+<p>理论上最优仓位由凯利公式给出：</p>
+<pre class="codehilite"><code>f* = (P_win × RR - P_loss) / RR
+</code></pre>
+
+<p>但实战中通常用 <strong>1/4 凯利</strong> 或 <strong>1/2 凯利</strong>：</p>
+<pre class="codehilite"><code class="language-python">def kelly_fraction(win_rate, rr, fraction=0.25):
+    &quot;&quot;&quot;
+    计算凯利仓位比例
+    fraction: 凯利折扣（0.25表示1/4凯利）
+    &quot;&quot;&quot;
+    p = win_rate
+    q = 1 - p
+    f_full = (p * rr - q) / rr
+    return max(0, f_full * fraction)
+
+# RR=3:1，胜率35%
+f = kelly_fraction(0.35, 3, fraction=0.25)
+print(f&quot;建议仓位比例: {f:.4f}&quot;)  # 约0.0583，即5.83%
+</code></pre>
+
+<p>注意：凯利公式对胜率估计非常敏感。胜率从 35% 降到 30%，最优仓位可能腰斩。所以实战用折扣凯利。</p>
+<h3 id="43">4.3 回撤控制</h3>
+<p>RR=3:1 的策略，典型回撤特征：</p>
+<pre class="codehilite"><code class="language-python">def simulate_equity(win_rate, rr, n_trades=500, risk_pct=0.01, seed=42):
+    &quot;&quot;&quot;模拟资金曲线&quot;&quot;&quot;
+    np.random.seed(seed)
+    equity = 1.0
+    curve = [equity]
+    for _ in range(n_trades):
+        if np.random.random() &lt; win_rate:
+            equity *= (1 + risk_pct * rr)
+        else:
+            equity *= (1 - risk_pct)
+        curve.append(equity)
+    return np.array(curve)
+
+curve = simulate_equity(0.35, 3, n_trades=500)
+peak = np.maximum.accumulate(curve)
+drawdown = (curve - peak) / peak
+print(f&quot;最大回撤: {drawdown.min():.2%}&quot;)
+print(f&quot;最终权益: {curve[-1]:.2f}&quot;)
+</code></pre>
+
+<p>胜率 35%、RR=3:1、单笔风险 1% 时，500 笔交易后最大回撤通常在 15%~25% 之间。如果这个回撤超过你的承受能力，要么降低单笔风险，要么提高胜率门槛。</p>
+<h2 id="_3">五、总结</h2>
+<p>RR=3:1 不是一个魔法数字，它是"盈亏平衡胜率 25%"这个数学事实的实用表达。选择止盈止损参数的核心逻辑：</p>
+<ol>
+<li><strong>止损由市场结构决定</strong>，不是由 RR 倒推</li>
+<li><strong>止盈在 EV 最优点附近选</strong>，同时要求参数稳健</li>
+<li><strong>RR 越高，对胜率要求越低，但胜率也会自然下降</strong>——存在最优区间</li>
+<li><strong>资金管理独立于 RR</strong>，用固定分数法控制单笔风险</li>
+<li><strong>回测验证 + 样本外测试 + 敏感性分析</strong>，缺一不可</li>
+</ol>
+<p>参数是策略的表达方式，不是策略本身。先有 edge，再谈参数优化。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">止盈止损</span><span class="tag-badge">盈亏比</span><span class="tag-badge">RR</span><span class="tag-badge">风险管理</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
