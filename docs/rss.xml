@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>RSI指标在风险控制中的实际应用</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/29.html</link>
+            <description>RSI指标在风险控制中的实际应用
+
+RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。...</description>
+            <pubDate>2026-09-28</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑</title>
             <link>https://hkcode.eu.org/quant-blog/posts/28.html</link>
             <description>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑
@@ -189,15 +198,6 @@
 
 在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。尤其是当你的脚本需要访问D盘、E盘等非系统盘的数据文件时，经常莫名其妙地报PermissionError或Access is denied。...</description>
             <pubDate>2026-08-10</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>Python环境变量优化：OPENBLAS、MKL、OMP线程控制</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/9.html</link>
-            <description>Python环境变量优化：OPENBLAS、MKL、OMP线程控制
-
-在量化回测和实盘信号计算中，我们经常遇到一个诡异的现象：numpy 的矩阵运算在单次调用时很快，但放到循环里整体跑下来却越来越慢，甚至CPU占用飙满但吞吐量下降。这背后十有八九是BLAS库的线程争抢问题。...</description>
-            <pubDate>2026-08-09</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
