@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/31.html</link>
+            <description>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
+
+做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。...</description>
+            <pubDate>2026-09-30</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>保底止损自适应阈值设计：不再硬编码百分比</title>
             <link>https://hkcode.eu.org/quant-blog/posts/30.html</link>
             <description>保底止损自适应阈值设计：不再硬编码百分比
@@ -197,15 +206,6 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
 
 定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...</description>
             <pubDate>2026-08-12</pubDate>
-            <category>定时任务</category>
-        </item>
-        <item>
-            <title>定时任务推送去重机制：5分钟内相同标题跳过</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/11.html</link>
-            <description>定时任务推送去重机制：5分钟内相同标题跳过
-
-定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。今天直接分享一个轻量级的去重方案：5分钟内标题相同则跳过推送。...</description>
-            <pubDate>2026-08-11</pubDate>
             <category>定时任务</category>
         </item>
     </channel>
