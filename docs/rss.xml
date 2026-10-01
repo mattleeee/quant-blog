@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>MACD背离策略回测分析：为什么最终被否决</title>
+            <link>https://hkcode.eu.org/quant-blog/posts/32.html</link>
+            <description>MACD背离策略回测分析：为什么最终被否决
+
+MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。...</description>
+            <pubDate>2026-10-01</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑</title>
             <link>https://hkcode.eu.org/quant-blog/posts/31.html</link>
             <description>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
@@ -198,15 +207,6 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
 量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。如果每次请求都直接打到交易所API，不仅浪费额度，还会触发限频，甚至在行情剧烈波动时被临时封IP。...</description>
             <pubDate>2026-08-13</pubDate>
             <category>Python自动化</category>
-        </item>
-        <item>
-            <title>任务执行成功后自动推送微信通知的方案</title>
-            <link>https://hkcode.eu.org/quant-blog/posts/12.html</link>
-            <description>任务执行成功后自动推送微信通知的方案
-
-定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...</description>
-            <pubDate>2026-08-12</pubDate>
-            <category>定时任务</category>
         </item>
     </channel>
 </rss>
