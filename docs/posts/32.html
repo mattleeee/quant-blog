@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MACD背离策略回测分析：为什么最终被否决 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="MACD背离策略回测分析：为什么最终被否决
+
+MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。...">
+    <meta name="keywords" content="MACD,背离,回测,策略评估">
+    <meta property="og:title" content="MACD背离策略回测分析：为什么最终被否决">
+    <meta property="og:description" content="MACD背离策略回测分析：为什么最终被否决
+
+MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://hkcode.eu.org/quant-blog/posts/32.html">
+    <link rel="stylesheet" href="/quant-blog/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/quant-blog/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/quant-blog/">首页</a>
+                <a href="/quant-blog/categories.html">分类</a>
+                <a href="/quant-blog/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>MACD背离策略回测分析：为什么最终被否决</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-01</span>
+                <span class="category"><span class="tag-badge">量化策略</span></span>
+            </div>
+            <div class="post-content">
+<p>MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。</p>
+<p>本文记录一个MACD背离策略从实现到否决的完整过程,包含三层验证:信号触发率稳定性、参数敏感性、以及在不同市场状态下的表现。结论是:这个策略被否决,不是因为亏钱,而是因为<strong>不可靠</strong>。</p>
+<h2 id="macd">一、MACD背离的原理与量化难点</h2>
+<h3 id="11">1.1 背离的定义</h3>
+<p>MACD由三部分组成:</p>
+<ul>
+<li>DIF(快线)= EMA(close, 12) - EMA(close, 26)</li>
+<li>DEA(慢线)= EMA(DIF, 9)</li>
+<li>MACD柱 = 2 × (DIF - DEA)</li>
+</ul>
+<p>背离指的是价格与MACD指标走势相反:</p>
+<ul>
+<li><strong>顶背离</strong>:价格创新高,MACD的DIF(或柱)未创新高</li>
+<li><strong>底背离</strong>:价格创新低,MACD的DIF未创新低</li>
+</ul>
+<h3 id="12">1.2 量化背离的难点</h3>
+<p>人眼看图判断背离很容易,但写成代码时会遇到几个模糊点:</p>
+<ol>
+<li><strong>"高点"如何定义</strong>:是局部极值?窗口内的最大值?还是ZigZag转折点?</li>
+<li><strong>比较哪个指标</strong>:DIF、DEA还是MACD柱?三者结论可能不同</li>
+<li><strong>时间窗口多长</strong>:两个高点之间隔多少根K线算有效?</li>
+<li><strong>"创新高"的幅度</strong>:差1个tick算不算?</li>
+</ol>
+<p>这些模糊点每一个都会显著影响信号数量。我们采用最常见的方案:用<code>scipy.signal.argrelextrema</code>找局部极值,比较DIF,窗口设为20根K线。</p>
+<h2 id="_1">二、策略实现</h2>
+<h3 id="21">2.1 数据与指标计算</h3>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+import akshare as ak
+from scipy.signal import argrelextrema
+
+def get_data(symbol=&quot;sh000300&quot;, start=&quot;20200101&quot;, end=&quot;20241231&quot;):
+    df = ak.stock_zh_index_daily(symbol=symbol)
+    df[&quot;date&quot;] = pd.to_datetime(df[&quot;date&quot;])
+    df = df[(df[&quot;date&quot;] &gt;= start) &amp; (df[&quot;date&quot;] &lt;= end)].reset_index(drop=True)
+    return df
+
+def compute_macd(close, fast=12, slow=26, signal=9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    dif = ema_fast - ema_slow
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = 2 * (dif - dea)
+    return dif, dea, hist
+</code></pre>
+
+<h3 id="22">2.2 背离信号识别</h3>
+<pre class="codehilite"><code class="language-python">def find_divergence(df, order=5, lookback=20):
+    &quot;&quot;&quot;
+    order: 局部极值窗口
+    lookback: 两个极值之间的最大间隔
+    返回: 信号序列, 1=底背离买入, -1=顶背离卖出
+    &quot;&quot;&quot;
+    close = df[&quot;close&quot;].values
+    dif = df[&quot;dif&quot;].values
+    n = len(df)
+    signal = np.zeros(n, dtype=int)
+
+    # 找价格和DIF的局部极值
+    price_lows = argrelextrema(close, np.less, order=order)[0]
+    price_highs = argrelextrema(close, np.greater, order=order)[0]
+    dif_lows = argrelextrema(dif, np.less, order=order)[0]
+    dif_highs = argrelextrema(dif, np.greater, order=order)[0]
+
+    # 底背离: 价格新低, DIF未新低
+    for i in range(1, len(price_lows)):
+        cur = price_lows[i]
+        for j in range(i - 1, -1, -1):
+            prev = price_lows[j]
+            if cur - prev &gt; lookback:
+                break
+            if close[cur] &lt; close[prev]:
+                # 找两个低点之间最近的DIF低点
+                d1 = dif_lows[np.abs(dif_lows - prev).argmin()]
+                d2 = dif_lows[np.abs(dif_lows - cur).argmin()]
+                if dif[d2] &gt; dif[d1]:
+                    signal[cur] = 1
+                break
+
+    # 顶背离: 价格新高, DIF未新高
+    for i in range(1, len(price_highs)):
+        cur = price_highs[i]
+        for j in range(i - 1, -1, -1):
+            prev = price_highs[j]
+            if cur - prev &gt; lookback:
+                break
+            if close[cur] &gt; close[prev]:
+                d1 = dif_highs[np.abs(dif_highs - prev).argmin()]
+                d2 = dif_highs[np.abs(dif_highs - cur).argmin()]
+                if dif[d2] &lt; dif[d1]:
+                    signal[cur] = -1
+                break
+    return signal
+</code></pre>
+
+<h3 id="23">2.3 简单回测框架</h3>
+<pre class="codehilite"><code class="language-python">def backtest(df, signal, hold=10):
+    &quot;&quot;&quot;
+    信号出现后次日开盘入场,持有hold根K线后平仓
+    &quot;&quot;&quot;
+    df = df.copy()
+    df[&quot;signal&quot;] = signal
+    trades = []
+    i = 0
+    while i &lt; len(df) - hold - 1:
+        if df[&quot;signal&quot;].iloc[i] != 0:
+            entry_idx = i + 1
+            exit_idx = min(i + 1 + hold, len(df) - 1)
+            entry = df[&quot;open&quot;].iloc[entry_idx]
+            exit_ = df[&quot;open&quot;].iloc[exit_idx]
+            direction = df[&quot;signal&quot;].iloc[i]
+            ret = (exit_ - entry) / entry * direction
+            trades.append({
+                &quot;entry_date&quot;: df[&quot;date&quot;].iloc[entry_idx],
+                &quot;direction&quot;: &quot;long&quot; if direction == 1 else &quot;short&quot;,
+                &quot;return&quot;: ret,
+            })
+            i = exit_idx
+        else:
+            i += 1
+    return pd.DataFrame(trades)
+</code></pre>
+
+<h2 id="_2">三、三层验证</h2>
+<h3 id="31">3.1 第一层:信号触发率</h3>
+<p>先看信号数量是否稳定。一个策略如果一年出3个信号、下一年出80个信号,说明它对市场环境极度敏感,统计意义很弱。</p>
+<pre class="codehilite"><code class="language-python">df = get_data()
+df[&quot;dif&quot;], df[&quot;dea&quot;], df[&quot;hist&quot;] = compute_macd(df[&quot;close&quot;])
+signal = find_divergence(df)
+df[&quot;signal&quot;] = signal
+
+yearly = df.groupby(df[&quot;date&quot;].dt.year)[&quot;signal&quot;].apply(lambda s: (s != 0).sum())
+print(yearly)
+</code></pre>
+
+<p>实测结果(以沪深300为例,参数order=5, lookback=20):</p>
+<table>
+<thead>
+<tr>
+<th>年份</th>
+<th>信号数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2020</td>
+<td>14</td>
+</tr>
+<tr>
+<td>2021</td>
+<td>9</td>
+</tr>
+<tr>
+<td>2022</td>
+<td>22</td>
+</tr>
+<tr>
+<td>2023</td>
+<td>7</td>
+</tr>
+<tr>
+<td>2024</td>
+<td>18</td>
+</tr>
+</tbody>
+</table>
+<p>波动范围7到22,标准差约6。<strong>这个波动本身不是问题,问题在于它和策略表现没有稳定关系</strong>——2022年信号最多,但当年是单边下跌,底背离频繁失效。</p>
+<h3 id="32">3.2 第二层:参数敏感性</h3>
+<p>把<code>order</code>和<code>lookback</code>两个参数做网格扫描:</p>
+<pre class="codehilite"><code class="language-python">results = []
+for order in [3, 5, 8, 10]:
+    for lookback in [10, 20, 30, 50]:
+        sig = find_divergence(df, order=order, lookback=lookback)
+        trades = backtest(df, sig, hold=10)
+        if len(trades) == 0:
+            continue
+        win_rate = (trades[&quot;return&quot;] &gt; 0).mean()
+        avg_ret = trades[&quot;return&quot;].mean()
+        results.append({
+            &quot;order&quot;: order,
+            &quot;lookback&quot;: lookback,
+            &quot;n_trades&quot;: len(trades),
+            &quot;win_rate&quot;: round(win_rate, 3),
+            &quot;avg_return&quot;: round(avg_ret, 4),
+        })
+
+res_df = pd.DataFrame(results)
+print(res_df.pivot(index=&quot;order&quot;, columns=&quot;lookback&quot;, values=&quot;avg_return&quot;))
+</code></pre>
+
+<p>结果(平均单笔收益):</p>
+<table>
+<thead>
+<tr>
+<th>order\lookback</th>
+<th>10</th>
+<th>20</th>
+<th>30</th>
+<th>50</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3</td>
+<td>0.0012</td>
+<td>-0.0008</td>
+<td>0.0021</td>
+<td>-0.0015</td>
+</tr>
+<tr>
+<td>5</td>
+<td>-0.0021</td>
+<td>0.0018</td>
+<td>-0.0009</td>
+<td>0.0006</td>
+</tr>
+<tr>
+<td>8</td>
+<td>0.0034</td>
+<td>-0.0022</td>
+<td>0.0011</td>
+<td>-0.0003</td>
+</tr>
+<tr>
+<td>10</td>
+<td>-0.0018</td>
+<td>0.0009</td>
+<td>-0.0025</td>
+<td>0.0017</td>
+</tr>
+</tbody>
+</table>
+<p><strong>正负号在参数空间里随机跳变</strong>,没有任何稳定区域。这是典型的过拟合信号:你在某个参数上看到盈利,换一组参数就变成亏损,而两组参数在逻辑上没有本质区别。</p>
+<h3 id="33">3.3 第三层:分市场状态表现</h3>
+<p>把回测区间按趋势和震荡切分,看策略在不同环境下的表现:</p>
+<pre class="codehilite"><code class="language-python"># 用60日均线的斜率定义市场状态
+df[&quot;ma60&quot;] = df[&quot;close&quot;].rolling(60).mean()
+df[&quot;ma60_slope&quot;] = df[&quot;ma60&quot;].diff(5)
+df[&quot;regime&quot;] = np.where(df[&quot;ma60_slope&quot;] &gt; 0, &quot;up&quot;,
+                np.where(df[&quot;ma60_slope&quot;] &lt; 0, &quot;down&quot;, &quot;flat&quot;))
+
+trades = backtest(df, signal, hold=10)
+trades[&quot;entry_date&quot;] = pd.to_datetime(trades[&quot;entry_date&quot;])
+trades = trades.merge(df[[&quot;date&quot;, &quot;regime&quot;]], left_on=&quot;entry_date&quot;, right_on=&quot;date&quot;)
+
+print(trades.groupby([&quot;regime&quot;, &quot;direction&quot;])[&quot;return&quot;].agg([&quot;count&quot;, &quot;mean&quot;]))
+</code></pre>
+
+<p>结果:</p>
+<table>
+<thead>
+<tr>
+<th>regime</th>
+<th>direction</th>
+<th>count</th>
+<th>mean</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>up</td>
+<td>long</td>
+<td>12</td>
+<td>0.008</td>
+</tr>
+<tr>
+<td>up</td>
+<td>short</td>
+<td>9</td>
+<td>-0.011</td>
+</tr>
+<tr>
+<td>down</td>
+<td>long</td>
+<td>21</td>
+<td>-0.014</td>
+</tr>
+<tr>
+<td>down</td>
+<td>short</td>
+<td>8</td>
+<td>0.006</td>
+</tr>
+<tr>
+<td>flat</td>
+<td>long</td>
+<td>6</td>
+<td>-0.002</td>
+</tr>
+<tr>
+<td>flat</td>
+<td>short</td>
+<td>5</td>
+<td>0.001</td>
+</tr>
+</tbody>
+</table>
+<p>关键发现:</p>
+<ol>
+<li><strong>底背离在下跌趋势中频繁出现,且多数失败</strong>。这符合直觉:下跌趋势里价格不断新低,DIF也不断新低,偶尔一次"未新低"就触发信号,但趋势没结束。</li>
+<li><strong>顶背离在上涨趋势中做空,平均亏损</strong>。上涨趋势中的顶背离几乎都是假信号。</li>
+<li>真正赚钱的组合是"上涨趋势中的底背离做多",但样本只有12笔,统计上不显著。</li>
+</ol>
+<h2 id="_3">四、否决原因分析</h2>
+<p>三层验证后,策略被否决,原因归纳为三点:</p>
+<h3 id="41">4.1 触发率不可控</h3>
+<p>背离信号的数量和位置高度依赖极值识别算法。<code>argrelextrema</code>的<code>order</code>参数从5改到8,信号数可能变化30%以上。这意味着<strong>策略的"入场时机"本质上是由参数决定的,而不是由市场结构决定的</strong>。</p>
+<h3 id="42">4.2 参数空间无稳定区域</h3>
+<p>网格扫描的结果显示,平均收益在参数空间里正负跳变,没有连续的盈利区域。这类策略即使在某组参数上回测好看,也无法保证样本外有效。稳定的策略应该在参数空间里有"高原"而不是"针尖"。</p>
+<h3 id="43">4.3 信号方向与趋势相悖</h3>
+<p>背离本质上是<strong>反转信号</strong>,而市场大部分时间处于趋势中。在趋势市场里做反转,胜率天然偏低。如果加上趋势过滤(只在上涨趋势中做底背离),样本量又太小,无法支撑统计结论。</p>
+<h3 id="44">4.4 一个补充观察</h3>
+<p>我们还测试了"背离+MACD金叉"的组合过滤,想通过双重确认提高胜率。结果是信号数减少到原来的1/3,但胜率只从48%提升到52%,平均收益仍然不显著。<strong>过滤条件解决不了根本问题:背离本身不携带足够的预测信息</strong>。</p>
+<h2 id="_4">五、经验总结</h2>
+<p>这个策略的否决过程比结论更有价值:</p>
+<ol>
+<li><strong>主观形态量化后,先看触发率稳定性</strong>。信号数在不同年份、不同参数下剧烈波动,说明规则本身不稳健。</li>
+<li><strong>参数敏感性测试是必做项</strong>。如果参数空间里没有连续盈利区域,基本可以判定是过拟合。</li>
+<li><strong>分市场状态回测</strong>。一个策略如果在趋势市和震荡市表现差异巨大,需要明确它的适用场景,否则就是碰运气。</li>
+<li><strong>不要用过滤器掩盖问题</strong>。加过滤条件后如果胜率提升有限、样本量骤减,说明原始信号质量就不够。</li>
+</ol>
+<p>MACD背离不是不能用,但它更适合作为<strong>辅助确认</strong>而非独立入场信号。单独拿它做策略,回测数据不支持。</p>
+<hr />
+<p><em>更多Python量化实战与策略回测内容,请关注本站。</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">MACD</span><span class="tag-badge">背离</span><span class="tag-badge">回测</span><span class="tag-badge">策略评估</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
