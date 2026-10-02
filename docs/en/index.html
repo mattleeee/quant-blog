@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code & Quant - Python, Quant Trading & Windows Automation</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Practical engineering notes on Python quantitative trading, backtesting, scheduled automation, and surviving corporate networks.">
+    <meta name="keywords" content="Python, quantitative trading, automation, backtesting, Windows, scheduled tasks">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <section class="hero">
+            <h1>Code & Quant</h1>
+            <p>Python, Quant Trading & Windows Automation</p>
+        </section>
+        <section class="post-list">
+            <h2>Latest Posts</h2>
+            
+        <article class="post-card">
+            <h2><a href="/en/posts/1.html">Why I Replaced Daemon Processes with Windows Task Scheduler</a></h2>
+            <div class="post-meta">
+                <span class="date">2026-10-02</span>
+                <span class="tag-badge">Windows Automation</span>
+            </div>
+            <p class="excerpt">The daemon that kept dying at 3 a.m. The first sign was a silent one....</p>
+            <div class="post-tags"><span class="tag-badge">Task Scheduler</span><span class="tag-badge">daemon</span><span class="tag-badge">Python</span></div>
+            <a href="/en/posts/1.html" class="read-more">Read more</a>
+        </article>
+        <article class="post-card">
+            <h2><a href="/en/posts/2.html">Running Scheduled Tasks Silently: The VBS Wrapper Pattern</a></h2>
+            <div class="post-meta">
+                <span class="date">2026-10-02</span>
+                <span class="tag-badge">Windows Automation</span>
+            </div>
+            <p class="excerpt">Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console session that stays logged in all day....</p>
+            <div class="post-tags"><span class="tag-badge">wscript</span><span class="tag-badge">VBS</span><span class="tag-badge">silent task</span></div>
+            <a href="/en/posts/2.html" class="read-more">Read more</a>
+        </article>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
