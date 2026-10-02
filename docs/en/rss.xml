@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+    <channel>
+        <title>Code & Quant</title>
+        <link>https://www.hkcode.dpdns.org/en</link>
+        <description>Practical engineering notes on Python quantitative trading, backtesting, scheduled automation, and surviving corporate networks.</description>
+        <language>en-us</language>
+        
+        <item>
+            <title>Why I Replaced Daemon Processes with Windows Task Scheduler</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/1.html</link>
+            <description>The daemon that kept dying at 3 a.m. The first sign was a silent one....</description>
+            <pubDate>2026-10-02</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/2.html</link>
+            <description>Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console session that stays logged in all day....</description>
+            <pubDate>2026-10-02</pubDate>
+            <category>Windows Automation</category>
+        </item>
+    </channel>
+</rss>
