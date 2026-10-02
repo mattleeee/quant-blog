@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Why I Replaced Daemon Processes with Windows Task Scheduler - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The daemon that kept dying at 3 a.m. The first sign was a silent one....">
+    <meta name="keywords" content="Task Scheduler,daemon,Python,Sangfor,automation">
+    <meta property="og:title" content="Why I Replaced Daemon Processes with Windows Task Scheduler">
+    <meta property="og:description" content="The daemon that kept dying at 3 a.m. The first sign was a silent one....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/1.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Why I Replaced Daemon Processes with Windows Task Scheduler</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-02</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>The first sign was a silent one. A Python process that polled a data source every minute and wrote to a local SQLite file simply stopped. No traceback in the log file, no crash dump, no entry in the Windows Event Log beyond the usual noise. The process was gone, and nothing on the machine seemed to care.</p>
+<p>This happened on a corporate Windows 10 box — the kind where you have local admin rights but not really, where antivirus and endpoint protection run at a kernel level, and where the security suite (Sangfor aTrust, in this case) watches process creation with more interest than you would like. The Python job was a straightforward daemon: a <code>while True</code> loop with a <code>time.sleep(60)</code>, launched at logon via a shortcut in the Startup folder. It had run fine for weeks. Then it started dying every few hours, always when it spawned a child process.</p>
+<p>This post is about what actually caused it, why the obvious fix (a watchdog) also failed, and how moving every recurring job to Windows Task Scheduler turned a fragile setup into something that survives reboots, retries on failure, and reports its own exit codes.</p>
+<h2 id="symptoms-of-an-intercepted-child-process">Symptoms of an intercepted child process</h2>
+<p>The daemon was not crashing on its own logic. The pattern was specific: it died whenever it called <code>subprocess.run()</code> to invoke a helper script. The helper would start, run for a fraction of a second, and then the parent would vanish. No exception was raised in the parent — the process was terminated externally.</p>
+<p>If you have ever debugged this, you know the checklist:</p>
+<ul>
+<li><code>pythonw.exe</code> disappears from Task Manager with no error dialog.</li>
+<li>The log file ends mid-operation, often right after a <code>subprocess.Popen</code> call.</li>
+<li><code>Get-Process</code> in PowerShell shows nothing.</li>
+<li>Windows Event Viewer shows nothing under Application, but you may see entries under <code>Microsoft-Windows-Security-Auditing</code> if auditing is enabled.</li>
+<li>Restarting the daemon works — for a while.</li>
+</ul>
+<p>The aTrust client on these machines enforces a process-creation policy. It does not block <code>python.exe</code> itself, and it does not block the helper script when run manually. But when a long-running Python process spawns a child, the security suite sometimes flags the pattern as suspicious and terminates the entire process tree. The daemon's own keep-alive watchdog — a second Python process that checked every 30 seconds whether the first was alive and restarted it — was also a child process of the same shell, and it got killed too. Two daemons, one policy, zero survivors.</p>
+<p>The lesson: in a locked-down enterprise environment, you cannot assume that a process you start will stay started. You need something outside your process tree that the security suite trusts.</p>
+<h2 id="why-task-scheduler-survives-where-daemons-do-not">Why Task Scheduler survives where daemons do not</h2>
+<p>Windows Task Scheduler is a first-class OS component. It runs as a service (<code>Schedule</code>), it is signed by Microsoft, and it is used by the operating system itself for maintenance tasks. Endpoint protection products are configured to allow it. When Task Scheduler launches your Python script, the process is a child of <code>svchost.exe</code> hosting the Schedule service, not a child of your interactive shell. That parent-child relationship is what the security suite evaluates — and it is a trusted one.</p>
+<p>This is not a hack. It is the intended way to run recurring work on Windows. The daemon pattern — a long-lived process with an internal loop — is a Unix idiom that maps poorly onto Windows security models. Task Scheduler gives you:</p>
+<ul>
+<li><strong>Trigger-based execution.</strong> Run at logon, at startup, every N minutes, on idle, on event. No <code>while True</code> loop needed.</li>
+<li><strong>Process isolation.</strong> Each run is a fresh process. A crash does not take down the scheduler.</li>
+<li><strong>A working directory you control.</strong> Set it explicitly; do not rely on the shell's <code>cwd</code>.</li>
+<li><strong>Execution time limits.</strong> If a run hangs, Task Scheduler kills it and records the result.</li>
+<li><strong>Retry semantics.</strong> <code>StartWhenAvailable</code> runs a missed task as soon as the machine is available.</li>
+<li><strong>Result codes.</strong> Every run records <code>Last Run Result</code>, which you can query from Python or PowerShell.</li>
+</ul>
+<p>The tradeoff is that you lose in-memory state between runs. For most recurring jobs — polling, scraping, file sync, report generation — that is fine. For jobs that genuinely need a persistent connection, you keep a daemon but run it under a service wrapper (NSSM, <code>sc.exe</code>) rather than as a child of your shell. Task Scheduler is for the recurring, stateless work.</p>
+<h2 id="mapping-a-daemon-to-a-task">Mapping a daemon to a task</h2>
+<p>Take the original daemon: poll an endpoint every 60 seconds, write results to SQLite, log to a file. As a daemon it looked like this:</p>
+<pre class="codehilite"><code class="language-python">import time, sqlite3, logging
+
+logging.basicConfig(filename=&quot;poll.log&quot;, level=logging.INFO)
+
+def poll_once():
+    # fetch, parse, insert
+    ...
+
+if __name__ == &quot;__main__&quot;:
+    while True:
+        try:
+            poll_once()
+        except Exception:
+            logging.exception(&quot;poll failed&quot;)
+        time.sleep(60)
+</code></pre>
+
+<p>As a scheduled task, the loop disappears. The script becomes a single-shot job:</p>
+<pre class="codehilite"><code class="language-python">import sys, sqlite3, logging
+from datetime import datetime, timezone
+
+LOG = r&quot;C:\jobs\poll\poll.log&quot;
+DB = r&quot;C:\jobs\poll\data.sqlite&quot;
+
+logging.basicConfig(
+    filename=LOG,
+    level=logging.INFO,
+    format=&quot;%(asctime)s %(levelname)s %(message)s&quot;,
+)
+
+def poll_once():
+    # fetch, parse, insert
+    ...
+
+def main() -&gt; int:
+    try:
+        poll_once()
+        logging.info(&quot;ok&quot;)
+        return 0
+    except Exception:
+        logging.exception(&quot;poll failed&quot;)
+        return 1
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</code></pre>
+
+<p>Two things matter here. First, the script returns an exit code: <code>0</code> on success, <code>1</code> on failure. Task Scheduler records this as <code>Last Run Result</code>. Second, all paths are absolute. Do not assume the working directory.</p>
+<p>Register the task with <code>schtasks</code> (or the Task Scheduler GUI, or the <code>pywin32</code> COM API). The <code>schtasks</code> command is the most portable:</p>
+<pre class="codehilite"><code class="language-bat">schtasks /Create /TN &quot;CodeQuant\Poll&quot; /TR &quot;C:\Python311\python.exe C:\jobs\poll\poll.py&quot; /SC MINUTE /MO 1 /RL LIMITED /F
+</code></pre>
+
+<p>That is the minimum. In practice you want a few more flags:</p>
+<pre class="codehilite"><code class="language-bat">schtasks /Create ^
+  /TN &quot;CodeQuant\Poll&quot; ^
+  /TR &quot;C:\Python311\python.exe C:\jobs\poll\poll.py&quot; ^
+  /SC MINUTE /MO 1 ^
+  /RL LIMITED ^
+  /F
+</code></pre>
+
+<p><code>/RL LIMITED</code> runs the task with the least privilege the account has. Do not use <code>/RL HIGHEST</code> unless the job genuinely needs elevation; it makes the security suite pay more attention.</p>
+<p>For a job that should survive reboots and catch up on missed runs, set <code>StartWhenAvailable</code> and a time limit. <code>schtasks</code> does not expose every setting, so drop into PowerShell for the full set:</p>
+<pre class="codehilite"><code class="language-powershell">$action = New-ScheduledTaskAction `
+    -Execute &quot;C:\Python311\python.exe&quot; `
+    -Argument &quot;C:\jobs\poll\poll.py&quot; `
+    -WorkingDirectory &quot;C:\jobs\poll&quot;
+
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 1)
+
+$settings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -MultipleInstances IgnoreNew
+
+Register-ScheduledTask `
+    -TaskName &quot;CodeQuant\Poll&quot; `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -User &quot;DOMAIN\youruser&quot; `
+    -RunLevel Limited
+</code></pre>
+
+<p>The key settings:</p>
+<ul>
+<li><code>-WorkingDirectory</code> sets the <code>cwd</code> for the process. Without it, the script runs in <code>C:\Windows\System32</code> and any relative path breaks.</li>
+<li><code>-StartWhenAvailable</code> runs the task as soon as the machine is on, even if the scheduled time was missed. This is what replaces the daemon's "always running" property.</li>
+<li><code>-ExecutionTimeLimit</code> kills a hung run. A daemon that hangs holds a connection forever; a scheduled task that hangs gets cleaned up.</li>
+<li><code>-RestartCount</code> and <code>-RestartInterval</code> give you retry-on-failure without a watchdog process.</li>
+<li><code>-MultipleInstances IgnoreNew</code> prevents overlap if a run takes longer than the interval. This is the equivalent of the daemon's single-threaded loop.</li>
+</ul>
+<h2 id="reading-last-run-result-codes">Reading last-run result codes</h2>
+<p>The operational win that surprised me most: Task Scheduler records the exit code of every run. You get failure visibility for free.</p>
+<p>Query it from PowerShell:</p>
+<pre class="codehilite"><code class="language-powershell">Get-ScheduledTaskInfo -TaskName &quot;CodeQuant\Poll&quot; |
+    Select-Object LastRunTime, LastTaskResult, NextRunTime, NumberOfMissedRuns
+</code></pre>
+
+<p><code>LastTaskResult</code> is the exit code your script returned. <code>0</code> means success. Anything else is a failure you can alert on. <code>NumberOfMissedRuns</code> tells you if the machine was off or the task was disabled.</p>
+<p>From Python, wrap the same query:</p>
+<pre class="codehilite"><code class="language-python">import subprocess, json
+
+def task_status(task_name: str) -&gt; dict:
+    ps = (
+        f&quot;Get-ScheduledTaskInfo -TaskName '{task_name}' | &quot;
+        &quot;Select-Object LastRunTime, LastTaskResult, NextRunTime, NumberOfMissedRuns | &quot;
+        &quot;ConvertTo-Json&quot;
+    )
+    out = subprocess.run(
+        [&quot;powershell&quot;, &quot;-NoProfile&quot;, &quot;-Command&quot;, ps],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return json.loads(out)
+
+if __name__ == &quot;__main__&quot;:
+    info = task_status(r&quot;CodeQuant\Poll&quot;)
+    if info[&quot;LastTaskResult&quot;] != 0:
+        # send alert
+        ...
+</code></pre>
+
+<p>This is the part that a daemon cannot give you without building it yourself. The daemon's failure mode was silence. The scheduled task's failure mode is a non-zero integer sitting in the Windows task store, queryable from any script.</p>
+<h2 id="what-this-changes-operationally">What this changes operationally</h2>
+<p>Moving from daemons to Task Scheduler changed three things for me:</p>
+<p><strong>Reboot survival.</strong> A daemon launched from the Startup folder dies when the user logs off, and it does not come back until the next logon. A scheduled task with a trigger at startup or logon runs regardless, and <code>StartWhenAvailable</code> catches up on anything missed while the machine was off.</p>
+<p><strong>No watchdog to maintain.</strong> The keep-alive process is gone. Retry is a setting, not a script. If a run fails, Task Scheduler retries it on the interval you configured. If it hangs, the execution time limit kills it. You delete an entire class of code.</p>
+<p><strong>Failure is observable.</strong> Every run leaves a result code. You can build a single dashboard that queries all your tasks and alerts on non-zero results. No more discovering at 3 a.m. that a daemon died six hours ago.</p>
+<p>The one thing you give up is in-memory state. For polling, syncing, and report jobs, that is not a real loss. For anything that needs a persistent socket or a long-lived cache, keep the daemon but run it as a Windows service under <code>sc.exe</code> or NSSM — not as a child of your shell, where the security suite can see it.</p>
+<h2 id="the-migration-checklist">The migration checklist</h2>
+<p>If you are moving a daemon to Task Scheduler, here is the sequence that worked:</p>
+<ol>
+<li>Refactor the loop body into a single-shot function with an explicit exit code.</li>
+<li>Make every path absolute. No relative imports, no <code>cwd</code> assumptions.</li>
+<li>Register the task with an explicit working directory and a repetition trigger.</li>
+<li>Set <code>StartWhenAvailable</code>, an execution time limit, and a restart policy.</li>
+<li>Set <code>MultipleInstances</code> to <code>IgnoreNew</code> to prevent overlap.</li>
+<li>Query <code>LastTaskResult</code> after the first few runs to confirm the exit code is what you expect.</li>
+<li>Delete the old daemon and its watchdog. Do not leave both running.</li>
+</ol>
+<p>The security suite will not block any of this, because none of it looks like a daemon spawning children. It looks like Windows doing what Windows does.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Task Scheduler</span><span class="tag-badge">daemon</span><span class="tag-badge">Python</span><span class="tag-badge">Sangfor</span><span class="tag-badge">automation</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
