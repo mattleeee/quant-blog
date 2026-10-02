@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console ...">
+    <meta name="keywords" content="wscript,VBS,silent task,Task Scheduler,PowerShell">
+    <meta property="og:title" content="Running Scheduled Tasks Silently: The VBS Wrapper Pattern">
+    <meta property="og:description" content="Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console ...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/2.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-02</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black <code>cmd.exe</code> window on a console session that stays logged in all day. Nobody was watching that screen, but everyone saw the flicker. The tasks themselves worked fine. The problem was purely cosmetic, which is exactly the kind of problem that gets ignored until someone demos the machine to a client.</p>
+<p>Here is the diagnosis, the fix that failed, the fix that worked, and the wrapper pattern I now use for every scheduled batch job on a machine with an interactive session.</p>
+<h2 id="the-problem-with-cmdexe-as-a-task-action">The Problem With <code>cmd.exe</code> as a Task Action</h2>
+<p>When Task Scheduler launches an action, it does not magically detach the process from the desktop. If the task runs in the context of a logged-in user, and the action is <code>cmd.exe /c something.bat</code>, you get a console window. It appears, runs for however long the batch takes, and disappears. For a task that fires every hour and takes two seconds, that is a flicker every hour.</p>
+<p>The "Run whether user is logged on or not" option hides the window, but it also changes the security context: the task runs in a non-interactive session, mapped drives and user profile paths can behave differently, and anything that touches the interactive desktop breaks. On a server that is deliberately left logged in so that GUI automation and file shares work, switching to non-interactive mode is not an option.</p>
+<p>So the requirement is narrow: keep the task running as the logged-in user, in the interactive session, but do not show a console window.</p>
+<h2 id="why-schtasks-change-failed">Why <code>schtasks /change</code> Failed</h2>
+<p>My first instinct was to script the change with <code>schtasks.exe</code>. The plan: for each task, swap the action from <code>cmd.exe /c target.bat</code> to something windowless.</p>
+<p>That plan died immediately:</p>
+<pre class="codehilite"><code>ERROR: The parameter is incorrect.
+</code></pre>
+
+<p>No task name, no detail. <code>E_INVALIDARG</code> in disguise. The tasks in question were not created by <code>schtasks</code> — they were created by an installer and by a third-party scheduler that writes directly through the Task Scheduler COM API. Those tasks carry XML with elements and attributes that <code>schtasks.exe</code>'s command-line parser does not round-trip. When you ask <code>schtasks /change</code> to modify such a task, it tries to re-serialize the task definition from its own limited parameter set, hits a field it does not understand, and returns a generic parameter error.</p>
+<p>This is a known asymmetry: <code>schtasks</code> is a thin front end over the same COM API, but with a lossy parser in between. If the task definition is even slightly non-standard, the front end chokes.</p>
+<h2 id="powershell-set-scheduledtask-walks-the-same-api-without-the-parser">PowerShell <code>Set-ScheduledTask</code> Walks the Same API Without the Parser</h2>
+<p>The fix is to skip the command-line layer and talk to COM through the <code>ScheduledTasks</code> PowerShell module. <code>Set-ScheduledTask</code> and <code>New-ScheduledTaskAction</code> do not parse a command line — they construct and modify the task object directly, so non-standard XML survives.</p>
+<p>First, inspect what a task actually contains:</p>
+<pre class="codehilite"><code class="language-powershell">$task = Get-ScheduledTask -TaskName 'NightlySync'
+$task.Actions | Format-List *
+</code></pre>
+
+<p>You will see <code>Execute</code>, <code>Arguments</code>, <code>WorkingDirectory</code>. The action is the thing to replace. Building a new one and assigning it is a two-step operation:</p>
+<pre class="codehilite"><code class="language-powershell">$action = New-ScheduledTaskAction `
+    -Execute 'wscript.exe' `
+    -Argument '&quot;C:\Tools\silent_runner.vbs&quot; &quot;C:\Jobs\NightlySync.bat&quot;' `
+    -WorkingDirectory 'C:\Jobs'
+
+Set-ScheduledTask -TaskName 'NightlySync' -Action $action
+</code></pre>
+
+<p>No parameter error, because nothing is being parsed from a string that has to match a schema. The task object is updated in place, and the installer's custom XML fields are left alone.</p>
+<p>One caveat: <code>Set-ScheduledTask</code> requires elevation, and it will preserve the existing principal (run-as user, logon type) unless you pass <code>-User</code> and <code>-Password</code>, which I deliberately do not. Preserving the principal is the whole point here — the tasks must keep running as the interactive user.</p>
+<h2 id="the-two-line-vbs-wrapper">The Two-Line VBS Wrapper</h2>
+<p>Now the silent part. The oldest trick that still works on every Windows version from XP to 11 is <code>WScript.Shell.Run</code> with a window style of <code>0</code>:</p>
+<pre class="codehilite"><code class="language-vbscript">Set WshShell = CreateObject(&quot;WScript.Shell&quot;)
+WshShell.Run &quot;cmd /c &quot;&quot;&quot; &amp; WScript.Arguments(0) &amp; &quot;&quot;&quot;&quot;, 0, False
+</code></pre>
+
+<p>Save that as <code>C:\Tools\silent_runner.vbs</code>. That is the entire file — two lines.</p>
+<p>Breaking it down:</p>
+<ul>
+<li><code>WScript.Arguments(0)</code> is the path to the batch file, passed by the task action.</li>
+<li>The string is assembled as <code>cmd /c "C:\Jobs\NightlySync.bat"</code>. The doubled quotes inside a VBScript string literal produce literal quote characters, so paths with spaces survive.</li>
+<li>The third argument to <code>Run</code> is the window style: <code>0</code> means hidden. The window is created but never shown.</li>
+<li>The fourth argument is <code>bWaitOnReturn</code>: <code>False</code>. <code>wscript.exe</code> launches <code>cmd.exe</code> and exits immediately, so the wrapper does not linger. Task Scheduler's own "stop the task if it runs longer than" logic still applies to the wrapper process, and the batch keeps running independently — worth knowing if you rely on Task Scheduler to kill hung jobs.</li>
+</ul>
+<p><code>wscript.exe</code> is a GUI-subsystem host, so it never allocates a console in the first place. There is no window to hide because none is ever created for the host process itself; the <code>0</code> style suppresses the child console.</p>
+<h3 id="why-not-powershellexe-windowstyle-hidden">Why Not <code>powershell.exe -WindowStyle Hidden</code>?</h3>
+<p>You can, and for one-off jobs it is fine. But <code>-WindowStyle Hidden</code> on <code>powershell.exe</code> still allocates a console and then hides it, which produces a visible flash on some systems before the hide takes effect. It also drags a full PowerShell startup (profile loading, module autoloading) into every hourly run. The VBS wrapper starts in a few milliseconds and has no runtime dependencies. For nine hourly tasks on a busy server, that difference adds up.</p>
+<p>If you prefer to stay in PowerShell for the wrapper, <code>Start-Process -WindowStyle Hidden</code> from a <code>wscript</code>-hosted script is the equivalent, but at that point you have added a layer for no gain.</p>
+<h2 id="updating-all-nine-tasks-in-one-loop">Updating All Nine Tasks in One Loop</h2>
+<p>Read the task list from a mapping, rebuild each action, and set it. The loop is the same whether you have three tasks or thirty:</p>
+<pre class="codehilite"><code class="language-powershell">$jobs = @(
+    @{ Name = 'NightlySync';   Bat = 'C:\Jobs\NightlySync.bat' },
+    @{ Name = 'HourlyExport';  Bat = 'C:\Jobs\HourlyExport.bat' },
+    @{ Name = 'CacheWarm';     Bat = 'C:\Jobs\CacheWarm.bat' }
+    # ... the remaining six
+)
+
+$vbs = 'C:\Tools\silent_runner.vbs'
+
+foreach ($job in $jobs) {
+    $action = New-ScheduledTaskAction `
+        -Execute 'wscript.exe' `
+        -Argument ('&quot;{0}&quot; &quot;{1}&quot;' -f $vbs, $job.Bat) `
+        -WorkingDirectory (Split-Path $job.Bat)
+
+    Set-ScheduledTask -TaskName $job.Name -Action $action | Out-Null
+    Write-Host (&quot;Updated {0}&quot; -f $job.Name)
+}
+</code></pre>
+
+<p>Run this once from an elevated PowerShell session. If you want to be careful, dry-run it first by printing <code>$action.Arguments</code> instead of calling <code>Set-ScheduledTask</code>.</p>
+<p>Two details worth keeping:</p>
+<ol>
+<li><code>-WorkingDirectory</code> should match what the batch file expects. Many batch scripts assume they start in their own folder; Task Scheduler's default is <code>C:\Windows\System32</code>, which is why so many scheduled jobs fail with "file not found" on a relative path.</li>
+<li>The <code>-Argument</code> string is passed verbatim to <code>wscript.exe</code>. Keep the quoting exactly as shown — VBScript's argument parser splits on spaces, so both paths need quotes.</li>
+</ol>
+<h2 id="verifying-the-fix">Verifying the Fix</h2>
+<p>Verification has three layers, and I check all three because Task Scheduler will happily report success while nothing runs.</p>
+<h3 id="1-confirm-the-action-was-rewritten">1. Confirm the action was rewritten</h3>
+<pre class="codehilite"><code class="language-powershell">Get-ScheduledTask -TaskName 'NightlySync' |
+    Select-Object -ExpandProperty Actions |
+    Format-List Execute, Arguments, WorkingDirectory
+</code></pre>
+
+<p>You should see <code>wscript.exe</code> and the VBS path. If you still see <code>cmd.exe</code>, the <code>Set-ScheduledTask</code> call silently failed — check that you ran elevated.</p>
+<h3 id="2-run-the-task-on-demand-and-watch-the-session">2. Run the task on demand and watch the session</h3>
+<pre class="codehilite"><code class="language-powershell">Start-ScheduledTask -TaskName 'NightlySync'
+</code></pre>
+
+<p>Then watch the interactive desktop. There should be no window at all. This is the actual acceptance test; nothing else proves the fix.</p>
+<h3 id="3-confirm-the-job-actually-did-its-work">3. Confirm the job actually did its work</h3>
+<p>A hidden window is useless if the batch never ran. Check the side effect: a log file the batch writes, a timestamp it touches, or the Task Scheduler history.</p>
+<pre class="codehilite"><code class="language-powershell">Get-ScheduledTaskInfo -TaskName 'NightlySync' |
+    Select-Object LastRunTime, LastTaskResult, NextRunTime
+</code></pre>
+
+<p><code>LastTaskResult</code> of <code>0</code> means the wrapper exited cleanly. It does <strong>not</strong> mean the batch succeeded — <code>wscript.exe</code> exits as soon as it launches <code>cmd.exe</code>, so the result code is the wrapper's, not the batch's. If you need the batch's exit code to propagate, set <code>bWaitOnReturn</code> to <code>True</code> in the VBS and accept that the wrapper process lives as long as the job:</p>
+<pre class="codehilite"><code class="language-vbscript">WshShell.Run &quot;cmd /c &quot;&quot;&quot; &amp; WScript.Arguments(0) &amp; &quot;&quot;&quot;&quot;, 0, True
+</code></pre>
+
+<p>The tradeoff is real: with <code>True</code>, Task Scheduler's "stop if runs longer than" setting can actually kill the job, and the task's last result reflects the batch. With <code>False</code>, the task always reports success and you must rely on the batch's own logging. For hourly background jobs I use <code>False</code> and have each batch append to a log file; for jobs where failure must page someone, I use <code>True</code>.</p>
+<h2 id="a-python-alternative-for-the-wrapper">A Python Alternative for the Wrapper</h2>
+<p>If the machine has Python on it and you would rather not ship a <code>.vbs</code>, the same hidden-launch behavior is available through <code>subprocess</code> with the right creation flags. This is useful when the wrapper itself needs logic — argument validation, logging, retry — that VBScript is bad at.</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import sys
+from pathlib import Path
+
+def run_hidden(bat_path: str) -&gt; int:
+    &quot;&quot;&quot;Launch a .bat with no console window and return its exit code.&quot;&quot;&quot;
+    bat = Path(bat_path)
+    if not bat.is_file():
+        raise FileNotFoundError(bat)
+
+    # CREATE_NO_WINDOW suppresses the console for the child process.
+    # CREATE_NEW_PROCESS_GROUP keeps Ctrl+C from reaching the parent.
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+
+    proc = subprocess.run(
+        [&quot;cmd.exe&quot;, &quot;/c&quot;, str(bat)],
+        creationflags=flags,
+        cwd=str(bat.parent),
+        capture_output=True,
+        text=True,
+    )
+
+    if proc.returncode != 0:
+        # Batch output is the only diagnostic we get; keep it.
+        print(proc.stdout, file=sys.stderr)
+        print(proc.stderr, file=sys.stderr)
+
+    return proc.returncode
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(run_hidden(sys.argv[1]))
+</code></pre>
+
+<p>Save as <code>silent_runner.py</code> and point the task action at <code>pythonw.exe</code> instead of <code>python.exe</code>. <code>pythonw</code> is the windowless interpreter — it has no console subsystem — so combined with <code>CREATE_NO_WINDOW</code> there is nothing to flash even for an instant. The task action becomes:</p>
+<pre class="codehilite"><code>pythonw.exe &quot;C:\Tools\silent_runner.py&quot; &quot;C:\Jobs\NightlySync.bat&quot;
+</code></pre>
+
+<p>The advantage over VBS is that you get a real exit code, real error handling, and the ability to log a structured line per run. The disadvantage is a Python dependency. On servers where Python is already part of the stack, this is the version I write; on locked-down boxes where only the OS ships, the two-line VBS is unbeatable.</p>
+<h2 id="the-pattern-generalized">The Pattern, Generalized</h2>
+<p>The wrapper pattern is not really about VBS or Python. It is about inserting a windowless host between Task Scheduler and the thing you actually want to run:</p>
+<pre class="codehilite"><code>Task Scheduler action  -&gt;  wscript.exe / pythonw.exe  -&gt;  cmd /c target.bat
+   (no window)                (no console)                  (hidden child)
+</code></pre>
+
+<p>Three rules make it hold up:</p>
+<ol>
+<li>Never let <code>cmd.exe</code> be the direct task action on an interactive session.</li>
+<li>Put the target path in the task's <code>Arguments</code>, not hardcoded in the wrapper, so one wrapper serves every job.</li>
+<li>Decide deliberately whether the wrapper waits for the child, because that choice determines whether Task Scheduler can time out the job and whether the task result means anything.</li>
+</ol>
+<p>The <code>schtasks /change</code> failure is the other half of the lesson: when a CLI front end refuses to touch a task definition, the COM API underneath it usually will. PowerShell's <code>ScheduledTasks</code> module is that API with a usable surface, and it does not care that an installer wrote the task instead of you.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">wscript</span><span class="tag-badge">VBS</span><span class="tag-badge">silent task</span><span class="tag-badge">Task Scheduler</span><span class="tag-badge">PowerShell</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
