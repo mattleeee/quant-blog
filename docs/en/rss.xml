@@ -7,6 +7,20 @@
         <language>en-us</language>
         
         <item>
+            <title>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/3.html</link>
+            <description>Scheduled scripts fail for boring reasons. A vendor API returns 429 for thirty seconds. A DNS lookup times out once....</description>
+            <pubDate>2026-10-03</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Staggering Nine Scheduled Tasks to Eliminate Resource Contention</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/4.html</link>
+            <description>Scheduled tasks are cheap to create and expensive to forget. A Windows box running a dozen Python jobs looks fine on paper until two of them wake up at the same...</description>
+            <pubDate>2026-10-03</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
             <title>Why I Replaced Daemon Processes with Windows Task Scheduler</title>
             <link>https://www.hkcode.dpdns.org/en/posts/1.html</link>
             <description>The daemon that kept dying at 3 a.m. The first sign was a silent one....</description>
