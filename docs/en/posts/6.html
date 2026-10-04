@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Migrating a Python Automation Stack to a New Windows Server - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A stack that runs unattended for months accumulates assumptions....">
+    <meta name="keywords" content="migration,xcopy,checklist,Windows Server,automation">
+    <meta property="og:title" content="Migrating a Python Automation Stack to a New Windows Server">
+    <meta property="og:description" content="A stack that runs unattended for months accumulates assumptions....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/6.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Migrating a Python Automation Stack to a New Windows Server</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-04</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>A stack that runs unattended for months accumulates assumptions. Most of them are invisible until you move it to another machine. Ours was nine scheduled tasks: a blog pipeline that renders Markdown to a static site, a trading system that polls data feeds and writes state, and a pile of maintenance scripts that rotate logs and clean temp files. It lived on a Windows 11 dev box for two years. Then we had to put it on a fresh Windows Server 2016 instance, and almost everything that could differ between two Windows installs did.</p>
+<p>This is the migration as it actually happened: what broke, what the package looked like, and the encoding bug that cost the most time.</p>
+<h2 id="why-a-package-not-a-copy">Why a package, not a copy</h2>
+<p>The naive move is to zip the project folder and drop it on the server. That fails for one reason: the dev box folder contains both code and runtime state, and they have opposite requirements.</p>
+<p>Code should be copied exactly. Runtime state should mostly <em>not</em> be copied — logs are noise, built sites are regenerable, trade records are append-only history that the new machine will start writing to immediately, and cookies are machine-specific session tokens that will be invalid or, worse, silently confusing on a different host.</p>
+<p>So we split the tree conceptually into two halves and used <code>xcopy</code> with an exclude list. The exclude file is the interesting part:</p>
+<pre class="codehilite"><code class="language-text"># migrate_exclude.txt
+\logs\
+\logs\*
+\build\
+\build\*
+\dist\
+\dist\*
+\__pycache__\
+\__pycache__\*
+*.pyc
+\cookies\
+\cookies\*
+\state\trades\
+\state\trades\*
+\state\tmp\
+\state\tmp\*
+\*.log
+\.pytest_cache\
+\.pytest_cache\*
+</code></pre>
+
+<p>Then the copy itself:</p>
+<pre class="codehilite"><code class="language-bat">xcopy &quot;D:\automation&quot; &quot;C:\automation&quot; /E /I /H /K /Y /EXCLUDE:migrate_exclude.txt
+</code></pre>
+
+<p><code>/E</code> copies empty directories too, which matters because several scripts assume their output directory exists and crash if it doesn't. <code>/H</code> includes hidden files. <code>/K</code> preserves attributes, since a couple of files were marked read-only by a previous cleanup pass and we wanted that to survive. <code>/Y</code> suppresses the overwrite prompt — this runs unattended.</p>
+<p>The exclude list protects the <em>destination</em> as much as it trims the source. If the server already has a <code>state\trades</code> directory with real records, <code>xcopy</code> without exclusions would happily overwrite it with the dev box's stale copies. Excluding runtime paths makes the copy idempotent: you can run it twice and the second run changes nothing that matters.</p>
+<h2 id="paths-that-survive-a-move">Paths that survive a move</h2>
+<p>Hardcoded paths are the first thing to break. The dev box had <code>D:\automation</code>; the server had <code>C:\automation</code> and a different user profile name. Rather than parameterize every script, we made the installer infer everything.</p>
+<p>The one-click installer is a batch file that resolves its own location and derives the rest:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal enabledelayedexpansion
+
+REM ROOT is the directory this bat lives in.
+set &quot;ROOT=%~dp0&quot;
+if &quot;%ROOT:~-1%&quot;==&quot;\&quot; set &quot;ROOT=%ROOT:~0,-1%&quot;
+
+REM Everything else hangs off it or off the user profile.
+set &quot;PY=%ROOT%\venv\Scripts\python.exe&quot;
+set &quot;LOGS=%ROOT%\logs&quot;
+set &quot;STATE=%ROOT%\state&quot;
+
+if not exist &quot;%LOGS%&quot; mkdir &quot;%LOGS%&quot;
+if not exist &quot;%STATE%&quot; mkdir &quot;%STATE%&quot;
+
+if not exist &quot;%PY%&quot; (
+    echo [install] creating virtualenv
+    py -3 -m venv &quot;%ROOT%\venv&quot; || goto :fail
+    &quot;%PY%&quot; -m pip install --upgrade pip || goto :fail
+    &quot;%PY%&quot; -m pip install -r &quot;%ROOT%\requirements.txt&quot; || goto :fail
+)
+
+echo [install] root = %ROOT%
+echo [install] python = %PY%
+exit /b 0
+
+:fail
+echo [install] FAILED
+exit /b 1
+</code></pre>
+
+<p>The <code>%~dp0</code> trick is the important line. It means the package can be unzipped anywhere — <code>C:\automation</code>, <code>D:\projects\automation</code>, a user's Desktop — and the installer configures itself accordingly. No config file to edit, no environment variable to set by hand.</p>
+<p>Python-side, we stopped hardcoding paths too. Every script resolves its root relative to <code>__file__</code>:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE_DIR = ROOT / &quot;state&quot;
+LOG_DIR = ROOT / &quot;logs&quot;
+
+def ensure_dirs() -&gt; None:
+    for d in (STATE_DIR, LOG_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+</code></pre>
+
+<p><code>resolve()</code> matters here. Without it, a script invoked through a symlink or a relative path can end up computing a root that points somewhere unexpected. With it, the path is absolute and canonical before anything else touches it.</p>
+<h2 id="re-registering-the-scheduled-tasks">Re-registering the scheduled tasks</h2>
+<p>The nine tasks were the real work. They had been created on the dev box with <code>schtasks</code> and had absolute paths baked into their actions. Copying task definitions between machines is not a supported operation, so we re-registered them from scratch on the server.</p>
+<p>The PowerShell approach is cleaner than <code>schtasks</code> because you can build the action and trigger as objects:</p>
+<pre class="codehilite"><code class="language-powershell">$Root = &quot;C:\automation&quot;
+$Py   = Join-Path $Root &quot;venv\Scripts\python.exe&quot;
+
+$Tasks = @(
+    @{ Name = &quot;AutoBlog_Build&quot;;   Script = &quot;blog\build.py&quot;;        Time = &quot;06:00&quot; },
+    @{ Name = &quot;AutoBlog_Deploy&quot;;  Script = &quot;blog\deploy.py&quot;;       Time = &quot;06:30&quot; },
+    @{ Name = &quot;Trade_Poll&quot;;       Script = &quot;trade\poll.py&quot;;        Time = &quot;07:00&quot; },
+    @{ Name = &quot;Trade_Settle&quot;;     Script = &quot;trade\settle.py&quot;;      Time = &quot;21:00&quot; },
+    @{ Name = &quot;Maint_RotateLogs&quot;; Script = &quot;maint\rotate_logs.py&quot;; Time = &quot;23:00&quot; }
+)
+
+foreach ($t in $Tasks) {
+    $scriptPath = Join-Path $Root $t.Script
+    $action = New-ScheduledTaskAction `
+        -Execute $Py `
+        -Argument &quot;`&quot;$scriptPath`&quot;&quot; `
+        -WorkingDirectory $Root
+
+    $trigger = New-ScheduledTaskTrigger -Daily -At $t.Time
+
+    $settings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -DontStopOnIdleEnd `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+
+    Register-ScheduledTask `
+        -TaskName $t.Name `
+        -Action $action `
+        -Trigger $trigger `
+        -Settings $settings `
+        -User &quot;SYSTEM&quot; `
+        -RunLevel Highest `
+        -Force
+}
+</code></pre>
+
+<p>Three details in there are load-bearing.</p>
+<p><code>-WorkingDirectory $Root</code> — without it, the task runs from <code>C:\Windows\System32</code>, and any script that uses a relative path for output writes into the system directory. We hit this on the first attempt.</p>
+<p><code>-StartWhenAvailable</code> — the server reboots for patching, and a task whose trigger time passed during the reboot should still run. The default silently skips it.</p>
+<p><code>-ExecutionTimeLimit</code> — the default is three days, which is effectively no limit. A hung polling script would sit there forever. Two hours is generous for our longest task.</p>
+<h2 id="the-verification-bat">The verification bat</h2>
+<p>After registering, we needed to prove the tasks were actually correct — not just present. A task can exist with a broken action and you won't notice until it fails at 3 a.m.</p>
+<p>The verification script pulls each task's action and last run result and compares them against expectations:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal
+
+set &quot;ROOT=%~dp0&quot;
+if &quot;%ROOT:~-1%&quot;==&quot;\&quot; set &quot;ROOT=%ROOT:~0,-1%&quot;
+set &quot;PY=%ROOT%\venv\Scripts\python.exe&quot;
+
+echo [verify] python: %PY%
+if not exist &quot;%PY%&quot; (
+    echo [verify] FAIL: interpreter missing
+    exit /b 1
+)
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  &quot;$root = '%ROOT%';&quot; ^
+  &quot;$py = Join-Path $root 'venv\Scripts\python.exe';&quot; ^
+  &quot;$names = @('AutoBlog_Build','AutoBlog_Deploy','Trade_Poll','Trade_Settle','Maint_RotateLogs');&quot; ^
+  &quot;$bad = 0;&quot; ^
+  &quot;foreach ($n in $names) {&quot; ^
+  &quot;  $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue;&quot; ^
+  &quot;  if (-not $t) { Write-Host \&quot;MISSING $n\&quot;; $bad++; continue }&quot; ^
+  &quot;  $exe = $t.Actions[0].Execute;&quot; ^
+  &quot;  $arg = $t.Actions[0].Arguments;&quot; ^
+  &quot;  $info = Get-ScheduledTaskInfo -TaskName $n;&quot; ^
+  &quot;  $code = $info.LastTaskResult;&quot; ^
+  &quot;  Write-Host \&quot;$n exec=$exe arg=$arg last=$code\&quot;;&quot; ^
+  &quot;  if ($exe -ne $py) { Write-Host \&quot;  WARN: unexpected interpreter\&quot;; $bad++ }&quot; ^
+  &quot;  if ($code -ne 0 -and $code -ne 267009) { Write-Host \&quot;  WARN: last result $code\&quot; }&quot; ^
+  &quot;}&quot; ^
+  &quot;if ($bad -gt 0) { exit 1 } else { exit 0 }&quot;
+
+if errorlevel 1 (
+    echo [verify] one or more tasks need attention
+    exit /b 1
+)
+
+echo [verify] all tasks look correct
+exit /b 0
+</code></pre>
+
+<p><code>267009</code> is <code>SCHED_S_TASK_RUNNING</code> — a task that's currently executing reports that as its last result, and it isn't an error. Filtering it out avoids false alarms when you run the verifier while a long task is mid-flight.</p>
+<p>The verifier is the thing you run after every deploy, not just the first one. Task definitions drift: someone edits one by hand, a patch changes a default, a script gets renamed. A thirty-second check catches all of it.</p>
+<h2 id="the-encoding-trap">The encoding trap</h2>
+<p>This is the part that cost us a full day, and it's the reason this article exists.</p>
+<p>The dev box ran Windows 11 with UTF-8 as the system code page. The server ran Windows Server 2016 with GBK. Same Python version, same scripts, same data — different behavior.</p>
+<p>The symptom was subtle. A blog post with a non-ASCII character would render correctly on the dev box and come out as mojibake on the server. A trade log would parse fine in one place and throw <code>UnicodeDecodeError</code> in the other. Nothing in the code looked wrong, because nothing in the code specified an encoding.</p>
+<p>Python's default encoding for <code>open()</code> is not UTF-8. It's whatever <code>locale.getpreferredencoding()</code> returns, which on Windows follows the system code page. On the dev box that was UTF-8. On the server it was GBK. Every <code>open()</code> call without an explicit encoding was a latent bug that only surfaced after the move.</p>
+<p>The fix is mechanical but has to be complete. Every read and write pins its encoding:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+import json
+
+def read_text(path: Path) -&gt; str:
+    return path.read_text(encoding=&quot;utf-8&quot;)
+
+def write_text(path: Path, text: str) -&gt; None:
+    path.write_text(text, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)
+
+def load_json(path: Path):
+    with path.open(&quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
+        return json.load(f)
+
+def save_json(path: Path, obj) -&gt; None:
+    tmp = path.with_suffix(path.suffix + &quot;.tmp&quot;)
+    with tmp.open(&quot;w&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;) as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+</code></pre>
+
+<p>Two things beyond the encoding argument. <code>newline="\n"</code> forces LF line endings regardless of platform, so files written on the server are byte-identical to files written on the dev box. And the atomic write — write to a temp file, then <code>replace</code> — means a crash mid-write can't leave a half-written state file that the next run will choke on.</p>
+<p>We also audited for the places encoding hides. Subprocess calls are a common one:</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+def run(cmd: list[str]) -&gt; str:
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding=&quot;utf-8&quot;,
+        errors=&quot;replace&quot;,
+        check=True,
+    )
+    return result.stdout
+</code></pre>
+
+<p>Without <code>encoding="utf-8"</code>, <code>text=True</code> decodes the child process's output using the system code page. On the server that meant a GBK decode of UTF-8 bytes, which produced garbage or raised depending on the byte sequence.</p>
+<p>The other hiding place is environment variables and file paths read from config. Anything that crosses the process boundary needs to be treated as bytes until you explicitly decode it.</p>
+<p>Once every read and write pinned its encoding, the two machines behaved identically. The migration didn't fix a bug so much as expose one that had been there the whole time — the dev box's UTF-8 default had been silently covering for it.</p>
+<h2 id="what-the-package-looks-like-now">What the package looks like now</h2>
+<p>The final structure is a self-contained directory with four entry points:</p>
+<ul>
+<li><code>install.bat</code> — creates the venv, installs dependencies, makes directories</li>
+<li><code>register_tasks.ps1</code> — re-registers all scheduled tasks with correct paths</li>
+<li><code>verify.bat</code> — checks every task's action and last result</li>
+<li><code>migrate_exclude.txt</code> — the exclude list for <code>xcopy</code></li>
+</ul>
+<p>The whole migration is three commands on a fresh server: copy with exclusions, run the installer, register the tasks. Then verify. The encoding audit is a one-time fix that lives in the code, not the package, which means it travels with every future copy.</p>
+<p>The lesson generalizes beyond this stack. A migration is an opportunity to find the assumptions you didn't know you'd made — hardcoded paths, implicit encodings, tasks that only work when run from a particular directory. Each one you pin down is a failure mode that can't surprise you next time.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-04 10:16:32</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ENJ</td>
+<td>弱做空</td>
+<td>$0.0329</td>
+<td>$0.0315</td>
+<td>$0.034</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">migration</span><span class="tag-badge">xcopy</span><span class="tag-badge">checklist</span><span class="tag-badge">Windows Server</span><span class="tag-badge">automation</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
