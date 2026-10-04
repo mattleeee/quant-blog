@@ -7,6 +7,20 @@
         <language>en-us</language>
         
         <item>
+            <title>Exit Code 267009: Debugging CMD Encoding Corruption</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/5.html</link>
+            <description>Exit code 267009 looks like noise until you decode it. On a Windows scheduled task I maintain, a .bat launcher that worked fine when double-clicked started fail...</description>
+            <pubDate>2026-10-04</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Migrating a Python Automation Stack to a New Windows Server</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/6.html</link>
+            <description>A stack that runs unattended for months accumulates assumptions. Most of them are invisible until you move it to another machine....</description>
+            <pubDate>2026-10-04</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
             <title>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff</title>
             <link>https://www.hkcode.dpdns.org/en/posts/3.html</link>
             <description>Scheduled scripts fail for boring reasons. A vendor API returns 429 for thirty seconds. A DNS lookup times out once....</description>
