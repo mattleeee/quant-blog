@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exit Code 267009: Debugging CMD Encoding Corruption - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Exit code 267009 looks like noise until you decode it. On a Windows scheduled task I maintain, a .bat launcher that work...">
+    <meta name="keywords" content="exit code,267009,cmd.exe,encoding,scheduled task">
+    <meta property="og:title" content="Exit Code 267009: Debugging CMD Encoding Corruption">
+    <meta property="og:description" content="Exit code 267009 looks like noise until you decode it. On a Windows scheduled task I maintain, a .bat launcher that work...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/5.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Exit Code 267009: Debugging CMD Encoding Corruption</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-04</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>Exit code 267009 looks like noise until you decode it. On a Windows scheduled task I maintain, a <code>.bat</code> launcher that worked fine when double-clicked started failing under Task Scheduler with that exact code. The task had no output, no log, nothing in Event Viewer beyond the failure. The launcher itself was three lines long. The problem was not the logic — it was the bytes.</p>
+<h2 id="what-267009-actually-is">What 267009 actually is</h2>
+<p>Windows exit codes are unsigned 32-bit integers. <code>267009</code> in hex is <code>0x41301</code>. If you have spent time around the Task Scheduler API, that number should look familiar: <code>SCHED_S_TASK_RUNNING</code> is <code>0x00041301</code>. It means <em>the task is still running</em> — or, more precisely, the Task Scheduler is reporting that the task's process has not terminated.</p>
+<p>That is why the code is confusing. It is not an error from your script at all. It is the scheduler's own status code leaking into whatever tool you used to read the result. A <code>.bat</code> that exits cleanly with <code>0</code> will still surface as <code>267009</code> if the scheduler sampled the state before the process finished, or if the process never finished because it died in a way the scheduler could not classify.</p>
+<p>So the first lesson: <strong>exit code 267009 is a scheduler status, not a script error.</strong> It tells you the task did not reach a clean terminal state. In my case, <code>cmd.exe</code> was stuck parsing the batch file.</p>
+<h3 id="decoding-obscure-exit-codes-in-general">Decoding obscure exit codes in general</h3>
+<p>Before chasing the script, decode the number. A small Python helper saves a lot of guessing:</p>
+<pre class="codehilite"><code class="language-python">def explain_exit_code(code: int) -&gt; str:
+    unsigned = code &amp; 0xFFFFFFFF
+    known = {
+        0x00000000: &quot;success&quot;,
+        0x00000001: &quot;generic failure / incorrect function&quot;,
+        0x00000002: &quot;file not found&quot;,
+        0x00000005: &quot;access denied&quot;,
+        0x00000102: &quot;timeout&quot;,
+        0x00000413: &quot;SCHED_S_TASK_READY&quot;,
+        0x000004130: &quot;SCHED_S_TASK_RUNNING&quot;,  # 267009
+        0x000004131: &quot;SCHED_S_TASK_NOT_SCHEDULED&quot;,
+        0x80070420: &quot;service already running&quot;,
+        0xC000013A: &quot;STATUS_CONTROL_C_EXIT (Ctrl+C)&quot;,
+    }
+    return known.get(unsigned, f&quot;unknown: 0x{unsigned:08X} ({unsigned})&quot;)
+
+for c in (267009, 1, 0xC000013A):
+    print(c, &quot;-&gt;&quot;, explain_exit_code(c))
+</code></pre>
+
+<p>Run that and <code>267009 -&gt; SCHED_S_TASK_RUNNING</code> falls out immediately. That single lookup reframed the whole investigation: I was not debugging a script that returned a bad code, I was debugging a script that never returned.</p>
+<h2 id="reproducing-the-failure">Reproducing the failure</h2>
+<p>The launcher was a batch file with Chinese comments and a path containing Chinese characters:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+rem 启动数据同步任务
+cd /d &quot;D:\数据\sync&quot;
+python sync.py --mode incremental
+</code></pre>
+
+<p>Saved as UTF-8 without BOM. The system codepage was GBK (code page 936). When <code>cmd.exe</code> reads a batch file, it interprets bytes according to the active console code page, not the file's declared encoding. UTF-8 Chinese text is multi-byte sequences that GBK reads as different characters. In the worst case, a byte sequence decodes to a character that <code>cmd.exe</code> treats as a command separator or a redirection operator. The parser then either runs garbage or blocks waiting for input.</p>
+<p>You can reproduce this deterministically:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+rem 这是中文注释
+echo done
+</code></pre>
+
+<p>Save as UTF-8, run from a GBK console:</p>
+<pre class="codehilite"><code class="language-text">C:\&gt; test.bat
+'锟斤拷' is not recognized as an internal or external command,
+operable program or batch file.
+</code></pre>
+
+<p>The mojibake command name is the tell. Under Task Scheduler the same script may hang instead of erroring, because the corrupted token can consume the rest of the line and leave <code>cmd.exe</code> waiting on a pipe that never closes. The process stays alive, the scheduler reports <code>267009</code>, and the task never completes.</p>
+<h3 id="why-it-works-interactively-but-fails-in-a-task">Why it works interactively but fails in a task</h3>
+<p>When you double-click the file, <code>cmd.exe</code> inherits your interactive console code page, which may already be 65001 (UTF-8) or have the right font and locale. Task Scheduler launches with a different environment: no interactive console, a system default code page, and often a different user profile. The same bytes are interpreted differently. This is the single most common reason a <code>.bat</code> "works on my machine" but fails as a scheduled task.</p>
+<h2 id="the-three-fixes-that-worked">The three fixes that worked</h2>
+<h3 id="1-keep-bat-files-pure-ascii">1. Keep <code>.bat</code> files pure ASCII</h3>
+<p>This is the most robust fix. Batch files are a legacy format; do not put non-ASCII text in them. Move comments out of the launcher and into the Python script or a separate README. If you must keep a comment, write it in ASCII:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+rem start data sync task
+cd /d &quot;D:\data\sync&quot;
+python sync.py --mode incremental
+</code></pre>
+
+<p>If the path itself contains Chinese characters, do not embed it as UTF-8 in the batch file. Two options: encode the whole file as GBK, or avoid the literal path entirely.</p>
+<h3 id="2-encode-as-gbk-or-better-avoid-the-issue">2. Encode as GBK, or better, avoid the issue</h3>
+<p>If you cannot remove non-ASCII content, write the file in the codepage the target machine uses. For a GBK system:</p>
+<pre class="codehilite"><code class="language-python">content = '@echo off\nrem 启动数据同步任务\ncd /d &quot;D:\\数据\\sync&quot;\npython sync.py\n'
+with open(&quot;launcher.bat&quot;, &quot;wb&quot;) as f:
+    f.write(content.encode(&quot;gbk&quot;))
+</code></pre>
+
+<p>This works, but it is fragile. Copy the file to a machine with a different codepage and it breaks again. That is exactly the "survives being copied between machines" problem. Prefer ASCII plus a path that does not need non-ASCII bytes.</p>
+<h3 id="3-use-the-83-short-path-for-non-ascii-paths">3. Use the 8.3 short path for non-ASCII paths</h3>
+<p>Windows maintains an 8.3 short name for every long path, including paths with Chinese characters. <code>D:\数据\sync</code> might have a short form like <code>D:\5F3A~1\SYNC</code>. You can retrieve it programmatically and put the ASCII short path in the batch file:</p>
+<pre class="codehilite"><code class="language-python">import ctypes
+from ctypes import wintypes
+
+def short_path(long_path: str) -&gt; str:
+    GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+    GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    GetShortPathNameW.restype = wintypes.DWORD
+    size = GetShortPathNameW(long_path, None, 0)
+    if size == 0:
+        raise OSError(f&quot;cannot resolve short path for {long_path}&quot;)
+    buf = ctypes.create_unicode_buffer(size)
+    GetShortPathNameW(long_path, buf, size)
+    return buf.value
+
+print(short_path(r&quot;D:\数据\sync&quot;))
+# -&gt; D:\5F3A~1\SYNC
+</code></pre>
+
+<p>Then the launcher stays pure ASCII:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+cd /d &quot;D:\5F3A~1\SYNC&quot;
+python sync.py --mode incremental
+</code></pre>
+
+<p>One caveat: 8.3 name generation can be disabled on a volume (<code>fsutil 8dot3name query D:</code>). If it is disabled and the path already exists without a short name, <code>GetShortPathNameW</code> returns the original long path. Check this before relying on it.</p>
+<h2 id="crlf-line-endings-matter">CRLF line endings matter</h2>
+<p>Batch files require CRLF (<code>\r\n</code>). A file saved with LF-only line endings can behave inconsistently — <code>cmd.exe</code> may treat the whole file as one line, or misparse labels and <code>goto</code> targets. This is another failure mode that appears when a file is copied through a tool that normalizes line endings (Git with <code>core.autocrlf=false</code>, or a text editor on Linux/macOS).</p>
+<pre class="codehilite"><code class="language-python">content = '@echo off\r\nrem start sync\r\ncd /d &quot;D:\\data\\sync&quot;\r\npython sync.py\r\n'
+with open(&quot;launcher.bat&quot;, &quot;wb&quot;) as f:
+    f.write(content.encode(&quot;ascii&quot;))
+</code></pre>
+
+<p>Write bytes, not text, and be explicit about both encoding and line endings. Never let an editor or version control decide for you.</p>
+<h2 id="a-checklist-for-batch-files-that-travel">A checklist for batch files that travel</h2>
+<p>Before a <code>.bat</code> file goes into a scheduled task or gets copied to another machine, verify:</p>
+<ul>
+<li><strong>Encoding is ASCII or the target codepage.</strong> <code>file launcher.bat</code> should not report UTF-8 if the target is GBK.</li>
+<li><strong>Line endings are CRLF.</strong> Check with <code>python -c "print(open('launcher.bat','rb').read()[:200])"</code> and look for <code>\r\n</code>.</li>
+<li><strong>No non-ASCII in comments, echoes, or paths.</strong> If a path needs non-ASCII, use the 8.3 short form.</li>
+<li><strong>No BOM.</strong> A UTF-8 BOM at the start of a <code>.bat</code> file causes <code>cmd.exe</code> to fail on the first line with an unrecognized command. Write with <code>encoding="ascii"</code> or <code>encoding="gbk"</code>, never <code>utf-8-sig</code>.</li>
+<li><strong>Absolute paths, not relative.</strong> The task's working directory is not what you think it is.</li>
+<li><strong>Explicit <code>cd /d</code></strong> to the target directory before running anything.</li>
+<li><strong>Exit codes are explicit.</strong> End the script with <code>exit /b %ERRORLEVEL%</code> so the scheduler sees a real code.</li>
+</ul>
+<p>A validation helper that catches most of these before deployment:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+def validate_bat(path: Path, expected_encoding: str = &quot;ascii&quot;) -&gt; list[str]:
+    issues = []
+    raw = path.read_bytes()
+    if raw.startswith(b&quot;\xef\xbb\xbf&quot;):
+        issues.append(&quot;UTF-8 BOM present&quot;)
+    if b&quot;\r\n&quot; not in raw:
+        issues.append(&quot;no CRLF line endings found&quot;)
+    if b&quot;\n&quot; in raw.replace(b&quot;\r\n&quot;, b&quot;&quot;):
+        issues.append(&quot;bare LF line endings present&quot;)
+    try:
+        raw.decode(expected_encoding)
+    except UnicodeDecodeError as e:
+        issues.append(f&quot;not decodable as {expected_encoding}: {e}&quot;)
+    for i, line in enumerate(raw.split(b&quot;\r\n&quot;), 1):
+        if any(b &gt; 127 for b in line):
+            issues.append(f&quot;non-ASCII bytes on line {i}&quot;)
+    return issues
+
+for problem in validate_bat(Path(&quot;launcher.bat&quot;)):
+    print(&quot;ISSUE:&quot;, problem)
+</code></pre>
+
+<p>Run this in your build or deployment step and the encoding class of bugs stops reaching production.</p>
+<h2 id="why-the-exit-code-misleads">Why the exit code misleads</h2>
+<p>The trap with 267009 is that it points at the scheduler, not the script. If you only look at the exit code, you will spend time reading Task Scheduler documentation when the real fault is a byte on line 2 of a batch file. The debugging sequence that worked was:</p>
+<ol>
+<li>Decode the exit code. <code>267009</code> is <code>SCHED_S_TASK_RUNNING</code>, not a script error.</li>
+<li>Check whether the process is actually alive. If it is, the script is blocked, not failing.</li>
+<li>Inspect the batch file as bytes, not as text. <code>file</code>, <code>xxd</code>, or the validator above.</li>
+<li>Reproduce interactively with the same code page the task uses.</li>
+<li>Fix the encoding, line endings, and path representation.</li>
+</ol>
+<p>The general principle extends past this one bug: when a scheduled task fails with a code you do not recognize, decode it first, then ask what state the process is actually in. The answer is often that it never finished — and the reason it never finished is usually in the bytes of the launcher, not in the logic of the program.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-04 10:16:32</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ENJ</td>
+<td>弱做空</td>
+<td>$0.0329</td>
+<td>$0.0315</td>
+<td>$0.034</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">exit code</span><span class="tag-badge">267009</span><span class="tag-badge">cmd.exe</span><span class="tag-badge">encoding</span><span class="tag-badge">scheduled task</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
