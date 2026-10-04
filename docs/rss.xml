@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>回测数据清洗：如何处理缺失K线和异常数据</title>
+            <link>https://www.hkcode.dpdns.org/posts/35.html</link>
+            <description>回测数据清洗：如何处理缺失K线和异常数据
+
+做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。
+
+这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。...</description>
+            <pubDate>2026-10-04</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>资金管理：仓位控制的核心原则</title>
             <link>https://www.hkcode.dpdns.org/posts/34.html</link>
             <description>资金管理：仓位控制的核心原则
@@ -199,15 +210,6 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
 
 量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。今天直接讲PushPlus——一个能把消息推到微信的HTTP API服务，配合Python，五分钟搭完整个推送链路。...</description>
             <pubDate>2026-08-17</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>JSON原子写入：用tempfile+os.replace防止数据损坏</title>
-            <link>https://www.hkcode.dpdns.org/posts/15.html</link>
-            <description>JSON原子写入：用tempfile+os.replace防止数据损坏
-
-量化交易系统里，最怕的不是策略亏钱，而是数据文件损坏。策略亏钱还能复盘，数据文件坏了，整个回测和实盘环境直接瘫痪。今天聊一个看似简单但极其关键的问题：如何安全地写入JSON文件。...</description>
-            <pubDate>2026-08-16</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
