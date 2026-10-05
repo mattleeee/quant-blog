@@ -7,6 +7,20 @@
         <language>en-us</language>
         
         <item>
+            <title>Health Checks for a Fleet of Scheduled Tasks</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/7.html</link>
+            <description>Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper....</description>
+            <pubDate>2026-10-05</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Taming BLAS Threads in Scheduled Python Jobs</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/8.html</link>
+            <description>Scheduled Python jobs and BLAS threading are a bad combination by default. A single numpy.dot on a 4-core box will happily spin up four threads....</description>
+            <pubDate>2026-10-05</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
             <title>Exit Code 267009: Debugging CMD Encoding Corruption</title>
             <link>https://www.hkcode.dpdns.org/en/posts/5.html</link>
             <description>Exit code 267009 looks like noise until you decode it. On a Windows scheduled task I maintain, a .bat launcher that worked fine when double-clicked started fail...</description>
