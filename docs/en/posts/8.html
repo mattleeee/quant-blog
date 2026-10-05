@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Taming BLAS Threads in Scheduled Python Jobs - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Scheduled Python jobs and BLAS threading are a bad combination by default....">
+    <meta name="keywords" content="OPENBLAS,MKL,OMP_NUM_THREADS,thread contention,numpy">
+    <meta property="og:title" content="Taming BLAS Threads in Scheduled Python Jobs">
+    <meta property="og:description" content="Scheduled Python jobs and BLAS threading are a bad combination by default....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/8.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Taming BLAS Threads in Scheduled Python Jobs</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-05</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>Scheduled Python jobs and BLAS threading are a bad combination by default. A single <code>numpy.dot</code> on a 4-core box will happily spin up four threads. Run three of those jobs at the same time via Task Scheduler, and you have twelve threads fighting over four cores. Context switches climb, cache lines bounce between cores, and total throughput drops — sometimes below the single-threaded case. The fix is usually boring: pin BLAS to one thread per process and let the scheduler handle parallelism across jobs.</p>
+<h2 id="what-the-environment-variables-actually-control">What the environment variables actually control</h2>
+<p>NumPy itself doesn't do the math. It delegates to a BLAS/LAPACK backend — typically OpenBLAS (bundled with many wheels), MKL (Intel's, common in conda and <code>mkl</code>-enabled wheels), or the reference BLAS. Each backend runs its own thread pool, and each pool is configured independently.</p>
+<ul>
+<li><code>OPENBLAS_NUM_THREADS</code> — thread count for OpenBLAS. Historically <code>OPENBLAS_NUM_THREADS</code> replaced the older <code>OMP_NUM_THREADS</code> path; on modern OpenBLAS builds it's the authoritative knob.</li>
+<li><code>MKL_NUM_THREADS</code> — thread count for Intel MKL. MKL also reads <code>MKL_DOMAIN_NUM_THREADS</code> for per-domain tuning, but for a single job <code>MKL_NUM_THREADS</code> is enough.</li>
+<li><code>OMP_NUM_THREADS</code> — the OpenMP runtime thread count. Backends that use OpenMP internally (some MKL builds, some OpenBLAS builds) fall back to this. It also affects other OpenMP consumers in your process, e.g. <code>scikit-learn</code>'s parallel loops or <code>numba</code>.</li>
+</ul>
+<p>There's also <code>NUMEXPR_NUM_THREADS</code> for the <code>numexpr</code> engine used by pandas for some evaluation paths, and <code>VECLIB_MAXIMUM_THREADS</code> on macOS Accelerate. On Linux the equivalent is <code>OPENBLAS_NUM_THREADS</code> plus, for some builds, <code>GOTO_NUM_THREADS</code>. If you're on Windows and shipping wheels from PyPI, you almost always have OpenBLAS unless you installed via conda with MKL.</p>
+<p>The key point: these are read at library initialization time. Set them after <code>import numpy</code> and you're too late — the pool is already sized.</p>
+<h2 id="where-to-set-them">Where to set them</h2>
+<p>There are two sane places, and one that quietly fails.</p>
+<h3 id="option-1-the-launcher-bat-task-scheduler-action">Option 1: the launcher (.bat / Task Scheduler action)</h3>
+<p>If your jobs are launched by a <code>.bat</code> file or directly from Task Scheduler, set the variables there. This is the cleanest option because it covers every process the job spawns, including subprocesses and any child Python interpreters.</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+REM run_daily.bat
+set OPENBLAS_NUM_THREADS=1
+set MKL_NUM_THREADS=1
+set OMP_NUM_THREADS=1
+set NUMEXPR_NUM_THREADS=1
+
+cd /d C:\jobs\daily
+C:\Python311\python.exe -m daily.run &gt;&gt; C:\jobs\logs\daily.log 2&gt;&amp;1
+</code></pre>
+
+<p>If you're registering the task from the command line, pass the batch file as the action:</p>
+<pre class="codehilite"><code class="language-bat">schtasks /Create /TN &quot;daily-run&quot; /TR &quot;C:\jobs\run_daily.bat&quot; ^
+  /SC DAILY /ST 06:00 /RU SYSTEM
+</code></pre>
+
+<p><code>/RU SYSTEM</code> runs without a logged-in user, which is what you want for a server. The environment block for the task is inherited from the system context, and your <code>set</code> lines override it.</p>
+<h3 id="option-2-osenviron-before-importing-numpy">Option 2: <code>os.environ</code> before importing numpy</h3>
+<p>When you can't control the launcher — say the job is invoked by a third-party scheduler or a service that calls <code>python -c</code> — set the variables at the very top of your entry module, before any numerical import.</p>
+<pre class="codehilite"><code class="language-python"># daily/run.py
+import os
+
+# Must run before numpy/pandas/numexpr are imported.
+for var in (
+    &quot;OPENBLAS_NUM_THREADS&quot;,
+    &quot;MKL_NUM_THREADS&quot;,
+    &quot;OMP_NUM_THREADS&quot;,
+    &quot;NUMEXPR_NUM_THREADS&quot;,
+):
+    os.environ.setdefault(var, &quot;1&quot;)
+
+import numpy as np
+import pandas as pd
+</code></pre>
+
+<p><code>setdefault</code> is deliberate: it lets an operator override the value from the shell without editing code. If you want to <em>force</em> single-threading regardless of the environment, use <code>os.environ[var] = "1"</code> instead.</p>
+<p>The trap here is import order. If any module in your package imports <code>numpy</code> at import time and you import that module before running the loop above, the pool is already initialized and the variables do nothing. Keep the env setup in a tiny module with no dependencies and import it first:</p>
+<pre class="codehilite"><code class="language-python"># daily/_threads.py
+import os
+
+def pin_blas_threads(n: int = 1) -&gt; None:
+    for var in (
+        &quot;OPENBLAS_NUM_THREADS&quot;,
+        &quot;MKL_NUM_THREADS&quot;,
+        &quot;OMP_NUM_THREADS&quot;,
+        &quot;NUMEXPR_NUM_THREADS&quot;,
+    ):
+        os.environ[var] = str(n)
+</code></pre>
+
+<pre class="codehilite"><code class="language-python"># daily/run.py
+from daily._threads import pin_blas_threads
+pin_blas_threads(1)
+
+import numpy as np  # safe now
+</code></pre>
+
+<h3 id="the-option-that-fails-setting-them-mid-run">The option that fails: setting them mid-run</h3>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import os
+os.environ[&quot;OPENBLAS_NUM_THREADS&quot;] = &quot;1&quot;   # no effect on this process
+</code></pre>
+
+<p>This is the most common mistake. It looks right, it lints clean, and it does nothing for the current interpreter. It only affects subprocesses started afterward. If you see this pattern in a codebase, assume the thread-count problem is still present.</p>
+<h2 id="when-single-threading-wins-and-when-it-loses">When single-threading wins, and when it loses</h2>
+<p>Single-threading is not universally faster. It's faster when <em>aggregate</em> throughput across concurrently scheduled jobs matters more than the latency of any single job. That's the typical server case: a handful of jobs overlap in the early morning, each doing moderate matrix work, and the box has 4–8 cores.</p>
+<p>It's a loss when:</p>
+<ul>
+<li>You have one long-running job on a large box and nothing else scheduled. A 16-core machine running a single big SVD will finish much sooner with 8–16 BLAS threads.</li>
+<li>The workload is dominated by large dense matmuls where BLAS threading scales well. A 5000×5000 <code>@</code> on 8 cores is roughly 5–7× faster than single-threaded.</li>
+<li>The job is memory-bandwidth bound rather than compute-bound. More threads won't help, but they also won't hurt much — this is the ambiguous middle.</li>
+</ul>
+<p>It's a clear win when:</p>
+<ul>
+<li>Multiple jobs overlap. Three jobs × 8 threads on an 8-core box is worse than three jobs × 1 thread.</li>
+<li>The matrices are small. BLAS thread-pool overhead (barriers, thread wakeups) dominates for anything under roughly 100×100. A loop of small matmuls single-threaded often beats the same loop with 8 threads.</li>
+<li>Memory predictability matters. Each BLAS thread allocates workspace. With 8 threads per process and 4 processes, peak RSS can be several times the single-threaded figure. On a small VM, that's the difference between finishing and getting OOM-killed.</li>
+</ul>
+<p>A reasonable default for a scheduled-job server: <code>1</code> thread per process, and control parallelism by scheduling. If a single job genuinely needs more, give it more <em>and</em> make sure it doesn't overlap with others.</p>
+<h2 id="a-benchmark-harness">A benchmark harness</h2>
+<p>Don't guess. Measure on your own hardware with your own shapes. The harness below runs the same workload at several thread counts and reports wall time and peak RSS.</p>
+<pre class="codehilite"><code class="language-python"># bench_blas.py
+import os
+import subprocess
+import sys
+import time
+
+WORKLOAD = r&quot;&quot;&quot;
+import numpy as np, time, resource
+rng = np.random.default_rng(0)
+A = rng.standard_normal((1200, 1200))
+B = rng.standard_normal((1200, 1200))
+# warm up
+A @ B
+t0 = time.perf_counter()
+for _ in range(5):
+    C = A @ B
+elapsed = time.perf_counter() - t0
+rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(f&quot;{elapsed:.3f} {rss_kb}&quot;)
+&quot;&quot;&quot;
+
+def run_once(threads: int) -&gt; tuple[float, float]:
+    env = os.environ.copy()
+    for var in (&quot;OPENBLAS_NUM_THREADS&quot;, &quot;MKL_NUM_THREADS&quot;,
+                &quot;OMP_NUM_THREADS&quot;, &quot;NUMEXPR_NUM_THREADS&quot;):
+        env[var] = str(threads)
+    out = subprocess.check_output(
+        [sys.executable, &quot;-c&quot;, WORKLOAD], env=env, text=True
+    ).strip()
+    elapsed, rss_kb = out.split()
+    return float(elapsed), float(rss_kb) / 1024.0
+
+if __name__ == &quot;__main__&quot;:
+    for n in (1, 2, 4, 8):
+        elapsed, rss_mb = run_once(n)
+        print(f&quot;threads={n:&gt;2}  time={elapsed:6.3f}s  peak_rss={rss_mb:7.1f} MB&quot;)
+</code></pre>
+
+<p>Run it, then run it again with a second copy of the workload in parallel to simulate overlap:</p>
+<pre class="codehilite"><code class="language-python"># bench_overlap.py
+import concurrent.futures as cf
+from bench_blas import run_once
+
+def pair(threads: int):
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(run_once, threads)
+        f2 = ex.submit(run_once, threads)
+        (t1, m1), (t2, m2) = f1.result(), f2.result()
+    # wall time of the pair is roughly the max, but measure it properly
+    return max(t1, t2), m1 + m2
+
+if __name__ == &quot;__main__&quot;:
+    for n in (1, 2, 4):
+        t, m = pair(n)
+        print(f&quot;2 jobs x {n} threads  slowest={t:6.3f}s  combined_rss={m:7.1f} MB&quot;)
+</code></pre>
+
+<p>On a 4-core box the pattern is usually: single job fastest at 4 threads, two overlapping jobs fastest at 1–2 threads each. The crossover point is your scheduling policy.</p>
+<p>Two notes on the harness. First, <code>resource.getrusage</code> is POSIX; on Windows use <code>psutil.Process().memory_info().rss</code> instead. Second, <code>subprocess</code> isolation is essential — you cannot change BLAS thread counts within a running process, so each configuration needs a fresh interpreter.</p>
+<h2 id="a-practical-default">A practical default</h2>
+<p>For a Windows server running a handful of scheduled Python jobs:</p>
+<ol>
+<li>Set <code>OPENBLAS_NUM_THREADS=1</code>, <code>MKL_NUM_THREADS=1</code>, <code>OMP_NUM_THREADS=1</code>, <code>NUMEXPR_NUM_THREADS=1</code> in the <code>.bat</code> launcher for every job.</li>
+<li>Stagger job start times in Task Scheduler so heavy jobs don't overlap where you can avoid it.</li>
+<li>Benchmark your actual workload at 1, 2, and 4 threads. If a single job is the only thing running and it's compute-bound, give it more — but only if it doesn't overlap.</li>
+<li>Log peak RSS per job. If it swings by a factor of 3 between runs, thread count is the likely cause.</li>
+</ol>
+<p>The change is a few lines in a launcher and a <code>setdefault</code> block in your entry module. It's the cheapest performance work you'll do this quarter.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">OPENBLAS</span><span class="tag-badge">MKL</span><span class="tag-badge">OMP_NUM_THREADS</span><span class="tag-badge">thread contention</span><span class="tag-badge">numpy</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
