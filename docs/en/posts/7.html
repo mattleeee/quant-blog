@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Health Checks for a Fleet of Scheduled Tasks - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper...">
+    <meta name="keywords" content="health check,audit,LastTaskResult,scheduled tasks,monitoring">
+    <meta property="og:title" content="Health Checks for a Fleet of Scheduled Tasks">
+    <meta property="og:description" content="Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/7.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Health Checks for a Fleet of Scheduled Tasks</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-05</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper. The failure mode is not that they break — it is that they break silently. A task that failed three days ago looks exactly like a task that succeeded three days ago if nobody is reading <code>LastTaskResult</code>.</p>
+<p>Nine unattended tasks is past the point where manual checking works. At that count you need a health check: a script that enumerates the fleet, reads each task's state, compares it against an expected schedule, and pages you when something is off.</p>
+<h2 id="what-the-task-scheduler-com-api-actually-gives-you">What the Task Scheduler COM API actually gives you</h2>
+<p>The <code>Schedule.Service</code> COM object exposes per-task fields that matter for monitoring. The ones worth wiring into an audit:</p>
+<ul>
+<li><strong><code>State</code></strong> — an enum: <code>0</code> Unknown, <code>1</code> Disabled, <code>2</code> Queued, <code>3</code> Ready, <code>4</code> Running. <code>Ready</code> is the healthy resting state. <code>Disabled</code> means someone turned it off (or a deployment did). <code>Running</code> means it is executing right now — useful context, but not a health signal by itself.</li>
+<li><strong><code>LastRunTime</code></strong> — a <code>datetime</code> in local time. Combined with the expected interval, this is what tells you a task is <em>stale</em>: it should have fired by now and did not.</li>
+<li><strong><code>LastTaskResult</code></strong> — the exit code of the last run. <code>0</code> is success. <code>0x41301</code> (<code>267009</code>) means "currently running". <code>0x41303</code> (<code>267011</code>) means "has not yet run". Everything else non-zero is a failure, and the exact code is often diagnostic (e.g. <code>1</code> for a generic script error, <code>0x80070002</code> for a missing file).</li>
+<li><strong><code>NextRunTime</code></strong> — derived from the trigger, not from history. A task can have a sane <code>NextRunTime</code> and still be stale because the last run never completed.</li>
+</ul>
+<p><code>LastRunTime</code> and <code>LastTaskResult</code> are only meaningful together. A task with <code>LastTaskResult == 0</code> but <code>LastRunTime</code> from four days ago on an hourly schedule is not healthy — it is a task whose trigger stopped firing, or whose run never recorded a result.</p>
+<h2 id="the-four-states-you-actually-care-about">The four states you actually care about</h2>
+<p>For an unattended fleet, collapse the raw fields into four verdicts:</p>
+<ol>
+<li><strong>Disabled</strong> — <code>State == 1</code>. Nothing runs. This is either intentional (retired task) or an incident (someone disabled it while debugging and forgot).</li>
+<li><strong>Running</strong> — <code>State == 4</code> or <code>LastTaskResult == 267009</code>. Not a failure, but a task stuck in <code>Running</code> for hours is a different problem: a hung process holding the scheduler slot.</li>
+<li><strong>Failed</strong> — <code>LastTaskResult</code> is non-zero and not one of the "no result yet" sentinels. This is the classic alert.</li>
+<li><strong>Stale</strong> — <code>LastRunTime</code> is older than <code>now - expected_interval - grace</code>. The task may report success from its last run, but it has stopped firing on schedule.</li>
+</ol>
+<p>A fifth implicit state, <code>Ready</code> with a recent successful run, is the only one that needs no action.</p>
+<h2 id="the-expected-schedule-table">The expected-schedule table</h2>
+<p>You cannot compute "stale" without knowing the intended cadence. The scheduler knows the triggers, but parsing trigger XML for arbitrary task definitions is fragile. A small hand-maintained table is more honest and easier to review:</p>
+<pre class="codehilite"><code class="language-python">from datetime import timedelta
+
+# task name -&gt; (expected interval, grace period)
+EXPECTED = {
+    &quot;Quant_Ingest&quot;:        (timedelta(minutes=15),  timedelta(minutes=5)),
+    &quot;Quant_Signal&quot;:        (timedelta(minutes=15),  timedelta(minutes=5)),
+    &quot;Quant_Risk&quot;:          (timedelta(minutes=30),  timedelta(minutes=10)),
+    &quot;Quant_Reconcile&quot;:     (timedelta(hours=1),     timedelta(minutes=15)),
+    &quot;Quant_Report&quot;:        (timedelta(days=1),      timedelta(hours=2)),
+    &quot;TeleAgent_Poll&quot;:      (timedelta(minutes=5),   timedelta(minutes=3)),
+    &quot;TeleAgent_Forward&quot;:   (timedelta(minutes=5),   timedelta(minutes=3)),
+    &quot;TeleAgent_Archive&quot;:   (timedelta(hours=6),     timedelta(minutes=30)),
+    &quot;TeleAgent_Heartbeat&quot;: (timedelta(minutes=10),  timedelta(minutes=5)),
+}
+</code></pre>
+
+<p>The grace period absorbs normal jitter: clock skew, a task that takes a few minutes to finish, a machine that was asleep. Without it you will get false positives and start ignoring the alerts, which defeats the purpose.</p>
+<h2 id="enumerating-the-fleet">Enumerating the fleet</h2>
+<p>The COM API is reachable through <code>win32com.client</code>. Enumerate the root folder, filter by name prefix, and read the fields:</p>
+<pre class="codehilite"><code class="language-python">import win32com.client
+from datetime import datetime, timedelta
+
+TASK_ENUM_HIDDEN = 1
+TASK_STATE = {
+    0: &quot;Unknown&quot;, 1: &quot;Disabled&quot;, 2: &quot;Queued&quot;,
+    3: &quot;Ready&quot;, 4: &quot;Running&quot;,
+}
+
+def _com_to_dt(value):
+    &quot;&quot;&quot;pywintypes datetime -&gt; python datetime, or None.&quot;&quot;&quot;
+    if value is None:
+        return None
+    try:
+        return datetime(value.year, value.month, value.day,
+                        value.hour, value.minute, value.second)
+    except AttributeError:
+        return None
+
+def enumerate_tasks(prefixes=(&quot;Quant_&quot;, &quot;TeleAgent_&quot;)):
+    service = win32com.client.Dispatch(&quot;Schedule.Service&quot;)
+    service.Connect()
+    root = service.GetFolder(&quot;\\&quot;)
+
+    found = {}
+    for task in root.GetTasks(TASK_ENUM_HIDDEN):
+        if not task.Name.startswith(prefixes):
+            continue
+        found[task.Name] = {
+            &quot;state&quot;: TASK_STATE.get(task.State, f&quot;Unknown({task.State})&quot;),
+            &quot;state_code&quot;: task.State,
+            &quot;last_run&quot;: _com_to_dt(task.LastRunTime),
+            &quot;last_result&quot;: task.LastTaskResult,
+            &quot;next_run&quot;: _com_to_dt(task.NextRunTime),
+            &quot;enabled&quot;: bool(task.Enabled),
+        }
+    return found
+</code></pre>
+
+<p>Two things to watch. First, <code>GetTasks(TASK_ENUM_HIDDEN)</code> includes hidden tasks; if you do not pass the flag you will silently miss tasks that were created with the hidden bit set. Second, <code>LastRunTime</code> comes back as a <code>pywintypes</code> datetime — convert it explicitly so comparisons with <code>datetime.now()</code> are predictable.</p>
+<h2 id="classifying-each-task">Classifying each task</h2>
+<p>With the raw fields and the expected table, the classification is a small pure function. Keeping it separate from the COM access makes it testable without a Windows box:</p>
+<pre class="codehilite"><code class="language-python">SENTINEL_RUNNING = 267009      # 0x41301
+SENTINEL_NOT_YET = 267011      # 0x41303
+
+def classify(name, info, expected, now=None):
+    now = now or datetime.now()
+    interval, grace = expected.get(name, (None, None))
+
+    if info[&quot;state_code&quot;] == 1 or not info[&quot;enabled&quot;]:
+        return &quot;disabled&quot;, &quot;task is disabled&quot;
+
+    if info[&quot;last_result&quot;] == SENTINEL_RUNNING:
+        return &quot;running&quot;, &quot;currently executing&quot;
+
+    if info[&quot;last_result&quot;] == SENTINEL_NOT_YET:
+        return &quot;stale&quot;, &quot;has never run&quot;
+
+    if info[&quot;last_result&quot;] != 0:
+        return &quot;failed&quot;, f&quot;exit code {info['last_result']:#x}&quot;
+
+    if interval is None:
+        return &quot;unknown&quot;, &quot;no expected schedule on file&quot;
+
+    last = info[&quot;last_run&quot;]
+    if last is None:
+        return &quot;stale&quot;, &quot;no LastRunTime recorded&quot;
+
+    age = now - last
+    if age &gt; interval + grace:
+        return &quot;stale&quot;, f&quot;last run {age} ago, expected every {interval}&quot;
+
+    return &quot;ok&quot;, f&quot;last run {age} ago&quot;
+</code></pre>
+
+<p>The order matters. Check <code>Disabled</code> before <code>Failed</code>, because a disabled task often carries a stale non-zero result from before it was turned off. Check the running sentinel before the failure branch, because <code>267009</code> is technically non-zero. And treat "never run" as stale rather than failed — a freshly deployed task has no result yet, and you want the alert to say so.</p>
+<h2 id="pushing-the-alert-through-pushplus">Pushing the alert through PushPlus</h2>
+<p>PushPlus takes a simple HTTP POST with a token and a message body. The audit should send one consolidated message, not one per task — nine separate pushes train you to mute the channel.</p>
+<pre class="codehilite"><code class="language-python">import json
+import urllib.request
+
+PUSHPLUS_TOKEN = &quot;your-token-here&quot;
+PUSHPLUS_URL = &quot;http://www.pushplus.plus/send&quot;
+
+def push(title, body):
+    payload = json.dumps({
+        &quot;token&quot;: PUSHPLUS_TOKEN,
+        &quot;title&quot;: title,
+        &quot;content&quot;: body,
+        &quot;template&quot;: &quot;txt&quot;,
+    }).encode(&quot;utf-8&quot;)
+    req = urllib.request.Request(
+        PUSHPLUS_URL, data=payload,
+        headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode(&quot;utf-8&quot;))
+</code></pre>
+
+<p>Then assemble the report. Only alert when there is something to say:</p>
+<pre class="codehilite"><code class="language-python">def build_report(results):
+    problems = {n: (v, r) for n, (v, r) in results.items() if v != &quot;ok&quot;}
+    if not problems:
+        return None
+
+    lines = [f&quot;{len(problems)} task(s) need attention:&quot;, &quot;&quot;]
+    for name, (verdict, reason) in sorted(problems.items()):
+        lines.append(f&quot;[{verdict.upper()}] {name}: {reason}&quot;)
+    return &quot;\n&quot;.join(lines)
+
+def run_audit():
+    tasks = enumerate_tasks()
+    now = datetime.now()
+    results = {
+        name: classify(name, info, EXPECTED, now)
+        for name, info in tasks.items()
+    }
+
+    # Tasks in EXPECTED but missing from the scheduler are also a problem.
+    for name in EXPECTED:
+        if name not in tasks:
+            results[name] = (&quot;missing&quot;, &quot;not found in Task Scheduler&quot;)
+
+    report = build_report(results)
+    if report:
+        push(&quot;Task fleet health check&quot;, report)
+    return results
+</code></pre>
+
+<p>The "missing" check matters more than it looks. If a task gets deleted during a cleanup, the scheduler simply stops listing it, and an enumeration-only audit reports a clean fleet.</p>
+<h2 id="why-the-audit-must-itself-be-a-scheduled-task">Why the audit must itself be a scheduled task</h2>
+<p>The obvious failure mode of a monitoring script is that it is not running. If you launch the audit by hand, you have replaced nine tasks to babysit with one, and you will forget it on exactly the days something breaks.</p>
+<p>Register the audit as a scheduled task, ideally on a different cadence from the tasks it watches, and with a trigger that catches missed runs:</p>
+<pre class="codehilite"><code class="language-python">def register_audit_task(script_path, python_exe):
+    service = win32com.client.Dispatch(&quot;Schedule.Service&quot;)
+    service.Connect()
+    root = service.GetFolder(&quot;\\&quot;)
+
+    definition = service.NewTask(0)
+    definition.RegistrationInfo.Description = &quot;Fleet health check&quot;
+
+    # Run every 10 minutes, indefinitely.
+    trigger = definition.Triggers.Create(1)   # TASK_TRIGGER_TIME
+    trigger.StartBoundary = datetime.now().isoformat()
+    trigger.Repetition.Interval = &quot;PT10M&quot;
+    trigger.Repetition.Duration = &quot;&quot;          # empty = forever
+
+    # Catch up if the machine was off at trigger time.
+    definition.Settings.StartWhenAvailable = True
+    definition.Settings.ExecutionTimeLimit = &quot;PT5M&quot;
+
+    action = definition.Actions.Create(0)     # TASK_ACTION_EXEC
+    action.Path = python_exe
+    action.Arguments = f'&quot;{script_path}&quot;'
+
+    root.RegisterTaskDefinition(
+        &quot;Quant_FleetAudit&quot;, definition,
+        6,        # TASK_CREATE_OR_UPDATE
+        None, None, 3,   # TASK_LOGON_INTERACTIVE_TOKEN
+    )
+</code></pre>
+
+<p>Two settings earn their keep. <code>StartWhenAvailable</code> makes the scheduler run a missed trigger as soon as the machine is back — without it, a laptop that was asleep at the scheduled minute silently skips the audit. And a short <code>ExecutionTimeLimit</code> prevents a wedged audit from holding the slot and blocking the next run.</p>
+<p>Keep the audit out of the <code>Quant_*</code> / <code>TeleAgent_*</code> namespace so it does not audit itself. A task that checks its own <code>LastRunTime</code> will report itself stale the moment it is running, which is noise at best.</p>
+<h2 id="operational-notes">Operational notes</h2>
+<ul>
+<li><strong>Log every run, not just failures.</strong> Append the full classification to a rotating log file. When a task fails at 03:00 and you get the push at 03:10, the log tells you whether it was the first failure or the fifth.</li>
+<li><strong>Alert on transitions, not states.</strong> If you push on every stale task every ten minutes, you will mute the channel within a day. Track the previous verdict per task and only push when it changes from <code>ok</code> to something else, or when a problem persists past a threshold.</li>
+<li><strong>Treat <code>LastTaskResult</code> codes as data.</strong> <code>0x80070002</code> is a missing executable, <code>0x80070005</code> is access denied, <code>1</code> is whatever the script returned. Put the hex code in the alert; it saves a trip to Event Viewer.</li>
+<li><strong>Beware the interactive-token trap.</strong> Tasks registered with <code>TASK_LOGON_INTERACTIVE_TOKEN</code> only run when the user is logged on. If your fleet must run headless, register with a stored password or a service account and verify that <code>LastRunTime</code> advances overnight.</li>
+</ul>
+<p>The audit is small — a couple hundred lines including the report formatting. What it buys is the ability to stop thinking about nine tasks and start thinking about the one alert that says something is wrong.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">health check</span><span class="tag-badge">audit</span><span class="tag-badge">LastTaskResult</span><span class="tag-badge">scheduled tasks</span><span class="tag-badge">monitoring</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
