@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>策略组合管理：多策略并行运行的架构设计</title>
+            <link>https://www.hkcode.dpdns.org/posts/36.html</link>
+            <description>策略组合管理：多策略并行运行的架构设计
+
+单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。...</description>
+            <pubDate>2026-10-05</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>回测数据清洗：如何处理缺失K线和异常数据</title>
             <link>https://www.hkcode.dpdns.org/posts/35.html</link>
             <description>回测数据清洗：如何处理缺失K线和异常数据
@@ -201,15 +210,6 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
 
 跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...</description>
             <pubDate>2026-08-18</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>PushPlus微信推送系统搭建：从零到自动通知</title>
-            <link>https://www.hkcode.dpdns.org/posts/16.html</link>
-            <description>PushPlus微信推送系统搭建：从零到自动通知
-
-量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。今天直接讲PushPlus——一个能把消息推到微信的HTTP API服务，配合Python，五分钟搭完整个推送链路。...</description>
-            <pubDate>2026-08-17</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
