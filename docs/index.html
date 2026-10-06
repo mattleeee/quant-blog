@@ -31,229 +31,75 @@
             <h2>最新文章</h2>
             
         <article class="post-card">
-            <h2><a href="/posts/37.html">模拟盘数据统计与月度复盘方法</a></h2>
+            <h2><a href="/posts/27.html">止盈止损参数选择：RR盈亏比3:1背后的逻辑</a></h2>
             <div class="post-meta">
                 <span class="date">2026-10-06</span>
                 <span class="tag-badge">量化策略</span>
             </div>
-            <p class="excerpt">模拟盘数据统计与月度复盘方法
-
-模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。
-
-这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。...</p>
-            <div class="post-tags"><span class="tag-badge">数据统计</span><span class="tag-badge">月度复盘</span><span class="tag-badge">模拟盘</span></div>
-            <a href="/posts/37.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/36.html">策略组合管理：多策略并行运行的架构设计</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-10-05</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">策略组合管理：多策略并行运行的架构设计
-
-单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。...</p>
-            <div class="post-tags"><span class="tag-badge">策略组合</span><span class="tag-badge">多策略</span><span class="tag-badge">架构设计</span></div>
-            <a href="/posts/36.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/35.html">回测数据清洗：如何处理缺失K线和异常数据</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-10-04</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">回测数据清洗：如何处理缺失K线和异常数据
-
-做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。
-
-这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。...</p>
-            <div class="post-tags"><span class="tag-badge">数据清洗</span><span class="tag-badge">K线</span><span class="tag-badge">异常数据</span></div>
-            <a href="/posts/35.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/34.html">资金管理：仓位控制的核心原则</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-10-03</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">资金管理：仓位控制的核心原则
-
-做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。
-
-原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。...</p>
-            <div class="post-tags"><span class="tag-badge">资金管理</span><span class="tag-badge">仓位控制</span><span class="tag-badge">风险管理</span></div>
-            <a href="/posts/34.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/33.html">3连败熔断机制：保护资金的自动停损设计</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-10-02</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">3连败熔断机制：保护资金的自动停损设计
-
-策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。...</p>
-            <div class="post-tags"><span class="tag-badge">熔断</span><span class="tag-badge">连败</span><span class="tag-badge">资金保护</span></div>
-            <a href="/posts/33.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/32.html">MACD背离策略回测分析：为什么最终被否决</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-10-01</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">MACD背离策略回测分析：为什么最终被否决
-
-MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。...</p>
-            <div class="post-tags"><span class="tag-badge">MACD</span><span class="tag-badge">背离</span><span class="tag-badge">回测</span></div>
-            <a href="/posts/32.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/31.html">弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-09-30</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
-
-做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。...</p>
-            <div class="post-tags"><span class="tag-badge">弱信号</span><span class="tag-badge">回测</span><span class="tag-badge">胜率</span></div>
-            <a href="/posts/31.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/30.html">保底止损自适应阈值设计：不再硬编码百分比</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-09-29</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">保底止损自适应阈值设计：不再硬编码百分比
-
-问题的起点
-
-几乎所有策略回测代码里都有这么一行：
-
-
-
-写死一个百分比，简单、直观、能跑。但实盘跑一段时间就会发现两个问题：
-
-1. 低波动品种被频繁扫损。2% 对某些标的来说就是日常噪音，价格来回晃一圈，止损被打掉，然后行情按原方向走。...</p>
-            <div class="post-tags"><span class="tag-badge">止损</span><span class="tag-badge">自适应阈值</span><span class="tag-badge">风控</span></div>
-            <a href="/posts/30.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/29.html">RSI指标在风险控制中的实际应用</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-09-28</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">RSI指标在风险控制中的实际应用
-
-RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。...</p>
-            <div class="post-tags"><span class="tag-badge">RSI</span><span class="tag-badge">风险控制</span><span class="tag-badge">技术指标</span></div>
-            <a href="/posts/29.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/28.html">分批止盈实现：浮盈3%半仓止盈的Python代码逻辑</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-09-27</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
-            <p class="excerpt">分批止盈实现：浮盈3%半仓止盈的Python代码逻辑
-
-为什么需要分批止盈
-
-一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。
-
-本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。...</p>
-            <div class="post-tags"><span class="tag-badge">分批止盈</span><span class="tag-badge">Python</span><span class="tag-badge">仓位管理</span></div>
-            <a href="/posts/28.html" class="read-more">阅读更多</a>
-        </article>
-        <article class="post-card">
-            <h2><a href="/posts/27.html">止盈止损参数选择：RR盈亏比3:1背后的逻辑</a></h2>
-            <div class="post-meta">
-                <span class="date">2026-09-26</span>
-                <span class="tag-badge">量化策略</span>
-            </div>
             <p class="excerpt">止盈止损参数选择：RR盈亏比3:1背后的逻辑
 
-止盈止损参数不是拍脑袋定的。RR（RiskReward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。...</p>
+做交易系统的都知道，开仓信号只是第一步，真正决定账户曲线形态的往往是出场逻辑。止盈止损怎么设，直接决定了策略的胜率要求、回撤特征和资金曲线斜率。...</p>
             <div class="post-tags"><span class="tag-badge">止盈止损</span><span class="tag-badge">盈亏比</span><span class="tag-badge">RR</span></div>
             <a href="/posts/27.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
             <h2><a href="/posts/26.html">技术指标实战：均线系统的参数选择与信号逻辑</a></h2>
             <div class="post-meta">
-                <span class="date">2026-09-25</span>
-                <span class="tag-badge">量化策略</span>
+                <span class="date">2026-08-28</span>
+                <span class="tag-badge"></span>
             </div>
-            <p class="excerpt">技术指标实战：均线系统的参数选择与信号逻辑
-
-均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。...</p>
-            <div class="post-tags"><span class="tag-badge">均线系统</span><span class="tag-badge">技术指标</span><span class="tag-badge">参数选择</span></div>
+            <p class="excerpt"></p>
+            
             <a href="/posts/26.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
             <h2><a href="/posts/25.html">三层验证方法论：参数扫描+月度一致性+稳健性消融</a></h2>
             <div class="post-meta">
-                <span class="date">2026-09-24</span>
-                <span class="tag-badge">量化策略</span>
+                <span class="date">2026-08-27</span>
+                <span class="tag-badge"></span>
             </div>
-            <p class="excerpt">三层验证方法论：参数扫描+月度一致性+稳健性消融
-
-一个策略回测出来夏普2.0，不代表它能用。可能只是参数恰好踩中了历史噪声，可能只是某一个月贡献了全部收益，也可能去掉某个核心逻辑后表现反而更好——说明那个逻辑本来就没用。
-
-单次回测的信息量极低。...</p>
-            <div class="post-tags"><span class="tag-badge">回测</span><span class="tag-badge">三层验证</span><span class="tag-badge">参数扫描</span></div>
+            <p class="excerpt"></p>
+            
             <a href="/posts/25.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
             <h2><a href="/posts/24.html">系统巡检模块设计：自动检查交易系统健康状态</a></h2>
             <div class="post-meta">
-                <span class="date">2026-09-23</span>
-                <span class="tag-badge">Python自动化</span>
+                <span class="date">2026-08-26</span>
+                <span class="tag-badge"></span>
             </div>
-            <p class="excerpt">系统巡检模块设计：自动检查交易系统健康状态
-
-交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。
-
-解决办法是写一个系统巡检模块，定时检查各模块健康状态，异常时主动推送告警。...</p>
-            <div class="post-tags"><span class="tag-badge">系统巡检</span><span class="tag-badge">健康检查</span><span class="tag-badge">自动化</span></div>
+            <p class="excerpt"></p>
+            
             <a href="/posts/24.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
             <h2><a href="/posts/23.html">Python请求频率控制：从sleep到令牌桶的演进</a></h2>
             <div class="post-meta">
-                <span class="date">2026-09-22</span>
-                <span class="tag-badge">Python自动化</span>
+                <span class="date">2026-08-25</span>
+                <span class="tag-badge"></span>
             </div>
-            <p class="excerpt">Python请求频率控制：从sleep到令牌桶的演进
-
-做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。...</p>
-            <div class="post-tags"><span class="tag-badge">频率控制</span><span class="tag-badge">令牌桶</span><span class="tag-badge">API限频</span></div>
+            <p class="excerpt"></p>
+            
             <a href="/posts/23.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
             <h2><a href="/posts/22.html">信号扫描模块设计与实现：多指标并行检测</a></h2>
             <div class="post-meta">
-                <span class="date">2026-09-21</span>
-                <span class="tag-badge">Python自动化</span>
+                <span class="date">2026-08-24</span>
+                <span class="tag-badge"></span>
             </div>
-            <p class="excerpt">信号扫描模块设计与实现：多指标并行检测
-
-做量化交易系统,信号扫描是最基础也最容易被低估的一环。很多人一开始写个 for 循环遍历标的、逐个算指标、再 if 判断,标的少的时候没问题,一旦标的数量上到几百上千,单线程扫描动辄几十秒,盘中根本来不及。...</p>
-            <div class="post-tags"><span class="tag-badge">信号扫描</span><span class="tag-badge">技术指标</span><span class="tag-badge">并行检测</span></div>
+            <p class="excerpt"></p>
+            
             <a href="/posts/22.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
             <h2><a href="/posts/21.html">模拟交易系统架构设计：从信号扫描到自动执行</a></h2>
             <div class="post-meta">
-                <span class="date">2026-09-20</span>
-                <span class="tag-badge">Python自动化</span>
+                <span class="date">2026-08-23</span>
+                <span class="tag-badge"></span>
             </div>
-            <p class="excerpt">模拟交易系统架构设计：从信号扫描到自动执行
-
-做量化策略开发时，最头疼的问题不是策略本身，而是验证环节。回测跑得再好，实盘前总得有个过渡阶段——模拟交易。这篇文章拆解一套我实际在用的模拟交易系统架构，四个核心模块：信号扫描、市场分析、模拟交易引擎、推送通知。...</p>
-            <div class="post-tags"><span class="tag-badge">模拟交易</span><span class="tag-badge">系统架构</span><span class="tag-badge">信号扫描</span></div>
+            <p class="excerpt"></p>
+            
             <a href="/posts/21.html" class="read-more">阅读更多</a>
         </article>
         <article class="post-card">
