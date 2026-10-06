@@ -7,6 +7,20 @@
         <language>en-us</language>
         
         <item>
+            <title>Surviving Corporate HTTPS Interception: Life Behind Sangfor aTrust</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/9.html</link>
+            <description>Corporate laptops rarely talk to the internet directly anymore....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Network &amp; Security</category>
+        </item>
+        <item>
+            <title>When GitHub Is Blocked but You Still Need to Push</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/10.html</link>
+            <description>When a firewall blocks github.com:443 but leaves api.github.com and raw.githubusercontent.com open, git push dies while the REST API keeps working....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Network &amp; Security</category>
+        </item>
+        <item>
             <title>Health Checks for a Fleet of Scheduled Tasks</title>
             <link>https://www.hkcode.dpdns.org/en/posts/7.html</link>
             <description>Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper....</description>
