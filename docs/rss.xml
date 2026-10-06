@@ -7,179 +7,55 @@
         <language>zh-CN</language>
         
         <item>
-            <title>模拟盘数据统计与月度复盘方法</title>
-            <link>https://www.hkcode.dpdns.org/posts/37.html</link>
-            <description>模拟盘数据统计与月度复盘方法
-
-模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。
-
-这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。...</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>策略组合管理：多策略并行运行的架构设计</title>
-            <link>https://www.hkcode.dpdns.org/posts/36.html</link>
-            <description>策略组合管理：多策略并行运行的架构设计
-
-单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。...</description>
-            <pubDate>2026-10-05</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>回测数据清洗：如何处理缺失K线和异常数据</title>
-            <link>https://www.hkcode.dpdns.org/posts/35.html</link>
-            <description>回测数据清洗：如何处理缺失K线和异常数据
-
-做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。
-
-这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。...</description>
-            <pubDate>2026-10-04</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>资金管理：仓位控制的核心原则</title>
-            <link>https://www.hkcode.dpdns.org/posts/34.html</link>
-            <description>资金管理：仓位控制的核心原则
-
-做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。
-
-原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。...</description>
-            <pubDate>2026-10-03</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>3连败熔断机制：保护资金的自动停损设计</title>
-            <link>https://www.hkcode.dpdns.org/posts/33.html</link>
-            <description>3连败熔断机制：保护资金的自动停损设计
-
-策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。...</description>
-            <pubDate>2026-10-02</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>MACD背离策略回测分析：为什么最终被否决</title>
-            <link>https://www.hkcode.dpdns.org/posts/32.html</link>
-            <description>MACD背离策略回测分析：为什么最终被否决
-
-MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。...</description>
-            <pubDate>2026-10-01</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑</title>
-            <link>https://www.hkcode.dpdns.org/posts/31.html</link>
-            <description>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
-
-做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。...</description>
-            <pubDate>2026-09-30</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>保底止损自适应阈值设计：不再硬编码百分比</title>
-            <link>https://www.hkcode.dpdns.org/posts/30.html</link>
-            <description>保底止损自适应阈值设计：不再硬编码百分比
-
-问题的起点
-
-几乎所有策略回测代码里都有这么一行：
-
-
-
-写死一个百分比，简单、直观、能跑。但实盘跑一段时间就会发现两个问题：
-
-1. 低波动品种被频繁扫损。2% 对某些标的来说就是日常噪音，价格来回晃一圈，止损被打掉，然后行情按原方向走。...</description>
-            <pubDate>2026-09-29</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>RSI指标在风险控制中的实际应用</title>
-            <link>https://www.hkcode.dpdns.org/posts/29.html</link>
-            <description>RSI指标在风险控制中的实际应用
-
-RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。...</description>
-            <pubDate>2026-09-28</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑</title>
-            <link>https://www.hkcode.dpdns.org/posts/28.html</link>
-            <description>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑
-
-为什么需要分批止盈
-
-一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。
-
-本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。...</description>
-            <pubDate>2026-09-27</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
             <title>止盈止损参数选择：RR盈亏比3:1背后的逻辑</title>
             <link>https://www.hkcode.dpdns.org/posts/27.html</link>
             <description>止盈止损参数选择：RR盈亏比3:1背后的逻辑
 
-止盈止损参数不是拍脑袋定的。RR（RiskReward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。...</description>
-            <pubDate>2026-09-26</pubDate>
+做交易系统的都知道，开仓信号只是第一步，真正决定账户曲线形态的往往是出场逻辑。止盈止损怎么设，直接决定了策略的胜率要求、回撤特征和资金曲线斜率。...</description>
+            <pubDate>2026-10-06</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>技术指标实战：均线系统的参数选择与信号逻辑</title>
             <link>https://www.hkcode.dpdns.org/posts/26.html</link>
-            <description>技术指标实战：均线系统的参数选择与信号逻辑
-
-均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。...</description>
-            <pubDate>2026-09-25</pubDate>
-            <category>量化策略</category>
+            <description></description>
+            <pubDate>2026-08-28</pubDate>
+            <category></category>
         </item>
         <item>
             <title>三层验证方法论：参数扫描+月度一致性+稳健性消融</title>
             <link>https://www.hkcode.dpdns.org/posts/25.html</link>
-            <description>三层验证方法论：参数扫描+月度一致性+稳健性消融
-
-一个策略回测出来夏普2.0，不代表它能用。可能只是参数恰好踩中了历史噪声，可能只是某一个月贡献了全部收益，也可能去掉某个核心逻辑后表现反而更好——说明那个逻辑本来就没用。
-
-单次回测的信息量极低。...</description>
-            <pubDate>2026-09-24</pubDate>
-            <category>量化策略</category>
+            <description></description>
+            <pubDate>2026-08-27</pubDate>
+            <category></category>
         </item>
         <item>
             <title>系统巡检模块设计：自动检查交易系统健康状态</title>
             <link>https://www.hkcode.dpdns.org/posts/24.html</link>
-            <description>系统巡检模块设计：自动检查交易系统健康状态
-
-交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。
-
-解决办法是写一个系统巡检模块，定时检查各模块健康状态，异常时主动推送告警。...</description>
-            <pubDate>2026-09-23</pubDate>
-            <category>Python自动化</category>
+            <description></description>
+            <pubDate>2026-08-26</pubDate>
+            <category></category>
         </item>
         <item>
             <title>Python请求频率控制：从sleep到令牌桶的演进</title>
             <link>https://www.hkcode.dpdns.org/posts/23.html</link>
-            <description>Python请求频率控制：从sleep到令牌桶的演进
-
-做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。...</description>
-            <pubDate>2026-09-22</pubDate>
-            <category>Python自动化</category>
+            <description></description>
+            <pubDate>2026-08-25</pubDate>
+            <category></category>
         </item>
         <item>
             <title>信号扫描模块设计与实现：多指标并行检测</title>
             <link>https://www.hkcode.dpdns.org/posts/22.html</link>
-            <description>信号扫描模块设计与实现：多指标并行检测
-
-做量化交易系统,信号扫描是最基础也最容易被低估的一环。很多人一开始写个 for 循环遍历标的、逐个算指标、再 if 判断,标的少的时候没问题,一旦标的数量上到几百上千,单线程扫描动辄几十秒,盘中根本来不及。...</description>
-            <pubDate>2026-09-21</pubDate>
-            <category>Python自动化</category>
+            <description></description>
+            <pubDate>2026-08-24</pubDate>
+            <category></category>
         </item>
         <item>
             <title>模拟交易系统架构设计：从信号扫描到自动执行</title>
             <link>https://www.hkcode.dpdns.org/posts/21.html</link>
-            <description>模拟交易系统架构设计：从信号扫描到自动执行
-
-做量化策略开发时，最头疼的问题不是策略本身，而是验证环节。回测跑得再好，实盘前总得有个过渡阶段——模拟交易。这篇文章拆解一套我实际在用的模拟交易系统架构，四个核心模块：信号扫描、市场分析、模拟交易引擎、推送通知。...</description>
-            <pubDate>2026-09-20</pubDate>
-            <category>Python自动化</category>
+            <description></description>
+            <pubDate>2026-08-23</pubDate>
+            <category></category>
         </item>
         <item>
             <title>深信服安全软件拦截子进程的排查与解决方案</title>
@@ -209,6 +85,100 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
 本文直接给方案：定期清理过期条目 + 限制最大缓存数量 + LRU淘汰策略。...</description>
             <pubDate>2026-08-19</pubDate>
             <category>Python自动化</category>
+        </item>
+        <item>
+            <title>异常处理精确化：避免bare except的三个坑</title>
+            <link>https://www.hkcode.dpdns.org/posts/17.html</link>
+            <description>异常处理精确化：避免bare except的三个坑
+
+写量化策略的时候，我见过太多这样的代码：
+
+
+
+跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...</description>
+            <pubDate>2026-08-18</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
+            <title>PushPlus微信推送系统搭建：从零到自动通知</title>
+            <link>https://www.hkcode.dpdns.org/posts/16.html</link>
+            <description>PushPlus微信推送系统搭建：从零到自动通知
+
+量化交易的日常，最烦的不是写策略，而是盯盘。信号出来了人不在，策略再准也没用。所以，通知系统是量化自动化里绕不开的一环。今天直接讲PushPlus——一个能把消息推到微信的HTTP API服务，配合Python，五分钟搭完整个推送链路。...</description>
+            <pubDate>2026-08-17</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
+            <title>JSON原子写入：用tempfile+os.replace防止数据损坏</title>
+            <link>https://www.hkcode.dpdns.org/posts/15.html</link>
+            <description>JSON原子写入：用tempfile+os.replace防止数据损坏
+
+量化交易系统里，最怕的不是策略亏钱，而是数据文件损坏。策略亏钱还能复盘，数据文件坏了，整个回测和实盘环境直接瘫痪。今天聊一个看似简单但极其关键的问题：如何安全地写入JSON文件。...</description>
+            <pubDate>2026-08-16</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
+            <title>Python多线程扫描实战：5线程ThreadPoolExecutor并行处理</title>
+            <link>https://www.hkcode.dpdns.org/posts/14.html</link>
+            <description>Python多线程扫描实战：5线程ThreadPoolExecutor并行处理
+
+量化策略的运维中，扫描全市场币种的技术指标是高频操作。假设你有200个交易对，每个需要计算RSI、MACD、布林带等指标，串行跑一遍可能要几分钟。这个速度在实盘信号触发场景下不可接受。...</description>
+            <pubDate>2026-08-14</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
+            <title>K线数据缓存机制：避免重复API调用的设计</title>
+            <link>https://www.hkcode.dpdns.org/posts/13.html</link>
+            <description>K线数据缓存机制：避免重复API调用的设计
+
+量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。如果每次请求都直接打到交易所API，不仅浪费额度，还会触发限频，甚至在行情剧烈波动时被临时封IP。...</description>
+            <pubDate>2026-08-13</pubDate>
+            <category>Python自动化</category>
+        </item>
+        <item>
+            <title>任务执行成功后自动推送微信通知的方案</title>
+            <link>https://www.hkcode.dpdns.org/posts/12.html</link>
+            <description>任务执行成功后自动推送微信通知的方案
+
+定时任务跑完，结果躺在日志文件里没人看，等于白跑。尤其量化策略，信号出了没及时看到，机会就过去了。这篇文章分享一个轻量方案：用 PushPlus 把任务执行结果直接推到微信上，手机随时看。...</description>
+            <pubDate>2026-08-12</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>定时任务推送去重机制：5分钟内相同标题跳过</title>
+            <link>https://www.hkcode.dpdns.org/posts/11.html</link>
+            <description>定时任务推送去重机制：5分钟内相同标题跳过
+
+定时任务跑得多了，推送重复是个绕不开的问题。尤其是策略信号、风控告警这类任务，一旦触发重试或者任务本身有延迟，PushPlus 微信推送就可能把同一条消息连推好几遍。今天直接分享一个轻量级的去重方案：5分钟内标题相同则跳过推送。...</description>
+            <pubDate>2026-08-11</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>Windows完全磁盘访问权限配置指南</title>
+            <link>https://www.hkcode.dpdns.org/posts/10.html</link>
+            <description>Windows完全磁盘访问权限配置指南：让定时任务顺利读写D盘
+
+在Windows上跑Python定时任务，最烦人的不是代码逻辑，而是权限问题。尤其是当你的脚本需要访问D盘、E盘等非系统盘的数据文件时，经常莫名其妙地报PermissionError或Access is denied。...</description>
+            <pubDate>2026-08-10</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>Python环境变量优化：OPENBLAS、MKL、OMP线程控制</title>
+            <link>https://www.hkcode.dpdns.org/posts/9.html</link>
+            <description>Python环境变量优化：OPENBLAS、MKL、OMP线程控制
+
+在量化回测和实盘信号计算中，我们经常遇到一个诡异的现象：numpy 的矩阵运算在单次调用时很快，但放到循环里整体跑下来却越来越慢，甚至CPU占用飙满但吞吐量下降。这背后十有八九是BLAS库的线程争抢问题。...</description>
+            <pubDate>2026-08-09</pubDate>
+            <category>定时任务</category>
+        </item>
+        <item>
+            <title>Windows定时任务执行监控：退出码排查指南</title>
+            <link>https://www.hkcode.dpdns.org/posts/8.html</link>
+            <description>Windows定时任务执行监控：退出码排查指南
+
+定时任务在量化交易和自动化运维中扮演着“无人值守”的角色。Windows 任务计划程序（Task Scheduler）虽然稳定，但脚本执行失败时，你往往只能在“上次运行结果”里看到一串冰冷的数字，比如 0x1 或 267009。...</description>
+            <pubDate>2026-08-08</pubDate>
+            <category>定时任务</category>
         </item>
     </channel>
 </rss>
