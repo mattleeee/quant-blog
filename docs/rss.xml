@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>模拟盘数据统计与月度复盘方法</title>
+            <link>https://www.hkcode.dpdns.org/posts/37.html</link>
+            <description>模拟盘数据统计与月度复盘方法
+
+模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。
+
+这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。...</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>策略组合管理：多策略并行运行的架构设计</title>
             <link>https://www.hkcode.dpdns.org/posts/36.html</link>
             <description>策略组合管理：多策略并行运行的架构设计
@@ -197,19 +208,6 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
 
 本文直接给方案：定期清理过期条目 + 限制最大缓存数量 + LRU淘汰策略。...</description>
             <pubDate>2026-08-19</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>异常处理精确化：避免bare except的三个坑</title>
-            <link>https://www.hkcode.dpdns.org/posts/17.html</link>
-            <description>异常处理精确化：避免bare except的三个坑
-
-写量化策略的时候，我见过太多这样的代码：
-
-
-
-跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...</description>
-            <pubDate>2026-08-18</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
