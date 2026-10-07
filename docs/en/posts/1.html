@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Why I Replaced Daemon Processes with Windows Task Scheduler - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="The daemon that kept dying at 3 a.m. The first sign was a silent one....">
+        <meta name="description" content="Corporate Windows machines are hostile territory for long-running processes....">
     <meta name="keywords" content="Task Scheduler,daemon,Python,Sangfor,automation">
     <meta property="og:title" content="Why I Replaced Daemon Processes with Windows Task Scheduler">
-    <meta property="og:description" content="The daemon that kept dying at 3 a.m. The first sign was a silent one....">
+    <meta property="og:description" content="Corporate Windows machines are hostile territory for long-running processes....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/1.html">
@@ -33,184 +33,248 @@
         <article class="post">
             <h1>Why I Replaced Daemon Processes with Windows Task Scheduler</h1>
             <div class="post-meta">
-                <span class="date">2026-10-02</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>The first sign was a silent one. A Python process that polled a data source every minute and wrote to a local SQLite file simply stopped. No traceback in the log file, no crash dump, no entry in the Windows Event Log beyond the usual noise. The process was gone, and nothing on the machine seemed to care.</p>
-<p>This happened on a corporate Windows 10 box — the kind where you have local admin rights but not really, where antivirus and endpoint protection run at a kernel level, and where the security suite (Sangfor aTrust, in this case) watches process creation with more interest than you would like. The Python job was a straightforward daemon: a <code>while True</code> loop with a <code>time.sleep(60)</code>, launched at logon via a shortcut in the Startup folder. It had run fine for weeks. Then it started dying every few hours, always when it spawned a child process.</p>
-<p>This post is about what actually caused it, why the obvious fix (a watchdog) also failed, and how moving every recurring job to Windows Task Scheduler turned a fragile setup into something that survives reboots, retries on failure, and reports its own exit codes.</p>
-<h2 id="symptoms-of-an-intercepted-child-process">Symptoms of an intercepted child process</h2>
-<p>The daemon was not crashing on its own logic. The pattern was specific: it died whenever it called <code>subprocess.run()</code> to invoke a helper script. The helper would start, run for a fraction of a second, and then the parent would vanish. No exception was raised in the parent — the process was terminated externally.</p>
-<p>If you have ever debugged this, you know the checklist:</p>
-<ul>
-<li><code>pythonw.exe</code> disappears from Task Manager with no error dialog.</li>
-<li>The log file ends mid-operation, often right after a <code>subprocess.Popen</code> call.</li>
-<li><code>Get-Process</code> in PowerShell shows nothing.</li>
-<li>Windows Event Viewer shows nothing under Application, but you may see entries under <code>Microsoft-Windows-Security-Auditing</code> if auditing is enabled.</li>
-<li>Restarting the daemon works — for a while.</li>
-</ul>
-<p>The aTrust client on these machines enforces a process-creation policy. It does not block <code>python.exe</code> itself, and it does not block the helper script when run manually. But when a long-running Python process spawns a child, the security suite sometimes flags the pattern as suspicious and terminates the entire process tree. The daemon's own keep-alive watchdog — a second Python process that checked every 30 seconds whether the first was alive and restarted it — was also a child process of the same shell, and it got killed too. Two daemons, one policy, zero survivors.</p>
-<p>The lesson: in a locked-down enterprise environment, you cannot assume that a process you start will stay started. You need something outside your process tree that the security suite trusts.</p>
-<h2 id="why-task-scheduler-survives-where-daemons-do-not">Why Task Scheduler survives where daemons do not</h2>
-<p>Windows Task Scheduler is a first-class OS component. It runs as a service (<code>Schedule</code>), it is signed by Microsoft, and it is used by the operating system itself for maintenance tasks. Endpoint protection products are configured to allow it. When Task Scheduler launches your Python script, the process is a child of <code>svchost.exe</code> hosting the Schedule service, not a child of your interactive shell. That parent-child relationship is what the security suite evaluates — and it is a trusted one.</p>
-<p>This is not a hack. It is the intended way to run recurring work on Windows. The daemon pattern — a long-lived process with an internal loop — is a Unix idiom that maps poorly onto Windows security models. Task Scheduler gives you:</p>
-<ul>
-<li><strong>Trigger-based execution.</strong> Run at logon, at startup, every N minutes, on idle, on event. No <code>while True</code> loop needed.</li>
-<li><strong>Process isolation.</strong> Each run is a fresh process. A crash does not take down the scheduler.</li>
-<li><strong>A working directory you control.</strong> Set it explicitly; do not rely on the shell's <code>cwd</code>.</li>
-<li><strong>Execution time limits.</strong> If a run hangs, Task Scheduler kills it and records the result.</li>
-<li><strong>Retry semantics.</strong> <code>StartWhenAvailable</code> runs a missed task as soon as the machine is available.</li>
-<li><strong>Result codes.</strong> Every run records <code>Last Run Result</code>, which you can query from Python or PowerShell.</li>
-</ul>
-<p>The tradeoff is that you lose in-memory state between runs. For most recurring jobs — polling, scraping, file sync, report generation — that is fine. For jobs that genuinely need a persistent connection, you keep a daemon but run it under a service wrapper (NSSM, <code>sc.exe</code>) rather than as a child of your shell. Task Scheduler is for the recurring, stateless work.</p>
-<h2 id="mapping-a-daemon-to-a-task">Mapping a daemon to a task</h2>
-<p>Take the original daemon: poll an endpoint every 60 seconds, write results to SQLite, log to a file. As a daemon it looked like this:</p>
-<pre class="codehilite"><code class="language-python">import time, sqlite3, logging
-
-logging.basicConfig(filename=&quot;poll.log&quot;, level=logging.INFO)
-
-def poll_once():
-    # fetch, parse, insert
-    ...
-
-if __name__ == &quot;__main__&quot;:
-    while True:
-        try:
-            poll_once()
-        except Exception:
-            logging.exception(&quot;poll failed&quot;)
-        time.sleep(60)
+<p>Corporate Windows machines are hostile territory for long-running processes. You write a daemon, it runs fine on your dev box, then you deploy it to a managed laptop and it dies at some random point in the night with no traceback and no Windows Event Log entry. I spent a few weeks chasing this before giving up on the daemon pattern entirely and moving everything to Windows Task Scheduler. Here's what happened and how the migration looks in practice.</p>
+<h2 id="the-symptom-a-daemon-that-dies-quietly">The Symptom: A Daemon That Dies Quietly</h2>
+<p>The first version of my job runner was a classic Python daemon: a parent process that spawned child workers, a watchdog thread that restarted workers if they crashed, and a log file that recorded every restart. On my own machine it ran for weeks.</p>
+<p>On the corporate laptop, the log looked like this:</p>
+<pre class="codehilite"><code>2024-03-11 09:14:02 INFO  worker started (pid 18432)
+2024-03-11 09:14:02 INFO  worker pid 18432 exited with code 0
+2024-03-11 09:14:02 INFO  restarting worker...
+2024-03-11 09:14:02 INFO  worker started (pid 19004)
+2024-03-11 09:14:02 INFO  worker pid 19004 exited with code 0
+2024-03-11 09:14:02 INFO  restarting worker...
 </code></pre>
 
-<p>As a scheduled task, the loop disappears. The script becomes a single-shot job:</p>
-<pre class="codehilite"><code class="language-python">import sys, sqlite3, logging
-from datetime import datetime, timezone
+<p>A tight restart loop with no error. The child processes were being created and immediately killed. No Python exception, because the kill happened at the OS level before the interpreter could raise anything.</p>
+<p>The culprit was Sangfor aTrust, the endpoint security suite that ships with a lot of enterprise environments. It hooks process creation and, depending on policy, blocks or silently terminates child processes that don't match an allowlist. A daemon that spawns workers looks exactly like the kind of behavior a security product is built to stop. The watchdog made it worse: every restart attempt was another blocked <code>CreateProcess</code> call, which is why the loop was so tight.</p>
+<p>You can confirm this pattern quickly. Run a trivial spawner and see whether the child ever gets to execute:</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import sys
 
-LOG = r&quot;C:\jobs\poll\poll.log&quot;
-DB = r&quot;C:\jobs\poll\data.sqlite&quot;
+# If this prints nothing, the child never ran.
+# That is a security-policy block, not a Python bug.
+proc = subprocess.Popen(
+    [sys.executable, &quot;-c&quot;, &quot;print('child alive')&quot;],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+out, err = proc.communicate(timeout=10)
+print(&quot;returncode:&quot;, proc.returncode)
+print(&quot;stdout:&quot;, out)
+print(&quot;stderr:&quot;, err)
+</code></pre>
+
+<p>If <code>returncode</code> is non-zero and both streams are empty, the child was killed before it could write anything. That's the signature.</p>
+<h2 id="why-task-scheduler-survives-where-daemons-dont">Why Task Scheduler Survives Where Daemons Don't</h2>
+<p>The key insight is that Task Scheduler is not a user process. It's a Windows service (<code>Schedule</code>) running in session 0, and the processes it launches are created by the service host, not by your Python interpreter. Sangfor aTrust and similar suites generally allow this path because:</p>
+<ol>
+<li><strong>The parent is a trusted system service.</strong> Process-creation hooks are usually scoped by parent identity. <code>svchost.exe</code> running the Schedule service is on the allowlist; <code>python.exe</code> spawning <code>python.exe</code> is not.</li>
+<li><strong>Task Scheduler is a documented management surface.</strong> Enterprise security products are designed not to break the OS's own scheduling. Blocking it would break Windows Update, backup agents, and half the management stack. So it stays open.</li>
+<li><strong>No persistent parent process.</strong> There's nothing long-running to kill. Each task run is a short-lived process, launched, executed, and reaped by the service. The "daemon" is the scheduler itself, which you don't have to keep alive.</li>
+</ol>
+<p>That last point is the real architectural win. Instead of building a process that stays up and supervises itself, you hand the supervision to the OS. The OS is very good at it and the security suite leaves it alone.</p>
+<h2 id="mapping-jobs-to-tasks">Mapping Jobs to Tasks</h2>
+<p>Once I accepted the model, the migration was mechanical. Each recurring job becomes one scheduled task with four things defined: a trigger, a working directory, a timeout, and a result convention.</p>
+<h3 id="trigger">Trigger</h3>
+<p>Triggers replace your <code>while True: sleep(...)</code> loop. For a job that runs every five minutes, use a daily trigger with a repetition interval. For a job that runs once at 06:00 on weekdays, use a weekly trigger with the day set. The scheduler handles the clock; you don't need <code>time.sleep</code> at all.</p>
+<h3 id="working-directory">Working Directory</h3>
+<p>This is the most common source of "it works in my terminal but not in the task." Task Scheduler defaults the working directory to <code>C:\Windows\System32</code>. Any relative path in your script breaks. Always set an explicit working directory, and make your script resolve its own paths rather than relying on <code>os.getcwd()</code>:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+# Anchor everything to the script location, not the process cwd.
+BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / &quot;logs&quot;
+STATE_DIR = BASE_DIR / &quot;state&quot;
+LOG_DIR.mkdir(exist_ok=True)
+STATE_DIR.mkdir(exist_ok=True)
+</code></pre>
+
+<h3 id="timeout">Timeout</h3>
+<p>Task Scheduler has a per-task execution time limit. Set it. A hung job that holds a database connection or a lock file forever is worse than a failed job. For a job expected to run in under two minutes, set the limit to ten. The scheduler terminates the process and records a failure, which you can see.</p>
+<h3 id="result-convention">Result Convention</h3>
+<p>The scheduler records the process exit code. Use it. A script that always exits 0 is invisible to the scheduler's history. Exit non-zero on failure so the last-run result is meaningful:</p>
+<pre class="codehilite"><code class="language-python">import sys
+import logging
 
 logging.basicConfig(
-    filename=LOG,
+    filename=str(LOG_DIR / &quot;job.log&quot;),
     level=logging.INFO,
     format=&quot;%(asctime)s %(levelname)s %(message)s&quot;,
 )
 
-def poll_once():
-    # fetch, parse, insert
-    ...
-
 def main() -&gt; int:
     try:
-        poll_once()
-        logging.info(&quot;ok&quot;)
-        return 0
+        run_job()
     except Exception:
-        logging.exception(&quot;poll failed&quot;)
+        logging.exception(&quot;job failed&quot;)
         return 1
+    return 0
 
 if __name__ == &quot;__main__&quot;:
     sys.exit(main())
 </code></pre>
 
-<p>Two things matter here. First, the script returns an exit code: <code>0</code> on success, <code>1</code> on failure. Task Scheduler records this as <code>Last Run Result</code>. Second, all paths are absolute. Do not assume the working directory.</p>
-<p>Register the task with <code>schtasks</code> (or the Task Scheduler GUI, or the <code>pywin32</code> COM API). The <code>schtasks</code> command is the most portable:</p>
-<pre class="codehilite"><code class="language-bat">schtasks /Create /TN &quot;CodeQuant\Poll&quot; /TR &quot;C:\Python311\python.exe C:\jobs\poll\poll.py&quot; /SC MINUTE /MO 1 /RL LIMITED /F
-</code></pre>
+<h2 id="creating-tasks-from-python">Creating Tasks from Python</h2>
+<p>You can register tasks by hand in the GUI, but that doesn't scale and it isn't reviewable. I keep a single <code>setup_tasks.py</code> that registers every job idempotently. It shells out to <code>schtasks.exe</code>, which is present on every Windows install and needs no extra dependency.</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+from pathlib import Path
 
-<p>That is the minimum. In practice you want a few more flags:</p>
-<pre class="codehilite"><code class="language-bat">schtasks /Create ^
-  /TN &quot;CodeQuant\Poll&quot; ^
-  /TR &quot;C:\Python311\python.exe C:\jobs\poll\poll.py&quot; ^
-  /SC MINUTE /MO 1 ^
-  /RL LIMITED ^
-  /F
-</code></pre>
+PYTHON = r&quot;C:\Python311\python.exe&quot;
+BASE = Path(r&quot;C:\jobs&quot;)
 
-<p><code>/RL LIMITED</code> runs the task with the least privilege the account has. Do not use <code>/RL HIGHEST</code> unless the job genuinely needs elevation; it makes the security suite pay more attention.</p>
-<p>For a job that should survive reboots and catch up on missed runs, set <code>StartWhenAvailable</code> and a time limit. <code>schtasks</code> does not expose every setting, so drop into PowerShell for the full set:</p>
-<pre class="codehilite"><code class="language-powershell">$action = New-ScheduledTaskAction `
-    -Execute &quot;C:\Python311\python.exe&quot; `
-    -Argument &quot;C:\jobs\poll\poll.py&quot; `
-    -WorkingDirectory &quot;C:\jobs\poll&quot;
+TASKS = [
+    {
+        &quot;name&quot;: &quot;QuantJob_Fetch&quot;,
+        &quot;script&quot;: BASE / &quot;fetch.py&quot;,
+        &quot;schedule&quot;: &quot;MINUTE /MO 5&quot;,
+        &quot;timeout_min&quot;: 10,
+    },
+    {
+        &quot;name&quot;: &quot;QuantJob_Report&quot;,
+        &quot;script&quot;: BASE / &quot;report.py&quot;,
+        &quot;schedule&quot;: &quot;DAILY /ST 06:00&quot;,
+        &quot;timeout_min&quot;: 30,
+    },
+]
 
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes 1)
+def register(task: dict) -&gt; None:
+    cmd = [
+        &quot;schtasks&quot;, &quot;/Create&quot;,
+        &quot;/TN&quot;, task[&quot;name&quot;],
+        &quot;/TR&quot;, f'&quot;{PYTHON}&quot; &quot;{task[&quot;script&quot;]}&quot;',
+        &quot;/SC&quot;, *task[&quot;schedule&quot;].split(),
+        &quot;/RL&quot;, &quot;LIMITED&quot;,          # run with normal user rights
+        &quot;/F&quot;,                       # overwrite if it exists
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
 
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -MultipleInstances IgnoreNew
+    # Set working directory and execution time limit separately.
+    # schtasks has no direct flag for cwd, so use XML for full control.
+    set_task_xml(task)
 
-Register-ScheduledTask `
-    -TaskName &quot;CodeQuant\Poll&quot; `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -User &quot;DOMAIN\youruser&quot; `
-    -RunLevel Limited
-</code></pre>
-
-<p>The key settings:</p>
-<ul>
-<li><code>-WorkingDirectory</code> sets the <code>cwd</code> for the process. Without it, the script runs in <code>C:\Windows\System32</code> and any relative path breaks.</li>
-<li><code>-StartWhenAvailable</code> runs the task as soon as the machine is on, even if the scheduled time was missed. This is what replaces the daemon's "always running" property.</li>
-<li><code>-ExecutionTimeLimit</code> kills a hung run. A daemon that hangs holds a connection forever; a scheduled task that hangs gets cleaned up.</li>
-<li><code>-RestartCount</code> and <code>-RestartInterval</code> give you retry-on-failure without a watchdog process.</li>
-<li><code>-MultipleInstances IgnoreNew</code> prevents overlap if a run takes longer than the interval. This is the equivalent of the daemon's single-threaded loop.</li>
-</ul>
-<h2 id="reading-last-run-result-codes">Reading last-run result codes</h2>
-<p>The operational win that surprised me most: Task Scheduler records the exit code of every run. You get failure visibility for free.</p>
-<p>Query it from PowerShell:</p>
-<pre class="codehilite"><code class="language-powershell">Get-ScheduledTaskInfo -TaskName &quot;CodeQuant\Poll&quot; |
-    Select-Object LastRunTime, LastTaskResult, NextRunTime, NumberOfMissedRuns
-</code></pre>
-
-<p><code>LastTaskResult</code> is the exit code your script returned. <code>0</code> means success. Anything else is a failure you can alert on. <code>NumberOfMissedRuns</code> tells you if the machine was off or the task was disabled.</p>
-<p>From Python, wrap the same query:</p>
-<pre class="codehilite"><code class="language-python">import subprocess, json
-
-def task_status(task_name: str) -&gt; dict:
-    ps = (
-        f&quot;Get-ScheduledTaskInfo -TaskName '{task_name}' | &quot;
-        &quot;Select-Object LastRunTime, LastTaskResult, NextRunTime, NumberOfMissedRuns | &quot;
-        &quot;ConvertTo-Json&quot;
-    )
-    out = subprocess.run(
-        [&quot;powershell&quot;, &quot;-NoProfile&quot;, &quot;-Command&quot;, ps],
-        capture_output=True, text=True, check=True,
+def set_task_xml(task: dict) -&gt; None:
+    # Export, patch, re-import. This is the reliable way to set
+    # WorkingDirectory and ExecutionTimeLimit.
+    name = task[&quot;name&quot;]
+    xml = subprocess.run(
+        [&quot;schtasks&quot;, &quot;/Query&quot;, &quot;/TN&quot;, name, &quot;/XML&quot;],
+        check=True, capture_output=True, text=True,
     ).stdout
-    return json.loads(out)
+
+    xml = xml.replace(
+        &quot;&lt;WorkingDirectory&gt;&lt;/WorkingDirectory&gt;&quot;,
+        f&quot;&lt;WorkingDirectory&gt;{BASE}&lt;/WorkingDirectory&gt;&quot;,
+    )
+    xml = xml.replace(
+        &quot;&lt;ExecutionTimeLimit&gt;PT72H&lt;/ExecutionTimeLimit&gt;&quot;,
+        f&quot;&lt;ExecutionTimeLimit&gt;PT{task['timeout_min']}M&lt;/ExecutionTimeLimit&gt;&quot;,
+    )
+    # StartWhenAvailable: if the machine was off at trigger time,
+    # run the task as soon as it comes back.
+    if &quot;&lt;StartWhenAvailable&gt;false&lt;/StartWhenAvailable&gt;&quot; in xml:
+        xml = xml.replace(
+            &quot;&lt;StartWhenAvailable&gt;false&lt;/StartWhenAvailable&gt;&quot;,
+            &quot;&lt;StartWhenAvailable&gt;true&lt;/StartWhenAvailable&gt;&quot;,
+        )
+
+    subprocess.run(
+        [&quot;schtasks&quot;, &quot;/Create&quot;, &quot;/TN&quot;, name, &quot;/XML&quot;, &quot;-&quot;, &quot;/F&quot;],
+        input=xml, check=True, capture_output=True, text=True,
+    )
 
 if __name__ == &quot;__main__&quot;:
-    info = task_status(r&quot;CodeQuant\Poll&quot;)
-    if info[&quot;LastTaskResult&quot;] != 0:
-        # send alert
-        ...
+    for t in TASKS:
+        register(t)
+        print(f&quot;registered {t['name']}&quot;)
 </code></pre>
 
-<p>This is the part that a daemon cannot give you without building it yourself. The daemon's failure mode was silence. The scheduled task's failure mode is a non-zero integer sitting in the Windows task store, queryable from any script.</p>
-<h2 id="what-this-changes-operationally">What this changes operationally</h2>
-<p>Moving from daemons to Task Scheduler changed three things for me:</p>
-<p><strong>Reboot survival.</strong> A daemon launched from the Startup folder dies when the user logs off, and it does not come back until the next logon. A scheduled task with a trigger at startup or logon runs regardless, and <code>StartWhenAvailable</code> catches up on anything missed while the machine was off.</p>
-<p><strong>No watchdog to maintain.</strong> The keep-alive process is gone. Retry is a setting, not a script. If a run fails, Task Scheduler retries it on the interval you configured. If it hangs, the execution time limit kills it. You delete an entire class of code.</p>
-<p><strong>Failure is observable.</strong> Every run leaves a result code. You can build a single dashboard that queries all your tasks and alerts on non-zero results. No more discovering at 3 a.m. that a daemon died six hours ago.</p>
-<p>The one thing you give up is in-memory state. For polling, syncing, and report jobs, that is not a real loss. For anything that needs a persistent socket or a long-lived cache, keep the daemon but run it as a Windows service under <code>sc.exe</code> or NSSM — not as a child of your shell, where the security suite can see it.</p>
-<h2 id="the-migration-checklist">The migration checklist</h2>
-<p>If you are moving a daemon to Task Scheduler, here is the sequence that worked:</p>
-<ol>
-<li>Refactor the loop body into a single-shot function with an explicit exit code.</li>
-<li>Make every path absolute. No relative imports, no <code>cwd</code> assumptions.</li>
-<li>Register the task with an explicit working directory and a repetition trigger.</li>
-<li>Set <code>StartWhenAvailable</code>, an execution time limit, and a restart policy.</li>
-<li>Set <code>MultipleInstances</code> to <code>IgnoreNew</code> to prevent overlap.</li>
-<li>Query <code>LastTaskResult</code> after the first few runs to confirm the exit code is what you expect.</li>
-<li>Delete the old daemon and its watchdog. Do not leave both running.</li>
-</ol>
-<p>The security suite will not block any of this, because none of it looks like a daemon spawning children. It looks like Windows doing what Windows does.</p>
+<p>The XML round-trip is the part people skip and then wonder why their working directory is <code>System32</code>. <code>schtasks</code> doesn't expose <code>/WorkingDirectory</code> or <code>/ExecutionTimeLimit</code> as command-line flags, so you export the task, edit the XML, and re-import. It's ugly but it's stable and it's scriptable.</p>
+<h2 id="operational-wins-you-get-for-free">Operational Wins You Get for Free</h2>
+<p>The migration wasn't just about surviving the security suite. Three things got better immediately.</p>
+<h3 id="reboot-survival">Reboot survival</h3>
+<p>A daemon dies on reboot and you need a service wrapper, a startup shortcut, or a login script to bring it back. A scheduled task just runs on its trigger. If the trigger is a repetition interval, the task resumes on the next interval after boot. If you need it to catch up, <code>&lt;StartWhenAvailable&gt;true&lt;/StartWhenAvailable&gt;</code> makes the scheduler run a missed task as soon as the machine is back. That single flag replaced an entire startup-recovery code path in my old daemon.</p>
+<h3 id="built-in-retry">Built-in retry</h3>
+<p>Task Scheduler has a native retry policy. If a task fails, you can configure it to retry every N minutes for M attempts. That's the watchdog pattern, implemented by the OS, and it doesn't spawn child processes from your interpreter so the security suite has nothing to object to. You set it in the task's Settings tab, or in XML:</p>
+<pre class="codehilite"><code class="language-xml">&lt;RestartOnFailure&gt;
+  &lt;Interval&gt;PT5M&lt;/Interval&gt;
+  &lt;Count&gt;3&lt;/Count&gt;
+&lt;/RestartOnFailure&gt;
+</code></pre>
+
+<h3 id="last-run-result-codes">Last-run result codes</h3>
+<p>Every task records its last run time and result code. You can query them without any custom instrumentation:</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import csv
+from io import StringIO
+
+def last_results() -&gt; list[dict]:
+    out = subprocess.run(
+        [&quot;schtasks&quot;, &quot;/Query&quot;, &quot;/FO&quot;, &quot;CSV&quot;, &quot;/V&quot;],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    rows = list(csv.DictReader(StringIO(out)))
+    return [
+        {
+            &quot;name&quot;: r[&quot;TaskName&quot;],
+            &quot;status&quot;: r[&quot;Status&quot;],
+            &quot;last_run&quot;: r[&quot;Last Run Time&quot;],
+            &quot;result&quot;: r[&quot;Last Result&quot;],
+        }
+        for r in rows
+        if r[&quot;TaskName&quot;].startswith(&quot;\\QuantJob_&quot;)
+    ]
+
+for row in last_results():
+    print(row)
+</code></pre>
+
+<p><code>Last Result</code> is the process exit code. <code>0</code> means success, anything else means the job failed and you can look at your log file. That's a free health dashboard for every job on the machine. I pipe this into a small status page and I haven't written a single line of process-monitoring code since.</p>
+<h2 id="what-id-do-differently">What I'd Do Differently</h2>
+<p>Two things. First, I'd set explicit working directories from day one instead of debugging <code>FileNotFoundError</code> for an afternoon. Second, I'd design every job to be idempotent and short-lived. The scheduler model rewards jobs that start, do one thing, and exit. If your job needs to hold state between runs, write it to a file or a database rather than keeping it in memory. The process is gone when it's done; that's the point.</p>
+<p>The daemon pattern isn't wrong in general. It's wrong on a locked-down corporate machine where you don't control the process-creation policy. Task Scheduler is the platform's own answer to "run this on a schedule," and in that environment, using the platform's answer is the shortest path to something that actually stays running.</p>
 <p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-06 12:36:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">Task Scheduler</span><span class="tag-badge">daemon</span><span class="tag-badge">Python</span><span class="tag-badge">Sangfor</span><span class="tag-badge">automation</span></div>
             <div class="post-footer">
