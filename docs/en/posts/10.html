@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>When GitHub Is Blocked but You Still Need to Push - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="When a firewall blocks github.com:443 but leaves api.github.com and raw.githubusercontent.com open, git push dies while ...">
+        <meta name="description" content="Corporate firewalls are rarely all-or-nothing. They are usually the result of a proxy policy, a TLS inspection rule, or ...">
     <meta name="keywords" content="GitHub API,curl.exe,raw.githubusercontent.com,firewall,deploy">
     <meta property="og:title" content="When GitHub Is Blocked but You Still Need to Push">
-    <meta property="og:description" content="When a firewall blocks github.com:443 but leaves api.github.com and raw.githubusercontent.com open, git push dies while ...">
+    <meta property="og:description" content="Corporate firewalls are rarely all-or-nothing. They are usually the result of a proxy policy, a TLS inspection rule, or ...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/10.html">
@@ -37,56 +37,55 @@
                 <span class="category"><span class="tag-badge">Network &amp; Security</span></span>
             </div>
             <div class="post-content">
-<p>When a firewall blocks <code>github.com:443</code> but leaves <code>api.github.com</code> and <code>raw.githubusercontent.com</code> open, <code>git push</code> dies while the REST API keeps working. Here is the exact path I used to keep deploying.</p>
-<h2 id="the-symptom-push-hangs-api-responds">The symptom: push hangs, API responds</h2>
-<p>The failure mode is specific. <code>git push</code> hangs on connect and eventually times out:</p>
-<pre class="codehilite"><code>fatal: unable to access 'https://github.com/user/repo.git/':
-Failed to connect to github.com port 443 after 21000 ms
+<p>Corporate firewalls are rarely all-or-nothing. They are usually the result of a proxy policy, a TLS inspection rule, or a category filter that someone applied years ago and forgot about. That is why you can end up in a situation where <code>github.com:443</code> is silently dropped, while <code>api.github.com</code> and <code>raw.githubusercontent.com</code> answer requests without complaint.</p>
+<p>I ran into this on a Windows build box inside a restricted network. <code>git push</code> hung until timeout. <code>git clone</code> over HTTPS failed. But <code>curl.exe https://api.github.com</code> returned a JSON payload in under a second. The deployment pipeline needed to publish a handful of generated files to a repository, and the network had effectively amputated the git transport while leaving the REST API intact.</p>
+<p>This post covers how to diagnose that split, how to push files through the GitHub Contents API instead of git, and why the HTTP-only path is worth keeping around even on networks where git works fine.</p>
+<h2 id="probing-the-firewall-with-curlexe">Probing the firewall with curl.exe</h2>
+<p>Before writing any Python, establish exactly which endpoints survive. On Windows 10 and 11, <code>curl.exe</code> ships with the OS, so you do not need to install anything or fight with the PowerShell <code>curl</code> alias (which is actually <code>Invoke-WebRequest</code> and behaves differently).</p>
+<p>Test the three hosts that matter:</p>
+<pre class="codehilite"><code class="language-powershell">curl.exe -sS -o NUL -w &quot;%{http_code} %{time_total}s\n&quot; https://github.com
+curl.exe -sS -o NUL -w &quot;%{http_code} %{time_total}s\n&quot; https://api.github.com
+curl.exe -sS -o NUL -w &quot;%{http_code} %{time_total}s\n&quot; https://raw.githubusercontent.com
 </code></pre>
 
-<p>But the same machine can fetch <code>https://api.github.com/rate_limit</code> in under a second. That asymmetry is the whole opportunity. The firewall rule was written against the hostname <code>github.com</code>, not against GitHub's IP ranges or the API host. Git's smart HTTP transport and the Contents API happen to live on different hostnames, so one dies and the other survives.</p>
-<p>Before rewriting any deployment logic, confirm which endpoints actually work. Do not assume — probe.</p>
-<h3 id="probing-with-curlexe-on-windows">Probing with curl.exe on Windows</h3>
-<p>On Windows, <code>curl</code> is an alias for <code>Invoke-WebRequest</code> in older PowerShell, which has different flags and different error messages. Call <code>curl.exe</code> explicitly so you get real curl semantics.</p>
-<pre class="codehilite"><code class="language-powershell"># Connectivity and TLS handshake per endpoint
-foreach ($h in @(&quot;github.com&quot;,&quot;api.github.com&quot;,&quot;raw.githubusercontent.com&quot;,&quot;codeload.github.com&quot;)) {
-    Write-Host &quot;--- $h ---&quot;
-    curl.exe -sS -o NUL -w &quot;http=%{http_code} connect=%{time_connect}s total=%{time_total}s`n&quot; `
-        --max-time 8 &quot;https://$h&quot;
-}
+<p><code>-o NUL</code> discards the body, <code>-w</code> prints the status code and elapsed time. On the blocked network, the first command sat there for roughly 20 seconds and exited with code 28 (operation timed out). The other two returned <code>200</code> in a few hundred milliseconds.</p>
+<p>A timeout is more informative than a <code>403</code>. A <code>403</code> means something answered — a proxy, a filter appliance — and you can sometimes negotiate with it. A timeout means the connection was dropped or blackholed, which usually points to a routing or SNI-based block that you cannot talk your way out of.</p>
+<p>Confirm the git transport specifically:</p>
+<pre class="codehilite"><code class="language-powershell">git ls-remote https://github.com/your-org/your-repo.git
 </code></pre>
 
-<p>Three outcomes matter:</p>
-<ul>
-<li><code>http=200</code> or <code>http=301</code>/<code>404</code> — the endpoint is reachable. A 404 on the bare host is fine; you got a response.</li>
-<li><code>curl: (7) Failed to connect</code> — TCP is blocked or blackholed.</li>
-<li>Exit code 28 with a long <code>time_total</code> — packets are being dropped silently. That is a firewall, not a DNS problem.</li>
-</ul>
-<p>Check DNS separately, because a poisoned or filtered resolver produces confusing results:</p>
-<pre class="codehilite"><code class="language-powershell">Resolve-DnsName api.github.com -Type A
+<p>If that hangs while <code>curl.exe</code> to <code>api.github.com</code> succeeds, you have confirmed the split: git's smart HTTP protocol talks to <code>github.com</code>, the API talks to <code>api.github.com</code>, and only one of them is reachable.</p>
+<p>One caveat worth checking early: <code>raw.githubusercontent.com</code> serves file <em>content</em> but does not accept writes. It is useful for reads and for verifying that a push landed, but every write goes through <code>api.github.com</code>.</p>
+<h2 id="authenticating-without-a-browser">Authenticating without a browser</h2>
+<p>The Contents API needs a token. A classic personal access token with <code>repo</code> scope works, or a fine-grained token with <code>Contents: Read and write</code> on the target repository. Put it in an environment variable rather than the script:</p>
+<pre class="codehilite"><code class="language-powershell">$env:GITHUB_TOKEN = &quot;ghp_...&quot;
 </code></pre>
 
-<p>If DNS resolves but connect fails, the block is at the network layer. If DNS itself is filtered, you have a different problem and the API trick will not help.</p>
-<p>Finally, verify that the API path works end to end with authentication, because unauthenticated requests are rate-limited to 60/hour and will not survive a deployment:</p>
-<pre class="codehilite"><code class="language-powershell">curl.exe -sS -H &quot;Authorization: Bearer $env:GH_TOKEN&quot; `
-    -H &quot;Accept: application/vnd.github+json&quot; `
-    &quot;https://api.github.com/rate_limit&quot;
+<p>Then verify the token and check your rate limit budget in one call:</p>
+<pre class="codehilite"><code class="language-powershell">curl.exe -sS -H &quot;Authorization: Bearer $env:GITHUB_TOKEN&quot; `
+  -H &quot;Accept: application/vnd.github+json&quot; `
+  https://api.github.com/rate_limit
 </code></pre>
 
-<p>Look at <code>resources.core.remaining</code>. If you see 4999 or 5000, you are authenticated and good to go.</p>
-<h2 id="the-contents-api-read-the-sha-write-the-blob">The Contents API: read the SHA, write the blob</h2>
-<p>The Contents API is a plain REST resource. To update a file you need three things: the path, the new content, and the current blob SHA. The SHA is the optimistic-concurrency token — GitHub rejects the write if it does not match, which prevents two deployers from clobbering each other.</p>
-<h3 id="step-1-get-the-current-file">Step 1: GET the current file</h3>
+<p>The response includes <code>resources.core.limit</code>, normally <code>5000</code>, and <code>remaining</code>. That number is per hour, per authenticated token. Unauthenticated requests get 60 per hour from a shared IP pool, which is useless for any real deployment — always authenticate.</p>
+<h2 id="the-contents-api-step-by-step">The Contents API, step by step</h2>
+<p>The Contents API models a repository file as a resource at:</p>
+<pre class="codehilite"><code>/repos/{owner}/{repo}/contents/{path}
+</code></pre>
+
+<p>A write is a two-step dance, because the API is optimistic-concurrency aware. You cannot just PUT a file and hope; if the file already exists, you must supply the current blob SHA so the server knows you are updating the version you think you are updating.</p>
+<h3 id="step-1-get-the-current-sha">Step 1: GET the current SHA</h3>
 <pre class="codehilite"><code class="language-python">import base64
 import os
 import time
+
 import requests
 
 API = &quot;https://api.github.com&quot;
 OWNER = &quot;your-org&quot;
 REPO = &quot;your-repo&quot;
 BRANCH = &quot;main&quot;
-TOKEN = os.environ[&quot;GH_TOKEN&quot;]
+TOKEN = os.environ[&quot;GITHUB_TOKEN&quot;]
 
 HEADERS = {
     &quot;Authorization&quot;: f&quot;Bearer {TOKEN}&quot;,
@@ -94,17 +93,18 @@ HEADERS = {
     &quot;X-GitHub-Api-Version&quot;: &quot;2022-11-28&quot;,
 }
 
+
 def get_file_sha(path: str) -&gt; str | None:
     url = f&quot;{API}/repos/{OWNER}/{REPO}/contents/{path}&quot;
-    r = requests.get(url, headers=HEADERS, params={&quot;ref&quot;: BRANCH}, timeout=15)
+    r = requests.get(url, headers=HEADERS, params={&quot;ref&quot;: BRANCH}, timeout=30)
     if r.status_code == 404:
-        return None          # file does not exist yet -&gt; create
+        return None
     r.raise_for_status()
     return r.json()[&quot;sha&quot;]
 </code></pre>
 
-<p>A 404 is not an error here. It means you are creating the file, and the PUT omits the <code>sha</code> field.</p>
-<h3 id="step-2-put-the-new-content">Step 2: PUT the new content</h3>
+<p><code>404</code> means the file does not exist yet — that is a create, not an update. Anything else non-2xx should raise, because silently continuing on a <code>401</code> or <code>403</code> just produces confusing failures later.</p>
+<h3 id="step-2-put-the-base64-content">Step 2: PUT the base64 content</h3>
 <pre class="codehilite"><code class="language-python">def put_file(path: str, content: bytes, message: str, sha: str | None) -&gt; dict:
     url = f&quot;{API}/repos/{OWNER}/{REPO}/contents/{path}&quot;
     payload = {
@@ -112,90 +112,74 @@ def get_file_sha(path: str) -&gt; str | None:
         &quot;content&quot;: base64.b64encode(content).decode(&quot;ascii&quot;),
         &quot;branch&quot;: BRANCH,
     }
-    if sha:
+    if sha is not None:
         payload[&quot;sha&quot;] = sha
 
     r = requests.put(url, headers=HEADERS, json=payload, timeout=30)
-
-    # 409 = SHA mismatch, someone else committed. Re-read and retry once.
-    if r.status_code == 409:
-        fresh = get_file_sha(path)
-        payload[&quot;sha&quot;] = fresh
-        r = requests.put(url, headers=HEADERS, json=payload, timeout=30)
-
     r.raise_for_status()
     return r.json()
 </code></pre>
 
-<p>Two details worth noting. First, <code>content</code> must be base64-encoded ASCII, not a Python string of the raw bytes. Second, the <code>409</code> retry matters in any pipeline with more than one writer — without it, a concurrent commit turns into a failed deploy.</p>
+<p>The <code>content</code> field must be base64 with no line breaks. Python's <code>base64.b64encode</code> produces exactly that. If you are reading a text file, encode it to UTF-8 first — do not pass a <code>str</code> to <code>b64encode</code>, it will raise.</p>
 <h3 id="step-3-one-commit-per-file-with-a-sleep">Step 3: One commit per file, with a sleep</h3>
-<p>The Contents API commits one file per request. There is no multi-file atomic commit through this endpoint; the Git Data API (<code>/git/blobs</code> + <code>/git/trees</code> + <code>/git/commits</code>) can do that, but it is a lot more code and you rarely need atomicity for a deploy.</p>
-<p>Rate limits are the constraint. Authenticated requests get 5000/hour against <code>core</code>. That is generous, but the secondary rate limit is the one that bites: GitHub throttles bursts of content-creating requests, and the documented guidance is to wait at least one second between mutating calls. I use 0.4s in practice for small batches and it has held up, but treat it as a floor, not a target.</p>
-<pre class="codehilite"><code class="language-python">def deploy(files: dict[str, bytes], commit_prefix: str) -&gt; None:
-    for i, (path, content) in enumerate(files.items(), 1):
-        sha = get_file_sha(path)
-        msg = f&quot;{commit_prefix}: {path}&quot;
-        put_file(path, content, msg, sha)
-        print(f&quot;[{i}/{len(files)}] {path} -&gt; {msg}&quot;)
-        time.sleep(0.4)          # stay well under the secondary limit
-</code></pre>
-
-<p>If you have hundreds of files, raise the sleep. If you have thousands, switch to the Git Data API and make one commit — the per-request overhead will dominate otherwise.</p>
-<h2 id="why-this-is-also-the-right-fallback-when-git-itself-is-broken">Why this is also the right fallback when git itself is broken</h2>
-<p>The firewall story is the trigger, but the same HTTP-only path fixes a second class of problems: machines where <code>git</code> is unavailable or broken.</p>
-<p>I have hit all of these on locked-down Windows hosts:</p>
-<ul>
-<li>Git not installed and no admin rights to install it.</li>
-<li>Git installed but the corporate proxy intercepts TLS and <code>git</code> refuses the certificate while Python's <code>certifi</code> bundle works fine.</li>
-<li>Git's credential helper is misconfigured or points at a dead store.</li>
-<li>A minimal CI container with no <code>git</code> binary at all.</li>
-</ul>
-<p>In every case, <code>requests</code> plus a token does the job. The dependency surface shrinks to Python and network access to <code>api.github.com</code>. No SSH keys, no credential helper, no local repository state to get out of sync.</p>
-<p>There is a side benefit for reproducibility: the deployment script is self-contained. Anyone can read it and see exactly what it does. There is no hidden <code>.git</code> state, no rebase, no stash. The file content and the commit message are the entire input.</p>
-<h3 id="guarding-against-a-bad-deploy">Guarding against a bad deploy</h3>
-<p>Because the API path bypasses git's safety checks, add your own. A few lines of validation before the PUT saves a lot of pain:</p>
-<pre class="codehilite"><code class="language-python">def safe_deploy(files: dict[str, bytes], commit_prefix: str) -&gt; None:
-    if not files:
-        raise ValueError(&quot;nothing to deploy&quot;)
+<p>The Contents API commits one file per request. There is no multi-file atomic commit through this endpoint; for that you would need the Git Data API (blobs, trees, commits, refs), which is more calls, not fewer. For a deployment that publishes a handful of generated artifacts, one commit per file is fine and much simpler to reason about.</p>
+<pre class="codehilite"><code class="language-python">def push_files(files: dict[str, bytes], message_prefix: str) -&gt; None:
     for path, content in files.items():
-        if not path or path.startswith(&quot;/&quot;) or &quot;..&quot; in path:
-            raise ValueError(f&quot;unsafe path: {path!r}&quot;)
-        if not isinstance(content, bytes):
-            raise TypeError(f&quot;{path}: content must be bytes&quot;)
-    deploy(files, commit_prefix)
+        sha = get_file_sha(path)
+        verb = &quot;Update&quot; if sha else &quot;Add&quot;
+        result = put_file(path, content, f&quot;{verb} {path}&quot;, sha)
+        commit_sha = result[&quot;commit&quot;][&quot;sha&quot;][:7]
+        print(f&quot;{verb.lower():&gt;6} {path} -&gt; {commit_sha}&quot;)
+        time.sleep(0.4)
 </code></pre>
 
-<p>Also log the returned <code>commit.sha</code> from each PUT. When something goes wrong upstream, that SHA is how you find the exact commit to revert.</p>
-<h2 id="operating-notes">Operating notes</h2>
-<p>A few things that are not obvious until they bite you.</p>
-<h3 id="token-scope">Token scope</h3>
-<p>Use a fine-grained personal access token scoped to the single repository with <code>Contents: Read and write</code>. Do not use a classic token with <code>repo</code> scope if you can avoid it. Store it in an environment variable or a secrets manager, never in the script.</p>
-<h3 id="rate-limit-accounting">Rate limit accounting</h3>
-<p>Each file update costs two requests: one GET for the SHA and one PUT. A 100-file deploy is 200 requests. At 5000/hour that is fine, but if you deploy on every push from multiple machines, watch the <code>X-RateLimit-Remaining</code> header and back off when it drops.</p>
-<pre class="codehilite"><code class="language-python">def remaining(r: requests.Response) -&gt; int:
-    return int(r.headers.get(&quot;X-RateLimit-Remaining&quot;, &quot;0&quot;))
+<p>The <code>0.4</code> second sleep is not superstition. GitHub's secondary rate limits are separate from the 5000/hour primary budget and are triggered by bursty write patterns. A tight loop of PUTs to the same repository is exactly the shape that trips them. Four tenths of a second keeps you under the radar while still pushing a few hundred files in a couple of minutes. If you are pushing thousands of files, raise it or batch through the Git Data API instead.</p>
+<p>A <code>409</code> response on the PUT means the SHA you supplied is stale — someone else committed between your GET and your PUT. The correct handling is to re-GET and retry once:</p>
+<pre class="codehilite"><code class="language-python">def put_file_with_retry(path, content, message, attempts=3):
+    for i in range(attempts):
+        sha = get_file_sha(path)
+        try:
+            return put_file(path, content, message, sha)
+        except requests.HTTPError as e:
+            if e.response.status_code == 409 and i &lt; attempts - 1:
+                time.sleep(1.0)
+                continue
+            raise
 </code></pre>
 
-<h3 id="branch-protection">Branch protection</h3>
-<p>If <code>main</code> is protected, the API write will be rejected with a 422 unless the token belongs to a user allowed to bypass, or you target a branch and open a pull request. The Contents API can create a branch by passing a <code>branch</code> that does not exist yet, and then you can open a PR through the Pulls API. That is more machinery than a deploy usually needs, but it is the correct path on a protected repo.</p>
-<h3 id="verifying-the-write-landed">Verifying the write landed</h3>
-<p>Do not trust the 201 alone. Read the file back through <code>raw.githubusercontent.com</code>, which is a different hostname and therefore a genuinely independent check:</p>
+<p>Do not loop forever on <code>409</code>. If two processes are fighting over the same file, retrying just amplifies the conflict.</p>
+<h2 id="verifying-the-push-without-git">Verifying the push without git</h2>
+<p>After the PUTs, confirm the content actually landed. <code>raw.githubusercontent.com</code> is reachable on this network and serves the file at the branch tip:</p>
 <pre class="codehilite"><code class="language-python">def verify(path: str, expected: bytes) -&gt; bool:
     url = f&quot;https://raw.githubusercontent.com/{OWNER}/{REPO}/{BRANCH}/{path}&quot;
-    r = requests.get(url, timeout=15)
+    r = requests.get(url, timeout=30)
     r.raise_for_status()
     return r.content == expected
 </code></pre>
 
-<p>If <code>raw.githubusercontent.com</code> is also blocked on your network, fall back to a GET on the Contents API and decode the base64. The point is to confirm the content, not to assume it.</p>
-<h2 id="wrapping-up">Wrapping up</h2>
-<p>The firewall that blocks <code>github.com</code> but leaves the API open is more common than it sounds, and the fix is smaller than you would expect: probe the endpoints with <code>curl.exe</code>, authenticate against the API, GET the SHA, PUT the base64 content, sleep 0.4s, verify. The same code is the right answer when <code>git</code> is missing, broken, or fighting a TLS-intercepting proxy. The dependency is Python and one reachable hostname.</p>
+<p>There is a caching layer in front of <code>raw.githubusercontent.com</code> with a short TTL — usually a minute or two. If verification fails immediately after a push, wait and retry before assuming the push failed. The commit itself is authoritative; check <code>GET /repos/{owner}/{repo}/commits?path={path}</code> if you need certainty faster than the CDN refreshes.</p>
+<h2 id="why-this-path-is-worth-keeping">Why this path is worth keeping</h2>
+<p>The obvious use case is a network that blocks <code>github.com</code> but not the API. That is what prompted this work. But the HTTP-only push path has a second, less obvious value: it works when git itself is broken.</p>
+<p>I have hit all of these on build machines:</p>
+<ul>
+<li>A <code>git</code> binary too old to negotiate the current TLS or protocol version, with no admin rights to upgrade it.</li>
+<li>A corrupted <code>~/.gitconfig</code> or credential helper that makes every git invocation fail before it reaches the network.</li>
+<li>A container image where the git install is stripped down and <code>git push</code> fails on missing helpers.</li>
+<li>A CI runner with a read-only filesystem except for a scratch directory, where git's lock files cannot be written.</li>
+</ul>
+<p>In all of those cases, a Python script using <code>requests</code> and a token pushes files just fine, because it depends on nothing but the standard library and an HTTP client. The API surface is stable and versioned via the <code>X-GitHub-Api-Version</code> header. There is no local state to corrupt.</p>
+<p>The trade-off is real: one commit per file, no atomic multi-file changes, no branches created in a single call, and a hard 100 MB limit per file (the API rejects blobs over that size). For deployment artifacts — config files, generated reports, small data files, documentation — none of that matters. For a large repository with binary assets, stick with git and fix the network instead.</p>
+<h2 id="operational-notes">Operational notes</h2>
+<p>Keep the token out of the script and out of logs. <code>requests</code> will happily include it in an exception traceback if you print the request; log only the URL and status code.</p>
+<p>Set an explicit <code>timeout</code> on every call. The default is no timeout, and on a flaky network that means a hung process rather than a clean failure.</p>
+<p>If you are pushing to a protected branch, the token's identity must be allowed to bypass the protection or have the right to push. The API enforces branch protection the same way git does, and a <code>422</code> on the PUT often means a required status check or review is missing, not that your payload is malformed. Read the <code>message</code> field in the response body — it usually says which rule blocked you.</p>
+<p>Finally, keep the probe script. Networks change. The day <code>github.com</code> comes back, <code>git push</code> is still the better tool, and you will want to know which path is live without re-deriving it from scratch.</p>
 <p>More notes like this ship every week on this site.</p>
 <hr />
 <h2 id="daily-picks">Daily Picks</h2>
 <blockquote>
 <p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
-Data updated: 2026-10-06 10:16:22</p>
+Data updated: 2026-10-06 12:36:33</p>
 </blockquote>
 <h3 id="long">Long</h3>
 <table>
@@ -211,16 +195,24 @@ Data updated: 2026-10-06 10:16:22</p>
 </thead>
 <tbody>
 <tr>
-<td>NEAR</td>
-<td>高质量标的做多</td>
-<td>$5.2985</td>
-<td>$5.5157</td>
-<td>$5.1872</td>
-<td>1:2.0</td>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
 </tr>
 </tbody>
 </table>
-<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">GitHub API</span><span class="tag-badge">curl.exe</span><span class="tag-badge">raw.githubusercontent.com</span><span class="tag-badge">firewall</span><span class="tag-badge">deploy</span></div>
             <div class="post-footer">
