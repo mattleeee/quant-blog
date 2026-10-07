@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Migrating a Python Automation Stack to a New Windows Server - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="A stack that runs unattended for months accumulates assumptions....">
+        <meta name="description" content="Migrating a Python automation stack between Windows machines looks trivial until it isn&#x27;t....">
     <meta name="keywords" content="migration,xcopy,checklist,Windows Server,automation">
     <meta property="og:title" content="Migrating a Python Automation Stack to a New Windows Server">
-    <meta property="og:description" content="A stack that runs unattended for months accumulates assumptions....">
+    <meta property="og:description" content="Migrating a Python automation stack between Windows machines looks trivial until it isn&#x27;t....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/6.html">
@@ -33,117 +33,116 @@
         <article class="post">
             <h1>Migrating a Python Automation Stack to a New Windows Server</h1>
             <div class="post-meta">
-                <span class="date">2026-10-04</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>A stack that runs unattended for months accumulates assumptions. Most of them are invisible until you move it to another machine. Ours was nine scheduled tasks: a blog pipeline that renders Markdown to a static site, a trading system that polls data feeds and writes state, and a pile of maintenance scripts that rotate logs and clean temp files. It lived on a Windows 11 dev box for two years. Then we had to put it on a fresh Windows Server 2016 instance, and almost everything that could differ between two Windows installs did.</p>
-<p>This is the migration as it actually happened: what broke, what the package looked like, and the encoding bug that cost the most time.</p>
-<h2 id="why-a-package-not-a-copy">Why a package, not a copy</h2>
-<p>The naive move is to zip the project folder and drop it on the server. That fails for one reason: the dev box folder contains both code and runtime state, and they have opposite requirements.</p>
-<p>Code should be copied exactly. Runtime state should mostly <em>not</em> be copied — logs are noise, built sites are regenerable, trade records are append-only history that the new machine will start writing to immediately, and cookies are machine-specific session tokens that will be invalid or, worse, silently confusing on a different host.</p>
-<p>So we split the tree conceptually into two halves and used <code>xcopy</code> with an exclude list. The exclude file is the interesting part:</p>
-<pre class="codehilite"><code class="language-text"># migrate_exclude.txt
-\logs\
-\logs\*
-\build\
-\build\*
-\dist\
-\dist\*
+<p>Migrating a Python automation stack between Windows machines looks trivial until it isn't. Nine scheduled tasks, a blog pipeline, a trading system, and a few hundred state files moved from a Windows 11 dev box (UTF-8 default) to a fresh Windows Server 2016 instance (GBK default). The scripts were identical. The behavior was not. Here is the package approach that worked, including the encoding trap that cost the most time.</p>
+<h2 id="why-just-copy-the-folder-fails">Why "just copy the folder" fails</h2>
+<p>The dev box had accumulated state that should not travel: logs, built site output, trade records, session cookies, and hundreds of JSON state files that referenced absolute paths from the old machine. Copying everything would have dragged stale data onto the server, and in the trading system's case, replayed old positions into a fresh account.</p>
+<p>The other problem is that scheduled tasks store absolute paths. A task registered on <code>C:\Users\dev\...</code> will not resolve on a server where the user profile is <code>C:\Users\Administrator\...</code>. Re-registering tasks by hand across nine entries is a recipe for typos, so the migration needed to be scripted end to end.</p>
+<h2 id="the-package-layout">The package layout</h2>
+<p>I built a single <code>migration/</code> folder that could be copied to the new machine and run without editing:</p>
+<pre class="codehilite"><code>migration/
+  payload/            # the actual code, minus runtime data
+  exclude.txt         # xcopy exclusion list
+  install.bat         # one-click installer
+  register_tasks.ps1  # re-registers all scheduled tasks
+  verify.bat          # checks every task's action and last result
+  requirements.txt
+</code></pre>
+
+<p>The <code>payload/</code> directory is the source tree with runtime directories stripped out. Everything machine-specific is resolved at install time.</p>
+<h2 id="xcopy-with-an-exclusion-list">xcopy with an exclusion list</h2>
+<p><code>robocopy</code> is the better tool for large trees, but <code>xcopy</code> with <code>/EXCLUDE</code> is simpler to reason about when you want a flat file list and predictable behavior on older Windows Server builds. The exclude file protects runtime data:</p>
+<pre class="codehilite"><code>\logs\
+\site\build\
+\data\trades\
+\data\cookies\
+\state\*.tmp
 \__pycache__\
-\__pycache__\*
 *.pyc
-\cookies\
-\cookies\*
-\state\trades\
-\state\trades\*
-\state\tmp\
-\state\tmp\*
-\*.log
-\.pytest_cache\
-\.pytest_cache\*
+.env
 </code></pre>
 
-<p>Then the copy itself:</p>
-<pre class="codehilite"><code class="language-bat">xcopy &quot;D:\automation&quot; &quot;C:\automation&quot; /E /I /H /K /Y /EXCLUDE:migrate_exclude.txt
+<p>Then the copy is one line:</p>
+<pre class="codehilite"><code class="language-bat">xcopy &quot;%~dp0payload&quot; &quot;%USERPROFILE%\automation&quot; /E /I /Y /EXCLUDE:%~dp0exclude.txt
 </code></pre>
 
-<p><code>/E</code> copies empty directories too, which matters because several scripts assume their output directory exists and crash if it doesn't. <code>/H</code> includes hidden files. <code>/K</code> preserves attributes, since a couple of files were marked read-only by a previous cleanup pass and we wanted that to survive. <code>/Y</code> suppresses the overwrite prompt — this runs unattended.</p>
-<p>The exclude list protects the <em>destination</em> as much as it trims the source. If the server already has a <code>state\trades</code> directory with real records, <code>xcopy</code> without exclusions would happily overwrite it with the dev box's stale copies. Excluding runtime paths makes the copy idempotent: you can run it twice and the second run changes nothing that matters.</p>
-<h2 id="paths-that-survive-a-move">Paths that survive a move</h2>
-<p>Hardcoded paths are the first thing to break. The dev box had <code>D:\automation</code>; the server had <code>C:\automation</code> and a different user profile name. Rather than parameterize every script, we made the installer infer everything.</p>
-<p>The one-click installer is a batch file that resolves its own location and derives the rest:</p>
+<p><code>/E</code> copies empty directories, <code>/I</code> assumes the destination is a directory if it doesn't exist, <code>/Y</code> suppresses the overwrite prompt. The exclude file uses substring matching, so <code>\logs\</code> catches any path segment named <code>logs</code> anywhere in the tree.</p>
+<p>One caveat: xcopy's exclude matching is greedy and case-insensitive on Windows. If you have a source directory named <code>Logs</code> and a legitimate <code>catalog</code> directory, the pattern <code>\logs\</code> will not match <code>catalog</code> because it requires the surrounding backslashes, but a bare <code>logs</code> pattern would. Keep the delimiters.</p>
+<h2 id="one-click-installer-that-auto-detects-paths">One-click installer that auto-detects paths</h2>
+<p>The installer resolves everything relative to <code>%USERPROFILE%</code> so the same batch file works on any account:</p>
 <pre class="codehilite"><code class="language-bat">@echo off
-setlocal enabledelayedexpansion
+setlocal
 
-REM ROOT is the directory this bat lives in.
-set &quot;ROOT=%~dp0&quot;
-if &quot;%ROOT:~-1%&quot;==&quot;\&quot; set &quot;ROOT=%ROOT:~0,-1%&quot;
-
-REM Everything else hangs off it or off the user profile.
-set &quot;PY=%ROOT%\venv\Scripts\python.exe&quot;
-set &quot;LOGS=%ROOT%\logs&quot;
-set &quot;STATE=%ROOT%\state&quot;
-
-if not exist &quot;%LOGS%&quot; mkdir &quot;%LOGS%&quot;
-if not exist &quot;%STATE%&quot; mkdir &quot;%STATE%&quot;
+set &quot;ROOT=%USERPROFILE%\automation&quot;
+set &quot;PY=%LOCALAPPDATA%\Programs\Python\Python311\python.exe&quot;
 
 if not exist &quot;%PY%&quot; (
-    echo [install] creating virtualenv
-    py -3 -m venv &quot;%ROOT%\venv&quot; || goto :fail
-    &quot;%PY%&quot; -m pip install --upgrade pip || goto :fail
-    &quot;%PY%&quot; -m pip install -r &quot;%ROOT%\requirements.txt&quot; || goto :fail
+    echo Python not found at %PY%
+    exit /b 1
 )
 
-echo [install] root = %ROOT%
-echo [install] python = %PY%
-exit /b 0
+echo Installing to %ROOT%
+xcopy &quot;%~dp0payload&quot; &quot;%ROOT%&quot; /E /I /Y /EXCLUDE:%~dp0exclude.txt
 
-:fail
-echo [install] FAILED
-exit /b 1
-</code></pre>
-
-<p>The <code>%~dp0</code> trick is the important line. It means the package can be unzipped anywhere — <code>C:\automation</code>, <code>D:\projects\automation</code>, a user's Desktop — and the installer configures itself accordingly. No config file to edit, no environment variable to set by hand.</p>
-<p>Python-side, we stopped hardcoding paths too. Every script resolves its root relative to <code>__file__</code>:</p>
-<pre class="codehilite"><code class="language-python">from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-STATE_DIR = ROOT / &quot;state&quot;
-LOG_DIR = ROOT / &quot;logs&quot;
-
-def ensure_dirs() -&gt; None:
-    for d in (STATE_DIR, LOG_DIR):
-        d.mkdir(parents=True, exist_ok=True)
-</code></pre>
-
-<p><code>resolve()</code> matters here. Without it, a script invoked through a symlink or a relative path can end up computing a root that points somewhere unexpected. With it, the path is absolute and canonical before anything else touches it.</p>
-<h2 id="re-registering-the-scheduled-tasks">Re-registering the scheduled tasks</h2>
-<p>The nine tasks were the real work. They had been created on the dev box with <code>schtasks</code> and had absolute paths baked into their actions. Copying task definitions between machines is not a supported operation, so we re-registered them from scratch on the server.</p>
-<p>The PowerShell approach is cleaner than <code>schtasks</code> because you can build the action and trigger as objects:</p>
-<pre class="codehilite"><code class="language-powershell">$Root = &quot;C:\automation&quot;
-$Py   = Join-Path $Root &quot;venv\Scripts\python.exe&quot;
-
-$Tasks = @(
-    @{ Name = &quot;AutoBlog_Build&quot;;   Script = &quot;blog\build.py&quot;;        Time = &quot;06:00&quot; },
-    @{ Name = &quot;AutoBlog_Deploy&quot;;  Script = &quot;blog\deploy.py&quot;;       Time = &quot;06:30&quot; },
-    @{ Name = &quot;Trade_Poll&quot;;       Script = &quot;trade\poll.py&quot;;        Time = &quot;07:00&quot; },
-    @{ Name = &quot;Trade_Settle&quot;;     Script = &quot;trade\settle.py&quot;;      Time = &quot;21:00&quot; },
-    @{ Name = &quot;Maint_RotateLogs&quot;; Script = &quot;maint\rotate_logs.py&quot;; Time = &quot;23:00&quot; }
+if errorlevel 1 (
+    echo Copy failed
+    exit /b 1
 )
 
-foreach ($t in $Tasks) {
+&quot;%PY%&quot; -m pip install -r &quot;%~dp0requirements.txt&quot; --quiet
+if errorlevel 1 (
+    echo Dependency install failed
+    exit /b 1
+)
+
+powershell -ExecutionPolicy Bypass -File &quot;%~dp0register_tasks.ps1&quot; -Root &quot;%ROOT%&quot;
+if errorlevel 1 (
+    echo Task registration failed
+    exit /b 1
+)
+
+echo Install complete
+endlocal
+</code></pre>
+
+<p>The <code>%~dp0</code> prefix resolves to the directory containing the batch file, so the package can live anywhere. The installer fails fast at each stage instead of continuing with a broken environment.</p>
+<h2 id="re-registering-scheduled-tasks">Re-registering scheduled tasks</h2>
+<p>Nine tasks needed to move from the old machine to the new one. Rather than export XML and rewrite paths, I defined the tasks in a PowerShell array and used <code>New-ScheduledTaskAction</code> plus <code>Register-ScheduledTask</code>. This keeps the task definitions in source control and makes the paths parametric:</p>
+<pre class="codehilite"><code class="language-powershell">param(
+    [Parameter(Mandatory=$true)]
+    [string]$Root
+)
+
+$python = Join-Path $env:LOCALAPPDATA &quot;Programs\Python\Python311\python.exe&quot;
+
+$tasks = @(
+    @{ Name = &quot;BlogPublish&quot;;   Script = &quot;blog\publish.py&quot;;    Time = &quot;06:00&quot; },
+    @{ Name = &quot;BlogFetch&quot;;     Script = &quot;blog\fetch.py&quot;;      Time = &quot;06:30&quot; },
+    @{ Name = &quot;TradeScan&quot;;     Script = &quot;trading\scan.py&quot;;    Time = &quot;09:00&quot; },
+    @{ Name = &quot;TradeExecute&quot;;  Script = &quot;trading\execute.py&quot;; Time = &quot;09:15&quot; },
+    @{ Name = &quot;TradeReport&quot;;   Script = &quot;trading\report.py&quot;;  Time = &quot;16:00&quot; },
+    @{ Name = &quot;StateBackup&quot;;   Script = &quot;ops\backup.py&quot;;      Time = &quot;23:00&quot; },
+    @{ Name = &quot;HealthCheck&quot;;   Script = &quot;ops\health.py&quot;;      Time = &quot;00:00&quot; },
+    @{ Name = &quot;LogRotate&quot;;     Script = &quot;ops\rotate.py&quot;;      Time = &quot;00:30&quot; },
+    @{ Name = &quot;DailyDigest&quot;;   Script = &quot;ops\digest.py&quot;;      Time = &quot;07:00&quot; }
+)
+
+foreach ($t in $tasks) {
     $scriptPath = Join-Path $Root $t.Script
     $action = New-ScheduledTaskAction `
-        -Execute $Py `
+        -Execute $python `
         -Argument &quot;`&quot;$scriptPath`&quot;&quot; `
-        -WorkingDirectory $Root
+        -WorkingDirectory (Split-Path $scriptPath)
 
     $trigger = New-ScheduledTaskTrigger -Daily -At $t.Time
 
     $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
         -StartWhenAvailable `
-        -DontStopOnIdleEnd `
         -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
     Register-ScheduledTask `
@@ -151,124 +150,122 @@ foreach ($t in $Tasks) {
         -Action $action `
         -Trigger $trigger `
         -Settings $settings `
-        -User &quot;SYSTEM&quot; `
+        -User $env:USERNAME `
         -RunLevel Highest `
         -Force
 }
+
+Write-Host &quot;Registered $($tasks.Count) tasks&quot;
 </code></pre>
 
-<p>Three details in there are load-bearing.</p>
-<p><code>-WorkingDirectory $Root</code> — without it, the task runs from <code>C:\Windows\System32</code>, and any script that uses a relative path for output writes into the system directory. We hit this on the first attempt.</p>
-<p><code>-StartWhenAvailable</code> — the server reboots for patching, and a task whose trigger time passed during the reboot should still run. The default silently skips it.</p>
-<p><code>-ExecutionTimeLimit</code> — the default is three days, which is effectively no limit. A hung polling script would sit there forever. Two hours is generous for our longest task.</p>
-<h2 id="the-verification-bat">The verification bat</h2>
-<p>After registering, we needed to prove the tasks were actually correct — not just present. A task can exist with a broken action and you won't notice until it fails at 3 a.m.</p>
-<p>The verification script pulls each task's action and last run result and compares them against expectations:</p>
-<pre class="codehilite"><code class="language-bat">@echo off
-setlocal
-
-set &quot;ROOT=%~dp0&quot;
-if &quot;%ROOT:~-1%&quot;==&quot;\&quot; set &quot;ROOT=%ROOT:~0,-1%&quot;
-set &quot;PY=%ROOT%\venv\Scripts\python.exe&quot;
-
-echo [verify] python: %PY%
-if not exist &quot;%PY%&quot; (
-    echo [verify] FAIL: interpreter missing
-    exit /b 1
-)
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  &quot;$root = '%ROOT%';&quot; ^
-  &quot;$py = Join-Path $root 'venv\Scripts\python.exe';&quot; ^
-  &quot;$names = @('AutoBlog_Build','AutoBlog_Deploy','Trade_Poll','Trade_Settle','Maint_RotateLogs');&quot; ^
-  &quot;$bad = 0;&quot; ^
-  &quot;foreach ($n in $names) {&quot; ^
-  &quot;  $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue;&quot; ^
-  &quot;  if (-not $t) { Write-Host \&quot;MISSING $n\&quot;; $bad++; continue }&quot; ^
-  &quot;  $exe = $t.Actions[0].Execute;&quot; ^
-  &quot;  $arg = $t.Actions[0].Arguments;&quot; ^
-  &quot;  $info = Get-ScheduledTaskInfo -TaskName $n;&quot; ^
-  &quot;  $code = $info.LastTaskResult;&quot; ^
-  &quot;  Write-Host \&quot;$n exec=$exe arg=$arg last=$code\&quot;;&quot; ^
-  &quot;  if ($exe -ne $py) { Write-Host \&quot;  WARN: unexpected interpreter\&quot;; $bad++ }&quot; ^
-  &quot;  if ($code -ne 0 -and $code -ne 267009) { Write-Host \&quot;  WARN: last result $code\&quot; }&quot; ^
-  &quot;}&quot; ^
-  &quot;if ($bad -gt 0) { exit 1 } else { exit 0 }&quot;
-
-if errorlevel 1 (
-    echo [verify] one or more tasks need attention
-    exit /b 1
-)
-
-echo [verify] all tasks look correct
-exit /b 0
-</code></pre>
-
-<p><code>267009</code> is <code>SCHED_S_TASK_RUNNING</code> — a task that's currently executing reports that as its last result, and it isn't an error. Filtering it out avoids false alarms when you run the verifier while a long task is mid-flight.</p>
-<p>The verifier is the thing you run after every deploy, not just the first one. Task definitions drift: someone edits one by hand, a patch changes a default, a script gets renamed. A thirty-second check catches all of it.</p>
+<p><code>-StartWhenAvailable</code> matters on a server that may be asleep or rebooting at the trigger time. <code>-ExecutionTimeLimit</code> prevents a hung script from blocking the next day's run. <code>-Force</code> makes the script idempotent, so re-running it after a code update just overwrites the existing task.</p>
 <h2 id="the-encoding-trap">The encoding trap</h2>
-<p>This is the part that cost us a full day, and it's the reason this article exists.</p>
-<p>The dev box ran Windows 11 with UTF-8 as the system code page. The server ran Windows Server 2016 with GBK. Same Python version, same scripts, same data — different behavior.</p>
-<p>The symptom was subtle. A blog post with a non-ASCII character would render correctly on the dev box and come out as mojibake on the server. A trade log would parse fine in one place and throw <code>UnicodeDecodeError</code> in the other. Nothing in the code looked wrong, because nothing in the code specified an encoding.</p>
-<p>Python's default encoding for <code>open()</code> is not UTF-8. It's whatever <code>locale.getpreferredencoding()</code> returns, which on Windows follows the system code page. On the dev box that was UTF-8. On the server it was GBK. Every <code>open()</code> call without an explicit encoding was a latent bug that only surfaced after the move.</p>
-<p>The fix is mechanical but has to be complete. Every read and write pins its encoding:</p>
-<pre class="codehilite"><code class="language-python">from pathlib import Path
-import json
+<p>This is where the migration nearly failed. The dev box ran Windows 11 with UTF-8 as the default code page. The server ran Windows Server 2016 with GBK (code page 936). The same Python scripts produced different output on each machine.</p>
+<p>The symptoms were subtle. A blog post with a curly apostrophe rendered as <code>â€™</code> on the server. A trading log line with a Chinese instrument name raised <code>UnicodeEncodeError</code> when redirected to a file. A JSON state file written on the dev box loaded fine on the server, but a state file written on the server and read back on the dev box returned mojibake.</p>
+<p>The root cause: Python 3.7+ uses <code>locale.getpreferredencoding()</code> for <code>open()</code> when no encoding is specified, and <code>sys.stdout</code> on Windows uses the console code page unless redirected. On the dev box that was UTF-8. On the server it was GBK. Every unqualified <code>open()</code> and every <code>print()</code> was a latent bug.</p>
+<p>The fix is to pin encoding everywhere. No exceptions.</p>
+<h3 id="pinning-file-io">Pinning file I/O</h3>
+<pre class="codehilite"><code class="language-python">import json
+from pathlib import Path
 
-def read_text(path: Path) -&gt; str:
-    return path.read_text(encoding=&quot;utf-8&quot;)
-
-def write_text(path: Path, text: str) -&gt; None:
-    path.write_text(text, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;)
-
-def load_json(path: Path):
+def read_json(path: Path) -&gt; dict:
     with path.open(&quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
         return json.load(f)
 
-def save_json(path: Path, obj) -&gt; None:
+def write_json(path: Path, data: dict) -&gt; None:
     tmp = path.with_suffix(path.suffix + &quot;.tmp&quot;)
     with tmp.open(&quot;w&quot;, encoding=&quot;utf-8&quot;, newline=&quot;\n&quot;) as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(path)
 </code></pre>
 
-<p>Two things beyond the encoding argument. <code>newline="\n"</code> forces LF line endings regardless of platform, so files written on the server are byte-identical to files written on the dev box. And the atomic write — write to a temp file, then <code>replace</code> — means a crash mid-write can't leave a half-written state file that the next run will choke on.</p>
-<p>We also audited for the places encoding hides. Subprocess calls are a common one:</p>
-<pre class="codehilite"><code class="language-python">import subprocess
+<p>The <code>newline="\n"</code> matters when the same files are read by tools on other platforms. <code>ensure_ascii=False</code> keeps non-ASCII characters readable in the file instead of escaping them, which is fine as long as the encoding is pinned on both ends.</p>
+<h3 id="pinning-stdout">Pinning stdout</h3>
+<p>Redirected stdout on Windows inherits the console code page, which is why logging to a file behaved differently from logging to the terminal. Reconfigure the streams at process start:</p>
+<pre class="codehilite"><code class="language-python">import sys
 
-def run(cmd: list[str]) -&gt; str:
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding=&quot;utf-8&quot;,
-        errors=&quot;replace&quot;,
-        check=True,
-    )
-    return result.stdout
+def force_utf8_streams() -&gt; None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, &quot;reconfigure&quot;):
+            stream.reconfigure(encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;)
+
+force_utf8_streams()
 </code></pre>
 
-<p>Without <code>encoding="utf-8"</code>, <code>text=True</code> decodes the child process's output using the system code page. On the server that meant a GBK decode of UTF-8 bytes, which produced garbage or raised depending on the byte sequence.</p>
-<p>The other hiding place is environment variables and file paths read from config. Anything that crosses the process boundary needs to be treated as bytes until you explicitly decode it.</p>
-<p>Once every read and write pinned its encoding, the two machines behaved identically. The migration didn't fix a bug so much as expose one that had been there the whole time — the dev box's UTF-8 default had been silently covering for it.</p>
-<h2 id="what-the-package-looks-like-now">What the package looks like now</h2>
-<p>The final structure is a self-contained directory with four entry points:</p>
-<ul>
-<li><code>install.bat</code> — creates the venv, installs dependencies, makes directories</li>
-<li><code>register_tasks.ps1</code> — re-registers all scheduled tasks with correct paths</li>
-<li><code>verify.bat</code> — checks every task's action and last result</li>
-<li><code>migrate_exclude.txt</code> — the exclude list for <code>xcopy</code></li>
-</ul>
-<p>The whole migration is three commands on a fresh server: copy with exclusions, run the installer, register the tasks. Then verify. The encoding audit is a one-time fix that lives in the code, not the package, which means it travels with every future copy.</p>
-<p>The lesson generalizes beyond this stack. A migration is an opportunity to find the assumptions you didn't know you'd made — hardcoded paths, implicit encodings, tasks that only work when run from a particular directory. Each one you pin down is a failure mode that can't surprise you next time.</p>
+<p>Call this before any imports that might log at module level. <code>errors="replace"</code> prevents a single bad byte from killing a long-running task; log the replacement character and move on.</p>
+<h3 id="pinning-subprocess-output">Pinning subprocess output</h3>
+<p>Any <code>subprocess.run</code> that captures text inherits the same problem. Pass the encoding explicitly:</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+result = subprocess.run(
+    [&quot;git&quot;, &quot;log&quot;, &quot;-1&quot;, &quot;--format=%s&quot;],
+    capture_output=True,
+    text=True,
+    encoding=&quot;utf-8&quot;,
+    errors=&quot;replace&quot;,
+    check=False,
+)
+</code></pre>
+
+<p>Without <code>encoding="utf-8"</code>, Python decodes the child process output using the locale code page. On the server that meant GBK decoding of UTF-8 bytes, which silently produced garbage in commit messages.</p>
+<h3 id="pinning-the-environment">Pinning the environment</h3>
+<p>For belt and braces, set <code>PYTHONUTF8=1</code> in the task environment. Python 3.7+ honors this and enables UTF-8 mode globally, which makes <code>open()</code> default to UTF-8 and <code>sys.stdout</code> use UTF-8 regardless of the console code page:</p>
+<pre class="codehilite"><code class="language-powershell">$env:PYTHONUTF8 = &quot;1&quot;
+</code></pre>
+
+<p>I set this in the scheduled task definition via the <code>-Environment</code> parameter on <code>New-ScheduledTaskAction</code> where supported, and as a system environment variable on the server otherwise. It does not replace explicit encoding arguments in code, but it catches anything I missed.</p>
+<h2 id="the-verification-bat">The verification bat</h2>
+<p>After install, <code>verify.bat</code> checks every task's action and last run result. This caught two tasks that had been registered with the wrong Python path and one that had never run because its trigger time had already passed on the install day:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal enabledelayedexpansion
+
+set &quot;FAIL=0&quot;
+
+for %%T in (
+    BlogPublish BlogFetch TradeScan TradeExecute
+    TradeReport StateBackup HealthCheck LogRotate DailyDigest
+) do (
+    for /f &quot;delims=&quot; %%A in ('powershell -NoProfile -Command ^
+        &quot;(Get-ScheduledTask -TaskName '%%T').Actions[0].Execute&quot;') do (
+        set &quot;EXEC=%%A&quot;
+    )
+    for /f &quot;delims=&quot; %%R in ('powershell -NoProfile -Command ^
+        &quot;(Get-ScheduledTaskInfo -TaskName '%%T').LastTaskResult&quot;') do (
+        set &quot;RESULT=%%R&quot;
+    )
+
+    echo %%T  exec=!EXEC!  last=!RESULT!
+
+    if &quot;!EXEC!&quot;==&quot;&quot; (
+        echo   MISSING ACTION
+        set &quot;FAIL=1&quot;
+    )
+    if not &quot;!RESULT!&quot;==&quot;0&quot; if not &quot;!RESULT!&quot;==&quot;267009&quot; (
+        echo   NONZERO RESULT
+        set &quot;FAIL=1&quot;
+    )
+)
+
+if &quot;!FAIL!&quot;==&quot;1&quot; (
+    echo Verification failed
+    exit /b 1
+)
+echo All tasks verified
+endlocal
+</code></pre>
+
+<p><code>267009</code> is the "task is currently running" result code, which is not a failure. Any other nonzero <code>LastTaskResult</code> gets flagged. The action check catches the case where a task exists but points at a Python interpreter that was uninstalled or moved.</p>
+<h2 id="what-i-would-do-differently">What I would do differently</h2>
+<p>Two things. First, set <code>PYTHONUTF8=1</code> on both machines before writing any code, not after the first mojibake appears. Second, treat the exclude list as part of the source tree and review it whenever a new runtime directory is added; a stale exclude list is how you accidentally ship a trade record to a new machine.</p>
+<p>The migration itself ran in about ten minutes once the package was built. Building the package took a day, most of it spent on the encoding audit. The scripts were never the problem. The environment was.</p>
 <p>More notes like this ship every week on this site.</p>
 <hr />
 <h2 id="daily-picks">Daily Picks</h2>
 <blockquote>
 <p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
-Data updated: 2026-10-04 10:16:32</p>
+Data updated: 2026-10-06 12:36:33</p>
 </blockquote>
-<h3 id="short">Short</h3>
+<h3 id="long">Long</h3>
 <table>
 <thead>
 <tr>
@@ -282,16 +279,24 @@ Data updated: 2026-10-04 10:16:32</p>
 </thead>
 <tbody>
 <tr>
-<td>ENJ</td>
-<td>弱做空</td>
-<td>$0.0329</td>
-<td>$0.0315</td>
-<td>$0.034</td>
-<td>1:1.2</td>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
 </tr>
 </tbody>
 </table>
-<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">migration</span><span class="tag-badge">xcopy</span><span class="tag-badge">checklist</span><span class="tag-badge">Windows Server</span><span class="tag-badge">automation</span></div>
             <div class="post-footer">
