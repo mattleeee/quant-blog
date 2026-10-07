@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console ...">
+        <meta name="description" content="The Problem: Black Windows Every Hour A monitoring server had nine scheduled tasks, each firing hourly....">
     <meta name="keywords" content="wscript,VBS,silent task,Task Scheduler,PowerShell">
     <meta property="og:title" content="Running Scheduled Tasks Silently: The VBS Wrapper Pattern">
-    <meta property="og:description" content="Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console ...">
+    <meta property="og:description" content="The Problem: Black Windows Every Hour A monitoring server had nine scheduled tasks, each firing hourly....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/2.html">
@@ -33,168 +33,195 @@
         <article class="post">
             <h1>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</h1>
             <div class="post-meta">
-                <span class="date">2026-10-02</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black <code>cmd.exe</code> window on a console session that stays logged in all day. Nobody was watching that screen, but everyone saw the flicker. The tasks themselves worked fine. The problem was purely cosmetic, which is exactly the kind of problem that gets ignored until someone demos the machine to a client.</p>
-<p>Here is the diagnosis, the fix that failed, the fix that worked, and the wrapper pattern I now use for every scheduled batch job on a machine with an interactive session.</p>
-<h2 id="the-problem-with-cmdexe-as-a-task-action">The Problem With <code>cmd.exe</code> as a Task Action</h2>
-<p>When Task Scheduler launches an action, it does not magically detach the process from the desktop. If the task runs in the context of a logged-in user, and the action is <code>cmd.exe /c something.bat</code>, you get a console window. It appears, runs for however long the batch takes, and disappears. For a task that fires every hour and takes two seconds, that is a flicker every hour.</p>
-<p>The "Run whether user is logged on or not" option hides the window, but it also changes the security context: the task runs in a non-interactive session, mapped drives and user profile paths can behave differently, and anything that touches the interactive desktop breaks. On a server that is deliberately left logged in so that GUI automation and file shares work, switching to non-interactive mode is not an option.</p>
-<p>So the requirement is narrow: keep the task running as the logged-in user, in the interactive session, but do not show a console window.</p>
-<h2 id="why-schtasks-change-failed">Why <code>schtasks /change</code> Failed</h2>
-<p>My first instinct was to script the change with <code>schtasks.exe</code>. The plan: for each task, swap the action from <code>cmd.exe /c target.bat</code> to something windowless.</p>
-<p>That plan died immediately:</p>
+<p>A monitoring server had nine scheduled tasks, each firing hourly. The machine stays logged in permanently—it runs a dashboard that needs an interactive session. That detail matters, because it meant every task launched a console window on the desktop. Nine tasks, hourly, each flashing a black CMD rectangle over whatever was on screen. Unacceptable for a machine someone actually looks at.</p>
+<p>The tasks did real work: pulling metrics, rotating logs, syncing a couple of directories. They were created over time by different tools—some by hand with <code>schtasks</code>, some by a third-party installer, one by an old deployment script. That mix turned out to be the source of the second problem.</p>
+<h2 id="diagnosis-why-schtasks-change-failed">Diagnosis: Why <code>schtasks /change</code> Failed</h2>
+<p>The obvious fix is to flip each task to run whether the user is logged on or not, which suppresses the window:</p>
+<pre class="codehilite"><code>schtasks /change /tn &quot;\Metrics\HourlyPull&quot; /ru &quot;SYSTEM&quot;
+</code></pre>
+
+<p>That failed with a parameter error:</p>
 <pre class="codehilite"><code>ERROR: The parameter is incorrect.
 </code></pre>
 
-<p>No task name, no detail. <code>E_INVALIDARG</code> in disguise. The tasks in question were not created by <code>schtasks</code> — they were created by an installer and by a third-party scheduler that writes directly through the Task Scheduler COM API. Those tasks carry XML with elements and attributes that <code>schtasks.exe</code>'s command-line parser does not round-trip. When you ask <code>schtasks /change</code> to modify such a task, it tries to re-serialize the task definition from its own limited parameter set, hits a field it does not understand, and returns a generic parameter error.</p>
-<p>This is a known asymmetry: <code>schtasks</code> is a thin front end over the same COM API, but with a lossy parser in between. If the task definition is even slightly non-standard, the front end chokes.</p>
-<h2 id="powershell-set-scheduledtask-walks-the-same-api-without-the-parser">PowerShell <code>Set-ScheduledTask</code> Walks the Same API Without the Parser</h2>
-<p>The fix is to skip the command-line layer and talk to COM through the <code>ScheduledTasks</code> PowerShell module. <code>Set-ScheduledTask</code> and <code>New-ScheduledTaskAction</code> do not parse a command line — they construct and modify the task object directly, so non-standard XML survives.</p>
-<p>First, inspect what a task actually contains:</p>
-<pre class="codehilite"><code class="language-powershell">$task = Get-ScheduledTask -TaskName 'NightlySync'
-$task.Actions | Format-List *
+<p>No further detail. The task existed, the name was right, the quoting was right. I checked the XML with <code>schtasks /query /tn "\Metrics\HourlyPull" /xml</code> and the task definition looked normal. The failure was not in my command.</p>
+<p>The real cause is in how <code>schtasks.exe</code> is built. It is a thin command-line parser sitting on top of the Task Scheduler COM API (the <code>ITaskService</code> interface family). When you run <code>/change</code>, it reads the existing task, mutates a few properties, and writes it back. Tasks created by other tools—installers, deployment frameworks, anything that talks to the COM API directly—often carry property combinations that the <code>schtasks</code> parser does not expect. In this case, the offending task had a principal block with a logon type the CLI did not know how to round-trip. The COM call inside returned <code>E_INVALIDARG</code>, and <code>schtasks.exe</code> surfaced it as the generic "parameter is incorrect."</p>
+<p>The lesson: when a task was not created by <code>schtasks</code>, do not try to fix it with <code>schtasks</code>. Go to the same API layer the creating tool used.</p>
+<h3 id="powershell-reaches-the-same-api-without-the-parser">PowerShell Reaches the Same API Without the Parser</h3>
+<p><code>Set-ScheduledTask</code> and <code>Get-ScheduledTask</code> are PowerShell cmdlets that wrap the identical COM interface. They do not re-parse a command line, so they do not choke on properties the CLI does not understand. The same mutation that failed above worked immediately:</p>
+<pre class="codehilite"><code class="language-powershell">$t = Get-ScheduledTask -TaskName &quot;HourlyPull&quot; -TaskPath &quot;\Metrics\&quot;
+$t.Principal.LogonType = &quot;S4U&quot;
+$t.Principal.RunLevel = &quot;Highest&quot;
+Set-ScheduledTask -InputObject $t
 </code></pre>
 
-<p>You will see <code>Execute</code>, <code>Arguments</code>, <code>WorkingDirectory</code>. The action is the thing to replace. Building a new one and assigning it is a two-step operation:</p>
-<pre class="codehilite"><code class="language-powershell">$action = New-ScheduledTaskAction `
-    -Execute 'wscript.exe' `
-    -Argument '&quot;C:\Tools\silent_runner.vbs&quot; &quot;C:\Jobs\NightlySync.bat&quot;' `
-    -WorkingDirectory 'C:\Jobs'
-
-Set-ScheduledTask -TaskName 'NightlySync' -Action $action
+<p><code>S4U</code> (service-for-user) runs the task without storing a password and without an interactive session, which is exactly the behavior needed to suppress the console window. <code>Highest</code> avoids the elevation prompt path.</p>
+<p>But this only solved part of the problem. Switching every task to <code>S4U</code> changes the security context, and a couple of the tasks depended on the interactive user's mapped drives and environment. Rewriting all nine tasks was more invasive than necessary. There is a lighter, more surgical pattern.</p>
+<h2 id="the-vbs-wrapper-pattern">The VBS Wrapper Pattern</h2>
+<p>The window appears because the task action is <code>cmd.exe</code> or <code>powershell.exe</code>, and those are console applications. When Task Scheduler launches a console application in an interactive session, Windows creates a console window. You can suppress that at the launch site rather than by changing the task principal.</p>
+<p>The launch site is <code>wscript.exe</code>. It is a GUI-subsystem host: it has no console of its own. When it starts a child process, it can ask the shell to run that child with a hidden window. That is the entire trick.</p>
+<h3 id="the-two-line-runner">The Two-Line Runner</h3>
+<p>Create <code>silent_runner.vbs</code>:</p>
+<pre class="codehilite"><code class="language-vbscript">Set sh = CreateObject(&quot;WScript.Shell&quot;)
+sh.Run &quot;cmd /c &quot;&quot;&quot; &amp; WScript.Arguments(0) &amp; &quot;&quot;&quot;&quot;, 0, False
 </code></pre>
 
-<p>No parameter error, because nothing is being parsed from a string that has to match a schema. The task object is updated in place, and the installer's custom XML fields are left alone.</p>
-<p>One caveat: <code>Set-ScheduledTask</code> requires elevation, and it will preserve the existing principal (run-as user, logon type) unless you pass <code>-User</code> and <code>-Password</code>, which I deliberately do not. Preserving the principal is the whole point here — the tasks must keep running as the interactive user.</p>
-<h2 id="the-two-line-vbs-wrapper">The Two-Line VBS Wrapper</h2>
-<p>Now the silent part. The oldest trick that still works on every Windows version from XP to 11 is <code>WScript.Shell.Run</code> with a window style of <code>0</code>:</p>
-<pre class="codehilite"><code class="language-vbscript">Set WshShell = CreateObject(&quot;WScript.Shell&quot;)
-WshShell.Run &quot;cmd /c &quot;&quot;&quot; &amp; WScript.Arguments(0) &amp; &quot;&quot;&quot;&quot;, 0, False
-</code></pre>
-
-<p>Save that as <code>C:\Tools\silent_runner.vbs</code>. That is the entire file — two lines.</p>
-<p>Breaking it down:</p>
+<p>Line by line:</p>
 <ul>
-<li><code>WScript.Arguments(0)</code> is the path to the batch file, passed by the task action.</li>
-<li>The string is assembled as <code>cmd /c "C:\Jobs\NightlySync.bat"</code>. The doubled quotes inside a VBScript string literal produce literal quote characters, so paths with spaces survive.</li>
-<li>The third argument to <code>Run</code> is the window style: <code>0</code> means hidden. The window is created but never shown.</li>
-<li>The fourth argument is <code>bWaitOnReturn</code>: <code>False</code>. <code>wscript.exe</code> launches <code>cmd.exe</code> and exits immediately, so the wrapper does not linger. Task Scheduler's own "stop the task if it runs longer than" logic still applies to the wrapper process, and the batch keeps running independently — worth knowing if you rely on Task Scheduler to kill hung jobs.</li>
+<li><code>CreateObject("WScript.Shell")</code> gives us the shell automation object.</li>
+<li><code>sh.Run</code> takes three arguments: the command line, the window style, and whether to wait.</li>
+<li>Window style <code>0</code> means hidden. This is the parameter that kills the black rectangle.</li>
+<li><code>False</code> means do not wait for the child to exit. The task returns immediately; the actual work runs detached.</li>
 </ul>
-<p><code>wscript.exe</code> is a GUI-subsystem host, so it never allocates a console in the first place. There is no window to hide because none is ever created for the host process itself; the <code>0</code> style suppresses the child console.</p>
-<h3 id="why-not-powershellexe-windowstyle-hidden">Why Not <code>powershell.exe -WindowStyle Hidden</code>?</h3>
-<p>You can, and for one-off jobs it is fine. But <code>-WindowStyle Hidden</code> on <code>powershell.exe</code> still allocates a console and then hides it, which produces a visible flash on some systems before the hide takes effect. It also drags a full PowerShell startup (profile loading, module autoloading) into every hourly run. The VBS wrapper starts in a few milliseconds and has no runtime dependencies. For nine hourly tasks on a busy server, that difference adds up.</p>
-<p>If you prefer to stay in PowerShell for the wrapper, <code>Start-Process -WindowStyle Hidden</code> from a <code>wscript</code>-hosted script is the equivalent, but at that point you have added a layer for no gain.</p>
-<h2 id="updating-all-nine-tasks-in-one-loop">Updating All Nine Tasks in One Loop</h2>
-<p>Read the task list from a mapping, rebuild each action, and set it. The loop is the same whether you have three tasks or thirty:</p>
-<pre class="codehilite"><code class="language-powershell">$jobs = @(
-    @{ Name = 'NightlySync';   Bat = 'C:\Jobs\NightlySync.bat' },
-    @{ Name = 'HourlyExport';  Bat = 'C:\Jobs\HourlyExport.bat' },
-    @{ Name = 'CacheWarm';     Bat = 'C:\Jobs\CacheWarm.bat' }
-    # ... the remaining six
-)
+<p>The command line is <code>cmd /c "target.bat"</code>. The double quotes inside the VBS string are escaped by doubling them, so the final command is <code>cmd /c "&lt;path to bat&gt;"</code>. The <code>cmd /c</code> wrapper is there so the batch file runs in a proper command interpreter with its own environment, and exits when done.</p>
+<p>Two lines, no dependencies, works on every Windows version since XP.</p>
+<h3 id="wiring-it-into-task-scheduler">Wiring It Into Task Scheduler</h3>
+<p>Each task action changes from:</p>
+<pre class="codehilite"><code>Program:   C:\Scripts\metrics_pull.bat
+Arguments: (none)
+</code></pre>
 
-$vbs = 'C:\Tools\silent_runner.vbs'
+<p>to:</p>
+<pre class="codehilite"><code>Program:   wscript.exe
+Arguments: &quot;C:\Scripts\silent_runner.vbs&quot; &quot;C:\Scripts\metrics_pull.bat&quot;
+</code></pre>
 
-foreach ($job in $jobs) {
-    $action = New-ScheduledTaskAction `
-        -Execute 'wscript.exe' `
-        -Argument ('&quot;{0}&quot; &quot;{1}&quot;' -f $vbs, $job.Bat) `
-        -WorkingDirectory (Split-Path $job.Bat)
+<p>That is the whole change. The task still runs as the same user, in the same session, with the same environment. Only the window is gone.</p>
+<h3 id="the-powershell-loop">The PowerShell Loop</h3>
+<p>Nine tasks, done in one pass. This script rewrites the action of every task under a given path:</p>
+<pre class="codehilite"><code class="language-powershell">$runner = &quot;C:\Scripts\silent_runner.vbs&quot;
+$path   = &quot;\Metrics\&quot;
 
-    Set-ScheduledTask -TaskName $job.Name -Action $action | Out-Null
-    Write-Host (&quot;Updated {0}&quot; -f $job.Name)
+Get-ScheduledTask -TaskPath $path | ForEach-Object {
+    $task = $_
+    foreach ($action in $task.Actions) {
+        # Only rewrite actions that launch a console host directly.
+        if ($action.Execute -match '^(cmd|powershell|pwsh)(\.exe)?$') {
+            $target = $action.Arguments
+            if ($target -match '^/c\s+(.+)$') { $target = $matches[1].Trim('&quot;') }
+
+            $action.Execute   = &quot;wscript.exe&quot;
+            $action.Arguments = &quot;`&quot;$runner`&quot; `&quot;$target`&quot;&quot;
+        }
+    }
+    Set-ScheduledTask -InputObject $task | Out-Null
+    Write-Host &quot;Rewrote $($task.TaskName)&quot;
 }
 </code></pre>
 
-<p>Run this once from an elevated PowerShell session. If you want to be careful, dry-run it first by printing <code>$action.Arguments</code> instead of calling <code>Set-ScheduledTask</code>.</p>
-<p>Two details worth keeping:</p>
-<ol>
-<li><code>-WorkingDirectory</code> should match what the batch file expects. Many batch scripts assume they start in their own folder; Task Scheduler's default is <code>C:\Windows\System32</code>, which is why so many scheduled jobs fail with "file not found" on a relative path.</li>
-<li>The <code>-Argument</code> string is passed verbatim to <code>wscript.exe</code>. Keep the quoting exactly as shown — VBScript's argument parser splits on spaces, so both paths need quotes.</li>
-</ol>
-<h2 id="verifying-the-fix">Verifying the Fix</h2>
-<p>Verification has three layers, and I check all three because Task Scheduler will happily report success while nothing runs.</p>
-<h3 id="1-confirm-the-action-was-rewritten">1. Confirm the action was rewritten</h3>
-<pre class="codehilite"><code class="language-powershell">Get-ScheduledTask -TaskName 'NightlySync' |
-    Select-Object -ExpandProperty Actions |
-    Format-List Execute, Arguments, WorkingDirectory
+<p>A few things worth noting:</p>
+<ul>
+<li><code>Get-ScheduledTask -TaskPath</code> returns the task objects, and <code>Set-ScheduledTask -InputObject</code> writes them back through the COM API. No CLI parsing, no <code>E_INVALIDARG</code>.</li>
+<li>The <code>Execute</code> check is a guard. If a task already runs a non-console program, leave it alone.</li>
+<li>The regex <code>^/c\s+(.+)$</code> strips a leading <code>/c</code> from the arguments, which is how <code>schtasks</code> stores a <code>cmd /c</code> invocation. If the arguments are empty, <code>$target</code> stays empty and the rewrite is skipped by the guard—handle that case if your tasks vary.</li>
+<li><code>Out-Null</code> keeps the pipeline quiet; <code>Set-ScheduledTask</code> returns the updated task object otherwise.</li>
+</ul>
+<p>If you want to be more conservative, add a <code>-WhatIf</code> style dry run first by printing <code>$action.Execute</code> and <code>$action.Arguments</code> before mutating.</p>
+<h2 id="verification">Verification</h2>
+<p>Two checks, both fast.</p>
+<p>First, confirm the task definition changed:</p>
+<pre class="codehilite"><code class="language-powershell">(Get-ScheduledTask -TaskName &quot;HourlyPull&quot; -TaskPath &quot;\Metrics\&quot;).Actions |
+    Format-List Execute, Arguments
 </code></pre>
 
-<p>You should see <code>wscript.exe</code> and the VBS path. If you still see <code>cmd.exe</code>, the <code>Set-ScheduledTask</code> call silently failed — check that you ran elevated.</p>
-<h3 id="2-run-the-task-on-demand-and-watch-the-session">2. Run the task on demand and watch the session</h3>
-<pre class="codehilite"><code class="language-powershell">Start-ScheduledTask -TaskName 'NightlySync'
+<p>Expected output:</p>
+<pre class="codehilite"><code>Execute   : wscript.exe
+Arguments : &quot;C:\Scripts\silent_runner.vbs&quot; &quot;C:\Scripts\metrics_pull.bat&quot;
 </code></pre>
 
-<p>Then watch the interactive desktop. There should be no window at all. This is the actual acceptance test; nothing else proves the fix.</p>
-<h3 id="3-confirm-the-job-actually-did-its-work">3. Confirm the job actually did its work</h3>
-<p>A hidden window is useless if the batch never ran. Check the side effect: a log file the batch writes, a timestamp it touches, or the Task Scheduler history.</p>
-<pre class="codehilite"><code class="language-powershell">Get-ScheduledTaskInfo -TaskName 'NightlySync' |
-    Select-Object LastRunTime, LastTaskResult, NextRunTime
+<p>Second, confirm the behavior. Run the task on demand and watch the desktop:</p>
+<pre class="codehilite"><code class="language-powershell">Start-ScheduledTask -TaskName &quot;HourlyPull&quot; -TaskPath &quot;\Metrics\&quot;
 </code></pre>
 
-<p><code>LastTaskResult</code> of <code>0</code> means the wrapper exited cleanly. It does <strong>not</strong> mean the batch succeeded — <code>wscript.exe</code> exits as soon as it launches <code>cmd.exe</code>, so the result code is the wrapper's, not the batch's. If you need the batch's exit code to propagate, set <code>bWaitOnReturn</code> to <code>True</code> in the VBS and accept that the wrapper process lives as long as the job:</p>
-<pre class="codehilite"><code class="language-vbscript">WshShell.Run &quot;cmd /c &quot;&quot;&quot; &amp; WScript.Arguments(0) &amp; &quot;&quot;&quot;&quot;, 0, True
+<p>No window should appear. Then check that the work actually happened—the log file, the output directory, whatever the batch file produces. A hidden window that fails silently is worse than a visible one, so verify the side effects, not just the absence of the window.</p>
+<p>If the task still flashes a window, the usual cause is that <code>wscript.exe</code> is not the actual launcher. Some tasks are configured with an "action" that is a script host already, or a task created by a tool that wraps the action in its own launcher. Query the raw XML to see what is really stored:</p>
+<pre class="codehilite"><code class="language-powershell">Export-ScheduledTask -TaskName &quot;HourlyPull&quot; -TaskPath &quot;\Metrics\&quot;
 </code></pre>
 
-<p>The tradeoff is real: with <code>True</code>, Task Scheduler's "stop if runs longer than" setting can actually kill the job, and the task's last result reflects the batch. With <code>False</code>, the task always reports success and you must rely on the batch's own logging. For hourly background jobs I use <code>False</code> and have each batch append to a log file; for jobs where failure must page someone, I use <code>True</code>.</p>
-<h2 id="a-python-alternative-for-the-wrapper">A Python Alternative for the Wrapper</h2>
-<p>If the machine has Python on it and you would rather not ship a <code>.vbs</code>, the same hidden-launch behavior is available through <code>subprocess</code> with the right creation flags. This is useful when the wrapper itself needs logic — argument validation, logging, retry — that VBScript is bad at.</p>
+<p>Look at the <code>&lt;Exec&gt;</code> block. If <code>&lt;Command&gt;</code> is not <code>wscript.exe</code>, the rewrite did not take.</p>
+<h2 id="when-this-pattern-is-the-right-choice">When This Pattern Is the Right Choice</h2>
+<p>The VBS wrapper is not the only way to hide a task window. The alternatives and their trade-offs:</p>
+<ul>
+<li><strong>Run as <code>S4U</code> or <code>SYSTEM</code></strong>: suppresses the window because there is no interactive session, but changes the security context. Breaks tasks that depend on mapped drives, user environment variables, or interactive credentials.</li>
+<li><strong>Use <code>pythonw.exe</code> instead of <code>python.exe</code></strong>: works if your task is a Python script, but not if it is a batch file or a PowerShell script. Also changes how stdout and stderr behave.</li>
+<li><strong>Set the task to "Run whether user is logged on or not"</strong>: same security-context change as <code>S4U</code>.</li>
+<li><strong>The VBS wrapper</strong>: keeps the same user, same session, same environment, same stdout/stderr behavior. Only the window is hidden. This is the least invasive option, which is why it was the right one here.</li>
+</ul>
+<p>The pattern generalizes. Any time you need to launch a console process without a console window—from Task Scheduler, from a startup script, from another automation tool—<code>wscript.exe</code> plus a two-line VBS is the smallest possible shim. It has no runtime dependency, no installation, and it survives Windows updates because it uses an API that has been stable for two decades.</p>
+<h2 id="adapting-it-to-python">Adapting It to Python</h2>
+<p>If you prefer to keep everything in Python, you can generate the VBS and the task definitions from a script. This is useful when you have many tasks to convert or when the task list changes:</p>
 <pre class="codehilite"><code class="language-python">import subprocess
-import sys
 from pathlib import Path
 
-def run_hidden(bat_path: str) -&gt; int:
-    &quot;&quot;&quot;Launch a .bat with no console window and return its exit code.&quot;&quot;&quot;
-    bat = Path(bat_path)
-    if not bat.is_file():
-        raise FileNotFoundError(bat)
+RUNNER = Path(r&quot;C:\Scripts\silent_runner.vbs&quot;)
+RUNNER.write_text(
+    'Set sh = CreateObject(&quot;WScript.Shell&quot;)\n'
+    'sh.Run &quot;cmd /c &quot;&quot;&quot; &amp; WScript.Arguments(0) &amp; &quot;&quot;&quot;&quot;, 0, False\n',
+    encoding=&quot;ascii&quot;,
+)
 
-    # CREATE_NO_WINDOW suppresses the console for the child process.
-    # CREATE_NEW_PROCESS_GROUP keeps Ctrl+C from reaching the parent.
-    flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
-
-    proc = subprocess.run(
-        [&quot;cmd.exe&quot;, &quot;/c&quot;, str(bat)],
-        creationflags=flags,
-        cwd=str(bat.parent),
-        capture_output=True,
-        text=True,
+def rewrite_task(task_name: str, task_path: str, target_bat: str) -&gt; None:
+    &quot;&quot;&quot;Point an existing task at the silent runner.&quot;&quot;&quot;
+    ps = (
+        f&quot;$a = (Get-ScheduledTask -TaskName '{task_name}' &quot;
+        f&quot;-TaskPath '{task_path}').Actions[0]; &quot;
+        f&quot;$a.Execute = 'wscript.exe'; &quot;
+        f&quot;$a.Arguments = '\&quot;{RUNNER}\&quot; \&quot;{target_bat}\&quot;'; &quot;
+        f&quot;Set-ScheduledTask -TaskName '{task_name}' -TaskPath '{task_path}' &quot;
+        f&quot;-Action $a | Out-Null&quot;
     )
+    subprocess.run([&quot;powershell&quot;, &quot;-NoProfile&quot;, &quot;-Command&quot;, ps], check=True)
 
-    if proc.returncode != 0:
-        # Batch output is the only diagnostic we get; keep it.
-        print(proc.stdout, file=sys.stderr)
-        print(proc.stderr, file=sys.stderr)
-
-    return proc.returncode
-
-
-if __name__ == &quot;__main__&quot;:
-    sys.exit(run_hidden(sys.argv[1]))
+for name in (&quot;HourlyPull&quot;, &quot;HourlyRotate&quot;, &quot;HourlySync&quot;):
+    rewrite_task(name, r&quot;\Metrics\\&quot;, rf&quot;C:\Scripts\{name}.bat&quot;)
 </code></pre>
 
-<p>Save as <code>silent_runner.py</code> and point the task action at <code>pythonw.exe</code> instead of <code>python.exe</code>. <code>pythonw</code> is the windowless interpreter — it has no console subsystem — so combined with <code>CREATE_NO_WINDOW</code> there is nothing to flash even for an instant. The task action becomes:</p>
-<pre class="codehilite"><code>pythonw.exe &quot;C:\Tools\silent_runner.py&quot; &quot;C:\Jobs\NightlySync.bat&quot;
-</code></pre>
-
-<p>The advantage over VBS is that you get a real exit code, real error handling, and the ability to log a structured line per run. The disadvantage is a Python dependency. On servers where Python is already part of the stack, this is the version I write; on locked-down boxes where only the OS ships, the two-line VBS is unbeatable.</p>
-<h2 id="the-pattern-generalized">The Pattern, Generalized</h2>
-<p>The wrapper pattern is not really about VBS or Python. It is about inserting a windowless host between Task Scheduler and the thing you actually want to run:</p>
-<pre class="codehilite"><code>Task Scheduler action  -&gt;  wscript.exe / pythonw.exe  -&gt;  cmd /c target.bat
-   (no window)                (no console)                  (hidden child)
-</code></pre>
-
-<p>Three rules make it hold up:</p>
-<ol>
-<li>Never let <code>cmd.exe</code> be the direct task action on an interactive session.</li>
-<li>Put the target path in the task's <code>Arguments</code>, not hardcoded in the wrapper, so one wrapper serves every job.</li>
-<li>Decide deliberately whether the wrapper waits for the child, because that choice determines whether Task Scheduler can time out the job and whether the task result means anything.</li>
-</ol>
-<p>The <code>schtasks /change</code> failure is the other half of the lesson: when a CLI front end refuses to touch a task definition, the COM API underneath it usually will. PowerShell's <code>ScheduledTasks</code> module is that API with a usable surface, and it does not care that an installer wrote the task instead of you.</p>
+<p>The Python layer is just orchestration. The actual suppression still happens in the VBS, because that is the only place the window style can be set.</p>
+<h2 id="summary">Summary</h2>
+<p>The failure mode was specific: <code>schtasks /change</code> returned a generic parameter error on tasks created by other tools, because the CLI's parser could not round-trip properties the COM API produced. The fix was to stop using the CLI and use PowerShell's <code>Set-ScheduledTask</code>, which reaches the same API without the parsing layer. The window suppression was a separate concern, solved by routing each task action through <code>wscript.exe</code> and a two-line VBS that runs the real command with window style <code>0</code>. Nine tasks, one loop, no more black rectangles.</p>
 <p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-06 12:36:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">wscript</span><span class="tag-badge">VBS</span><span class="tag-badge">silent task</span><span class="tag-badge">Task Scheduler</span><span class="tag-badge">PowerShell</span></div>
             <div class="post-footer">
