@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Taming BLAS Threads in Scheduled Python Jobs - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Scheduled Python jobs and BLAS threading are a bad combination by default....">
+        <meta name="description" content="Scheduled Python jobs on a shared box have a nasty habit of fighting each other....">
     <meta name="keywords" content="OPENBLAS,MKL,OMP_NUM_THREADS,thread contention,numpy">
     <meta property="og:title" content="Taming BLAS Threads in Scheduled Python Jobs">
-    <meta property="og:description" content="Scheduled Python jobs and BLAS threading are a bad combination by default....">
+    <meta property="og:description" content="Scheduled Python jobs on a shared box have a nasty habit of fighting each other....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/8.html">
@@ -33,47 +33,76 @@
         <article class="post">
             <h1>Taming BLAS Threads in Scheduled Python Jobs</h1>
             <div class="post-meta">
-                <span class="date">2026-10-05</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>Scheduled Python jobs and BLAS threading are a bad combination by default. A single <code>numpy.dot</code> on a 4-core box will happily spin up four threads. Run three of those jobs at the same time via Task Scheduler, and you have twelve threads fighting over four cores. Context switches climb, cache lines bounce between cores, and total throughput drops — sometimes below the single-threaded case. The fix is usually boring: pin BLAS to one thread per process and let the scheduler handle parallelism across jobs.</p>
-<h2 id="what-the-environment-variables-actually-control">What the environment variables actually control</h2>
-<p>NumPy itself doesn't do the math. It delegates to a BLAS/LAPACK backend — typically OpenBLAS (bundled with many wheels), MKL (Intel's, common in conda and <code>mkl</code>-enabled wheels), or the reference BLAS. Each backend runs its own thread pool, and each pool is configured independently.</p>
+<p>Scheduled Python jobs on a shared box have a nasty habit of fighting each other. You write a script that runs in four seconds on your laptop, deploy it to a Windows Server with eight cores, and now it takes forty — but only when the nightly batch is also running. The culprit is usually not your code. It is the BLAS thread pool underneath numpy.</p>
+<h2 id="what-actually-spawns-threads">What Actually Spawns Threads</h2>
+<p>When you <code>import numpy</code>, the wheel you installed is linked against a BLAS implementation: OpenBLAS for the standard <code>numpy</code> wheels on PyPI, MKL for <code>numpy</code> built against Intel's math library (common with conda, or <code>pip install mkl</code> setups). Both ship multithreaded kernels for <code>dgemm</code>, <code>sgemm</code>, and friends. By default they read the machine's core count and spin up a pool of that size.</p>
+<p>So <code>import numpy</code> on an 8-core server means eight OpenBLAS worker threads, plus the OpenMP runtime underneath, plus whatever your own <code>concurrent.futures</code> pool does. Matrix multiply is fast. Everything else pays for it.</p>
+<p>The problem shows up when jobs overlap. Suppose Task Scheduler fires three jobs at 02:00:</p>
 <ul>
-<li><code>OPENBLAS_NUM_THREADS</code> — thread count for OpenBLAS. Historically <code>OPENBLAS_NUM_THREADS</code> replaced the older <code>OMP_NUM_THREADS</code> path; on modern OpenBLAS builds it's the authoritative knob.</li>
-<li><code>MKL_NUM_THREADS</code> — thread count for Intel MKL. MKL also reads <code>MKL_DOMAIN_NUM_THREADS</code> for per-domain tuning, but for a single job <code>MKL_NUM_THREADS</code> is enough.</li>
-<li><code>OMP_NUM_THREADS</code> — the OpenMP runtime thread count. Backends that use OpenMP internally (some MKL builds, some OpenBLAS builds) fall back to this. It also affects other OpenMP consumers in your process, e.g. <code>scikit-learn</code>'s parallel loops or <code>numba</code>.</li>
+<li>Job A does a rolling regression over 200k rows.</li>
+<li>Job B builds a covariance matrix.</li>
+<li>Job C just reads a CSV with pandas and writes a parquet file.</li>
 </ul>
-<p>There's also <code>NUMEXPR_NUM_THREADS</code> for the <code>numexpr</code> engine used by pandas for some evaluation paths, and <code>VECLIB_MAXIMUM_THREADS</code> on macOS Accelerate. On Linux the equivalent is <code>OPENBLAS_NUM_THREADS</code> plus, for some builds, <code>GOTO_NUM_THREADS</code>. If you're on Windows and shipping wheels from PyPI, you almost always have OpenBLAS unless you installed via conda with MKL.</p>
-<p>The key point: these are read at library initialization time. Set them after <code>import numpy</code> and you're too late — the pool is already sized.</p>
-<h2 id="where-to-set-them">Where to set them</h2>
-<p>There are two sane places, and one that quietly fails.</p>
-<h3 id="option-1-the-launcher-bat-task-scheduler-action">Option 1: the launcher (.bat / Task Scheduler action)</h3>
-<p>If your jobs are launched by a <code>.bat</code> file or directly from Task Scheduler, set the variables there. This is the cleanest option because it covers every process the job spawns, including subprocesses and any child Python interpreters.</p>
+<p>Each one imports numpy, each one gets eight BLAS threads. That is 24 threads on 8 cores. The OS context-switches between them, cache lines bounce between cores, and the memory allocator thrashes. Job C, which does almost no math, is now slow because it is competing for scheduler time with two BLAS pools it never asked for.</p>
+<p>The fix is boring and effective: pin every job to one BLAS thread and let the OS schedule your <em>jobs</em> in parallel instead of your <em>math kernels</em>.</p>
+<h2 id="the-three-variables">The Three Variables</h2>
+<h3 id="openblas_num_threads">OPENBLAS_NUM_THREADS</h3>
+<p>Read by OpenBLAS at initialization. Controls the size of its internal thread pool. This is the one that matters for stock PyPI numpy wheels.</p>
+<h3 id="mkl_num_threads">MKL_NUM_THREADS</h3>
+<p>The equivalent knob for Intel MKL. If your numpy is MKL-linked, this is the one that counts. MKL also honors <code>MKL_DYNAMIC</code> and <code>MKL_THREADING_LAYER</code>, but for our purposes <code>MKL_NUM_THREADS=1</code> is enough.</p>
+<h3 id="omp_num_threads">OMP_NUM_THREADS</h3>
+<p>Read by the OpenMP runtime. Both OpenBLAS and MKL can use OpenMP as their threading backend, and so can other libraries (scikit-learn, some pandas paths, PyTorch). Setting this catches the cases where the BLAS-specific variable is ignored because the library was built with OpenMP threading.</p>
+<p>Set all three. The cost of setting one that is unused is zero; the cost of missing the one that matters is a mystery slowdown you will spend an afternoon debugging.</p>
+<p>There is also <code>NUMEXPR_NUM_THREADS</code> for <code>numexpr</code>, which pandas uses for some <code>eval</code> paths, and <code>VECLIB_MAXIMUM_THREADS</code> on macOS. On Windows servers the first three cover the realistic cases.</p>
+<h2 id="where-to-set-them">Where to Set Them</h2>
+<p>Two places, and they are not equivalent.</p>
+<h3 id="in-the-launcher">In the launcher</h3>
+<p>The safest place is the process environment before Python starts. In a <code>.bat</code> file:</p>
 <pre class="codehilite"><code class="language-bat">@echo off
-REM run_daily.bat
 set OPENBLAS_NUM_THREADS=1
 set MKL_NUM_THREADS=1
 set OMP_NUM_THREADS=1
 set NUMEXPR_NUM_THREADS=1
-
-cd /d C:\jobs\daily
-C:\Python311\python.exe -m daily.run &gt;&gt; C:\jobs\logs\daily.log 2&gt;&amp;1
+&quot;C:\Python311\python.exe&quot; &quot;D:\jobs\build_features.py&quot; &gt;&gt; &quot;D:\logs\build_features.log&quot; 2&gt;&amp;1
 </code></pre>
 
-<p>If you're registering the task from the command line, pass the batch file as the action:</p>
-<pre class="codehilite"><code class="language-bat">schtasks /Create /TN &quot;daily-run&quot; /TR &quot;C:\jobs\run_daily.bat&quot; ^
-  /SC DAILY /ST 06:00 /RU SYSTEM
+<p>This is the version I use in Task Scheduler actions. The variables are set before <code>python.exe</code> is even loaded, so every library that reads them at import time gets the right value. No ordering concerns, no surprises.</p>
+<p>If you drive jobs from PowerShell instead:</p>
+<pre class="codehilite"><code class="language-powershell">$env:OPENBLAS_NUM_THREADS = &quot;1&quot;
+$env:MKL_NUM_THREADS      = &quot;1&quot;
+$env:OMP_NUM_THREADS      = &quot;1&quot;
+&amp; &quot;C:\Python311\python.exe&quot; &quot;D:\jobs\build_features.py&quot;
 </code></pre>
 
-<p><code>/RU SYSTEM</code> runs without a logged-in user, which is what you want for a server. The environment block for the task is inherited from the system context, and your <code>set</code> lines override it.</p>
-<h3 id="option-2-osenviron-before-importing-numpy">Option 2: <code>os.environ</code> before importing numpy</h3>
-<p>When you can't control the launcher — say the job is invoked by a third-party scheduler or a service that calls <code>python -c</code> — set the variables at the very top of your entry module, before any numerical import.</p>
-<pre class="codehilite"><code class="language-python"># daily/run.py
+<p>Same effect. The environment block is inherited by the child process.</p>
+<h3 id="in-python-before-importing-numpy">In Python, before importing numpy</h3>
+<p>Sometimes you cannot control the launcher — a CI runner, a wrapper someone else owns, a <code>python -m</code> invocation from a service. Then set the variables at the very top of your entry point:</p>
+<pre class="codehilite"><code class="language-python"># entry.py — must run before any numerical import
 import os
 
-# Must run before numpy/pandas/numexpr are imported.
+os.environ.setdefault(&quot;OPENBLAS_NUM_THREADS&quot;, &quot;1&quot;)
+os.environ.setdefault(&quot;MKL_NUM_THREADS&quot;, &quot;1&quot;)
+os.environ.setdefault(&quot;OMP_NUM_THREADS&quot;, &quot;1&quot;)
+os.environ.setdefault(&quot;NUMEXPR_NUM_THREADS&quot;, &quot;1&quot;)
+
+# Now it is safe to import the numerical stack.
+import numpy as np
+import pandas as pd
+</code></pre>
+
+<p>Two things to notice.</p>
+<p>First, <code>setdefault</code> rather than <code>=</code>. If the launcher already set a value, respect it. This lets you override per-job without editing the script.</p>
+<p>Second, the ordering is load-bearing. OpenBLAS reads <code>OPENBLAS_NUM_THREADS</code> inside its constructor, which runs when the shared library is <code>dlopen</code>ed — i.e. during <code>import numpy</code>. If you set the variable after that import, you are too late. The pool is already sized.</p>
+<p>This bites people who put the <code>os.environ</code> lines in a <code>config.py</code> that gets imported after numpy somewhere up the chain. If you cannot guarantee import order, use the launcher.</p>
+<h3 id="a-guard-for-libraries-that-import-numpy-for-you">A guard for libraries that import numpy for you</h3>
+<p>If your entry point imports a helper module that imports pandas at module scope, you have already lost. A defensive pattern:</p>
+<pre class="codehilite"><code class="language-python"># sitecustomize.py or a bootstrap module imported first
+import os
+
 for var in (
     &quot;OPENBLAS_NUM_THREADS&quot;,
     &quot;MKL_NUM_THREADS&quot;,
@@ -81,126 +110,167 @@ for var in (
     &quot;NUMEXPR_NUM_THREADS&quot;,
 ):
     os.environ.setdefault(var, &quot;1&quot;)
-
-import numpy as np
-import pandas as pd
 </code></pre>
 
-<p><code>setdefault</code> is deliberate: it lets an operator override the value from the shell without editing code. If you want to <em>force</em> single-threading regardless of the environment, use <code>os.environ[var] = "1"</code> instead.</p>
-<p>The trap here is import order. If any module in your package imports <code>numpy</code> at import time and you import that module before running the loop above, the pool is already initialized and the variables do nothing. Keep the env setup in a tiny module with no dependencies and import it first:</p>
-<pre class="codehilite"><code class="language-python"># daily/_threads.py
-import os
-
-def pin_blas_threads(n: int = 1) -&gt; None:
-    for var in (
-        &quot;OPENBLAS_NUM_THREADS&quot;,
-        &quot;MKL_NUM_THREADS&quot;,
-        &quot;OMP_NUM_THREADS&quot;,
-        &quot;NUMEXPR_NUM_THREADS&quot;,
-    ):
-        os.environ[var] = str(n)
-</code></pre>
-
-<pre class="codehilite"><code class="language-python"># daily/run.py
-from daily._threads import pin_blas_threads
-pin_blas_threads(1)
-
-import numpy as np  # safe now
-</code></pre>
-
-<h3 id="the-option-that-fails-setting-them-mid-run">The option that fails: setting them mid-run</h3>
-<pre class="codehilite"><code class="language-python">import numpy as np
-import os
-os.environ[&quot;OPENBLAS_NUM_THREADS&quot;] = &quot;1&quot;   # no effect on this process
-</code></pre>
-
-<p>This is the most common mistake. It looks right, it lints clean, and it does nothing for the current interpreter. It only affects subprocesses started afterward. If you see this pattern in a codebase, assume the thread-count problem is still present.</p>
-<h2 id="when-single-threading-wins-and-when-it-loses">When single-threading wins, and when it loses</h2>
-<p>Single-threading is not universally faster. It's faster when <em>aggregate</em> throughput across concurrently scheduled jobs matters more than the latency of any single job. That's the typical server case: a handful of jobs overlap in the early morning, each doing moderate matrix work, and the box has 4–8 cores.</p>
-<p>It's a loss when:</p>
+<p>Drop this in a <code>sitecustomize.py</code> on <code>PYTHONPATH</code> and it runs before anything else in the interpreter, including numpy. It is heavy-handed for a laptop, but on a scheduled server it removes an entire class of ordering bugs.</p>
+<h2 id="when-single-threading-wins-and-when-it-loses">When Single-Threading Wins, and When It Loses</h2>
+<p>Single-threading is not universally faster. It is faster when the machine is oversubscribed or the workload is memory-bound. It is slower when a single job has the box to itself and does real dense linear algebra.</p>
+<h3 id="wins">Wins</h3>
 <ul>
-<li>You have one long-running job on a large box and nothing else scheduled. A 16-core machine running a single big SVD will finish much sooner with 8–16 BLAS threads.</li>
-<li>The workload is dominated by large dense matmuls where BLAS threading scales well. A 5000×5000 <code>@</code> on 8 cores is roughly 5–7× faster than single-threaded.</li>
-<li>The job is memory-bandwidth bound rather than compute-bound. More threads won't help, but they also won't hurt much — this is the ambiguous middle.</li>
+<li><strong>Overlapping scheduled jobs.</strong> Three jobs each wanting eight threads on eight cores is worse than three jobs each wanting one.</li>
+<li><strong>Small matrices.</strong> A 200×200 <code>dgemm</code> does not have enough work to amortize thread wake-up. OpenBLAS's own heuristic often decides not to parallelize; forcing one thread removes the decision cost.</li>
+<li><strong>Memory-bound operations.</strong> Elementwise ops, <code>np.where</code>, <code>pandas</code> groupby aggregations — these are limited by RAM bandwidth, not FLOPs. Extra threads add cache-coherence traffic without adding throughput.</li>
+<li><strong>Predictable memory.</strong> Each BLAS thread gets its own scratch buffers. Eight threads means eight copies of the workspace. On a box with several jobs, that is the difference between fitting in RAM and swapping.</li>
+<li><strong>Container and CI environments.</strong> The container sees the host's core count but may be CPU-limited by cgroups. Threads get throttled and the pool spends time in futex waits.</li>
 </ul>
-<p>It's a clear win when:</p>
+<h3 id="losses">Losses</h3>
 <ul>
-<li>Multiple jobs overlap. Three jobs × 8 threads on an 8-core box is worse than three jobs × 1 thread.</li>
-<li>The matrices are small. BLAS thread-pool overhead (barriers, thread wakeups) dominates for anything under roughly 100×100. A loop of small matmuls single-threaded often beats the same loop with 8 threads.</li>
-<li>Memory predictability matters. Each BLAS thread allocates workspace. With 8 threads per process and 4 processes, peak RSS can be several times the single-threaded figure. On a small VM, that's the difference between finishing and getting OOM-killed.</li>
+<li><strong>A single large dense factorization.</strong> Cholesky on a 5000×5000 matrix, SVD on a big design matrix, a Monte Carlo sweep that is pure <code>dgemm</code>. Here BLAS threading is genuinely good, and forcing one thread can cost you 5–10×.</li>
+<li><strong>A job that owns the machine.</strong> If nothing else is scheduled and the box has 16 idle cores, pinning to one thread leaves them idle.</li>
 </ul>
-<p>A reasonable default for a scheduled-job server: <code>1</code> thread per process, and control parallelism by scheduling. If a single job genuinely needs more, give it more <em>and</em> make sure it doesn't overlap with others.</p>
-<h2 id="a-benchmark-harness">A benchmark harness</h2>
-<p>Don't guess. Measure on your own hardware with your own shapes. The harness below runs the same workload at several thread counts and reports wall time and peak RSS.</p>
-<pre class="codehilite"><code class="language-python"># bench_blas.py
+<p>The practical rule: if jobs overlap, or if the workload is not dominated by large dense linear algebra, go single-threaded. If you have one job that does heavy <code>dgemm</code> and it runs alone, give it threads — but give it <em>only</em> that job, and set the thread count explicitly rather than letting it grab every core.</p>
+<p>You can also split the difference per job. A feature builder that mostly does pandas joins gets <code>OMP_NUM_THREADS=1</code>. A nightly calibration that inverts a big matrix gets <code>OPENBLAS_NUM_THREADS=4</code> and is scheduled in a window where nothing else runs.</p>
+<h2 id="a-benchmark-harness">A Benchmark Harness</h2>
+<p>Do not guess. Measure on the actual box with the actual workload. Here is a small harness that runs a representative operation at several thread counts and reports wall time and peak RSS.</p>
+<pre class="codehilite"><code class="language-python">&quot;&quot;&quot;bench_threads.py — compare BLAS thread counts on a real workload.&quot;&quot;&quot;
 import os
 import subprocess
 import sys
 import time
+import json
 
-WORKLOAD = r&quot;&quot;&quot;
-import numpy as np, time, resource
+# The child process does the actual work so the environment is clean.
+CHILD = r&quot;&quot;&quot;
+import os, time, json, sys
+import numpy as np
+
+n = int(sys.argv[1])
+reps = int(sys.argv[2])
 rng = np.random.default_rng(0)
-A = rng.standard_normal((1200, 1200))
-B = rng.standard_normal((1200, 1200))
+
+a = rng.standard_normal((n, n))
+b = rng.standard_normal((n, n))
+
 # warm up
-A @ B
+_ = a @ b
+
 t0 = time.perf_counter()
-for _ in range(5):
-    C = A @ B
-elapsed = time.perf_counter() - t0
-rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-print(f&quot;{elapsed:.3f} {rss_kb}&quot;)
+for _ in range(reps):
+    c = a @ b
+t1 = time.perf_counter()
+
+# a memory-bound op for contrast
+t2 = time.perf_counter()
+for _ in range(reps):
+    d = np.sqrt(np.abs(a))
+t3 = time.perf_counter()
+
+print(json.dumps({
+    &quot;matmul_s&quot;: (t1 - t0) / reps,
+    &quot;elementwise_s&quot;: (t3 - t2) / reps,
+}))
 &quot;&quot;&quot;
 
-def run_once(threads: int) -&gt; tuple[float, float]:
+
+def run(n: int, reps: int, threads: int) -&gt; dict:
     env = os.environ.copy()
     for var in (&quot;OPENBLAS_NUM_THREADS&quot;, &quot;MKL_NUM_THREADS&quot;,
                 &quot;OMP_NUM_THREADS&quot;, &quot;NUMEXPR_NUM_THREADS&quot;):
         env[var] = str(threads)
-    out = subprocess.check_output(
-        [sys.executable, &quot;-c&quot;, WORKLOAD], env=env, text=True
-    ).strip()
-    elapsed, rss_kb = out.split()
-    return float(elapsed), float(rss_kb) / 1024.0
+
+    proc = subprocess.run(
+        [sys.executable, &quot;-c&quot;, CHILD, str(n), str(reps)],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
 
 if __name__ == &quot;__main__&quot;:
-    for n in (1, 2, 4, 8):
-        elapsed, rss_mb = run_once(n)
-        print(f&quot;threads={n:&gt;2}  time={elapsed:6.3f}s  peak_rss={rss_mb:7.1f} MB&quot;)
+    n = 2000
+    reps = 3
+    for threads in (1, 2, 4, 8):
+        r = run(n, reps, threads)
+        print(f&quot;threads={threads:&gt;2}  &quot;
+              f&quot;matmul={r['matmul_s']*1000:8.1f} ms  &quot;
+              f&quot;elementwise={r['elementwise_s']*1000:8.1f} ms&quot;)
 </code></pre>
 
-<p>Run it, then run it again with a second copy of the workload in parallel to simulate overlap:</p>
-<pre class="codehilite"><code class="language-python"># bench_overlap.py
-import concurrent.futures as cf
-from bench_blas import run_once
+<p>Run it on the target machine. On a typical 8-core VM with a 2000×2000 matmul you will see <code>matmul</code> drop steadily from 1 to 8 threads, while <code>elementwise</code> barely moves — it is memory-bound and the extra threads do nothing. That is the shape of the trade-off.</p>
+<p>Now run it <em>twice concurrently</em> to simulate overlap:</p>
+<pre class="codehilite"><code class="language-python">import concurrent.futures as cf
 
-def pair(threads: int):
-    with cf.ThreadPoolExecutor(max_workers=2) as ex:
-        f1 = ex.submit(run_once, threads)
-        f2 = ex.submit(run_once, threads)
-        (t1, m1), (t2, m2) = f1.result(), f2.result()
-    # wall time of the pair is roughly the max, but measure it properly
-    return max(t1, t2), m1 + m2
-
-if __name__ == &quot;__main__&quot;:
-    for n in (1, 2, 4):
-        t, m = pair(n)
-        print(f&quot;2 jobs x {n} threads  slowest={t:6.3f}s  combined_rss={m:7.1f} MB&quot;)
+with cf.ThreadPoolExecutor(max_workers=2) as pool:
+    futures = [pool.submit(run, 2000, 3, t) for t in (1, 8)]
+    for f in futures:
+        print(f.result())
 </code></pre>
 
-<p>On a 4-core box the pattern is usually: single job fastest at 4 threads, two overlapping jobs fastest at 1–2 threads each. The crossover point is your scheduling policy.</p>
-<p>Two notes on the harness. First, <code>resource.getrusage</code> is POSIX; on Windows use <code>psutil.Process().memory_info().rss</code> instead. Second, <code>subprocess</code> isolation is essential — you cannot change BLAS thread counts within a running process, so each configuration needs a fresh interpreter.</p>
-<h2 id="a-practical-default">A practical default</h2>
-<p>For a Windows server running a handful of scheduled Python jobs:</p>
+<p>With <code>threads=8</code> on both, the combined time is usually worse than running them sequentially. With <code>threads=1</code> on both, they finish in roughly the time of one job each, in parallel. That is the whole argument for pinning to one thread in a scheduled environment.</p>
+<h3 id="reading-the-results">Reading the results</h3>
+<p>Two numbers matter: wall time and peak RSS. Wall time tells you whether you gained throughput. Peak RSS tells you whether you gained predictability. In my experience the memory win is the one that stops the 3 a.m. pages — a job that used to balloon to 2 GB under thread contention now sits flat at 600 MB.</p>
+<p>If you want peak RSS in the harness, wrap the child with <code>psutil</code>:</p>
+<pre class="codehilite"><code class="language-python">import psutil, subprocess
+
+p = subprocess.Popen([sys.executable, &quot;-c&quot;, CHILD, &quot;2000&quot;, &quot;3&quot;], env=env)
+proc = psutil.Process(p.pid)
+peak = 0
+while p.poll() is None:
+    try:
+        peak = max(peak, proc.memory_info().rss)
+    except psutil.NoSuchProcess:
+        break
+    time.sleep(0.05)
+print(f&quot;peak RSS: {peak / 1e6:.1f} MB&quot;)
+</code></pre>
+
+<h2 id="checklist">Checklist</h2>
+<p>For every scheduled numerical job on a shared Windows box:</p>
 <ol>
-<li>Set <code>OPENBLAS_NUM_THREADS=1</code>, <code>MKL_NUM_THREADS=1</code>, <code>OMP_NUM_THREADS=1</code>, <code>NUMEXPR_NUM_THREADS=1</code> in the <code>.bat</code> launcher for every job.</li>
-<li>Stagger job start times in Task Scheduler so heavy jobs don't overlap where you can avoid it.</li>
-<li>Benchmark your actual workload at 1, 2, and 4 threads. If a single job is the only thing running and it's compute-bound, give it more — but only if it doesn't overlap.</li>
-<li>Log peak RSS per job. If it swings by a factor of 3 between runs, thread count is the likely cause.</li>
+<li>Set <code>OPENBLAS_NUM_THREADS</code>, <code>MKL_NUM_THREADS</code>, <code>OMP_NUM_THREADS</code>, and <code>NUMEXPR_NUM_THREADS</code> to <code>1</code> in the launcher, before <code>python.exe</code>.</li>
+<li>If you cannot control the launcher, set them at the top of the entry point with <code>os.environ.setdefault</code>, before any numerical import — or use a <code>sitecustomize.py</code>.</li>
+<li>Benchmark on the actual hardware with the actual matrix sizes. Raise the thread count only for a job that owns the machine and does large dense linear algebra.</li>
+<li>Watch peak RSS, not just wall time. Flat memory is the real prize.</li>
 </ol>
-<p>The change is a few lines in a launcher and a <code>setdefault</code> block in your entry module. It's the cheapest performance work you'll do this quarter.</p>
+<p>The environment variables are not a micro-optimization. On a box running several jobs, they are the difference between a schedule that finishes and one that drifts into the morning.</p>
 <p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-06 12:36:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">OPENBLAS</span><span class="tag-badge">MKL</span><span class="tag-badge">OMP_NUM_THREADS</span><span class="tag-badge">thread contention</span><span class="tag-badge">numpy</span></div>
             <div class="post-footer">
