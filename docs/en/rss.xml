@@ -7,74 +7,81 @@
         <language>en-us</language>
         
         <item>
+            <title>GB28181 Camera Cascading: When SIP INVITE Never Arrived</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/11.html</link>
+            <description>The Symptom: Online but Blind A school&#x27;s camera system cascades to a provincial education video platform through a Hikvision NCG (Network Camera Gateway)....</description>
+            <pubDate>2026-10-07</pubDate>
+            <category>Network &amp; Security</category>
+        </item>
+        <item>
+            <title>Why I Replaced Daemon Processes with Windows Task Scheduler</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/1.html</link>
+            <description>Corporate Windows machines are hostile territory for long-running processes....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/2.html</link>
+            <description>The Problem: Black Windows Every Hour A monitoring server had nine scheduled tasks, each firing hourly....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/3.html</link>
+            <description>Unattended scripts fail for the least interesting reasons. A DNS lookup times out at 02:00....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Staggering Nine Scheduled Tasks to Eliminate Resource Contention</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/4.html</link>
+            <description>A market-signal job ran at HH:00. A data-refresh job ran at HH:00. Both touched the same JSON files and both wanted the CPU at the same instant....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Exit Code 267009: Debugging CMD Encoding Corruption</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/5.html</link>
+            <description>Scheduled tasks fail in the dark. There is no console, no visible stderr, and often no useful log — just a status code in Task Scheduler&#x27;s &quot;Last Run Result&quot; col...</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Migrating a Python Automation Stack to a New Windows Server</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/6.html</link>
+            <description>Migrating a Python automation stack between Windows machines looks trivial until it isn&#x27;t....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Health Checks for a Fleet of Scheduled Tasks</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/7.html</link>
+            <description>Nine unattended scheduled tasks is a fleet, whether you call it that or not....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Taming BLAS Threads in Scheduled Python Jobs</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/8.html</link>
+            <description>Scheduled Python jobs on a shared box have a nasty habit of fighting each other....</description>
+            <pubDate>2026-10-06</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
             <title>Surviving Corporate HTTPS Interception: Life Behind Sangfor aTrust</title>
             <link>https://www.hkcode.dpdns.org/en/posts/9.html</link>
-            <description>Corporate laptops rarely talk to the internet directly anymore....</description>
+            <description>Corporate laptops are strange machines. You have admin rights on paper, but every outbound TLS connection is terminated and re-originated by a local agent....</description>
             <pubDate>2026-10-06</pubDate>
             <category>Network &amp; Security</category>
         </item>
         <item>
             <title>When GitHub Is Blocked but You Still Need to Push</title>
             <link>https://www.hkcode.dpdns.org/en/posts/10.html</link>
-            <description>When a firewall blocks github.com:443 but leaves api.github.com and raw.githubusercontent.com open, git push dies while the REST API keeps working....</description>
+            <description>Corporate firewalls are rarely all-or-nothing. They are usually the result of a proxy policy, a TLS inspection rule, or a category filter that someone applied y...</description>
             <pubDate>2026-10-06</pubDate>
             <category>Network &amp; Security</category>
-        </item>
-        <item>
-            <title>Health Checks for a Fleet of Scheduled Tasks</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/7.html</link>
-            <description>Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper....</description>
-            <pubDate>2026-10-05</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Taming BLAS Threads in Scheduled Python Jobs</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/8.html</link>
-            <description>Scheduled Python jobs and BLAS threading are a bad combination by default. A single numpy.dot on a 4-core box will happily spin up four threads....</description>
-            <pubDate>2026-10-05</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Exit Code 267009: Debugging CMD Encoding Corruption</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/5.html</link>
-            <description>Exit code 267009 looks like noise until you decode it. On a Windows scheduled task I maintain, a .bat launcher that worked fine when double-clicked started fail...</description>
-            <pubDate>2026-10-04</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Migrating a Python Automation Stack to a New Windows Server</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/6.html</link>
-            <description>A stack that runs unattended for months accumulates assumptions. Most of them are invisible until you move it to another machine....</description>
-            <pubDate>2026-10-04</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/3.html</link>
-            <description>Scheduled scripts fail for boring reasons. A vendor API returns 429 for thirty seconds. A DNS lookup times out once....</description>
-            <pubDate>2026-10-03</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Staggering Nine Scheduled Tasks to Eliminate Resource Contention</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/4.html</link>
-            <description>Scheduled tasks are cheap to create and expensive to forget. A Windows box running a dozen Python jobs looks fine on paper until two of them wake up at the same...</description>
-            <pubDate>2026-10-03</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Why I Replaced Daemon Processes with Windows Task Scheduler</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/1.html</link>
-            <description>The daemon that kept dying at 3 a.m. The first sign was a silent one....</description>
-            <pubDate>2026-10-02</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/2.html</link>
-            <description>Nine scheduled tasks on a build server, each firing once an hour, each one flashing a black cmd.exe window on a console session that stays logged in all day....</description>
-            <pubDate>2026-10-02</pubDate>
-            <category>Windows Automation</category>
         </item>
     </channel>
 </rss>
