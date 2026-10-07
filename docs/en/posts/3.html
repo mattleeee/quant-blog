@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Scheduled scripts fail for boring reasons. A vendor API returns 429 for thirty seconds. A DNS lookup times out once....">
+        <meta name="description" content="Unattended scripts fail for the least interesting reasons. A DNS lookup times out at 02:00....">
     <meta name="keywords" content="retry,backoff,resilience,Python,scheduled jobs">
     <meta property="og:title" content="Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff">
-    <meta property="og:description" content="Scheduled scripts fail for boring reasons. A vendor API returns 429 for thirty seconds. A DNS lookup times out once....">
+    <meta property="og:description" content="Unattended scripts fail for the least interesting reasons. A DNS lookup times out at 02:00....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/3.html">
@@ -33,51 +33,40 @@
         <article class="post">
             <h1>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff</h1>
             <div class="post-meta">
-                <span class="date">2026-10-03</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>Scheduled scripts fail for boring reasons. A vendor API returns 429 for thirty seconds. A DNS lookup times out once. A socket hangs and gets killed at the OS level. None of these are logic bugs, and none of them deserve a page at 3 a.m.</p>
-<p>The fix is a retry wrapper with a narrow scope: three attempts, fixed linear backoff, every attempt logged with its reason. This post covers a decorator implementation, the exit-code conventions that let Task Scheduler (or cron, or a systemd timer) distinguish "failed after retries" from "nothing to do", and why retry state has to live on disk instead of in a module-level variable.</p>
-<h2 id="the-failure-modes-you-actually-see">The failure modes you actually see</h2>
-<p>Before writing the wrapper, it helps to be precise about what you're retrying. In unattended Windows jobs, the recurring ones are:</p>
+<p>Unattended scripts fail for the least interesting reasons. A DNS lookup times out at 02:00. An API returns 429 because a cron job on another box happened to fire at the same second. A TCP connection resets halfway through a response. None of these are bugs in your logic, and all of them will page you if the job is important enough.</p>
+<p>The instinct is to wrap everything in a <code>try/except</code> and loop until it works. That instinct produces a worse failure mode: jobs that hang forever, hide real errors, and leave the scheduler unable to tell whether the previous run finished. This post describes a retry wrapper that stays small, fails fast, and gives the Windows Task Scheduler layer enough information to act.</p>
+<h2 id="the-failure-modes-worth-designing-for">The failure modes worth designing for</h2>
+<p>Before writing the decorator, it helps to be explicit about what counts as retryable. In practice, the set is narrow:</p>
 <ul>
-<li><strong>Rate limits.</strong> HTTP 429, sometimes 503 with a <code>Retry-After</code> header. Transient by definition.</li>
-<li><strong>Network blips.</strong> <code>ConnectionResetError</code>, <code>requests.exceptions.ConnectionError</code>, transient DNS failures.</li>
-<li><strong>Timeouts.</strong> <code>requests.exceptions.Timeout</code> — connect timeout or read timeout. The request may or may not have been processed server-side, which matters for non-idempotent operations.</li>
-<li><strong>Upstream 5xx.</strong> Usually transient, occasionally not.</li>
+<li>Network-level errors: connection reset, timeout, DNS failure.</li>
+<li>HTTP 5xx responses.</li>
+<li>HTTP 429 with a <code>Retry-After</code> header or a known rate limit.</li>
+<li>Transient file locks on a shared drive (common on Windows when another process holds a handle).</li>
 </ul>
-<p>And the ones you must <em>not</em> retry:</p>
-<ul>
-<li><strong><code>KeyboardInterrupt</code> and <code>SystemExit</code>.</strong> These derive from <code>BaseException</code>, not <code>Exception</code>. A bare <code>except:</code> or <code>except Exception:</code> in the wrong place swallows Ctrl-C and makes an interactive debugging session feel broken.</li>
-<li><strong>Programming errors.</strong> <code>KeyError</code>, <code>TypeError</code>, <code>AttributeError</code> on your own data structures. Retrying these three times just triples the log noise before the same crash.</li>
-<li><strong>4xx client errors other than 429.</strong> A 401 or 400 will not fix itself in ten seconds.</li>
-</ul>
-<p>The practical rule: catch <code>requests.RequestException</code> and nothing broader. That covers connection errors, timeouts, and <code>HTTPError</code> from <code>raise_for_status()</code>, and it deliberately excludes everything else.</p>
-<h2 id="a-decorator-that-retries-the-right-things">A decorator that retries the right things</h2>
-<p>Here is the wrapper. It retries up to three attempts total, waits 10s, then 20s between them, and logs each failure with its reason.</p>
+<p>Everything else should fail immediately. A 401 means your token expired — retrying three times just wastes thirty seconds before the same error. A 400 means your payload is malformed — retrying will never fix it. A <code>KeyError</code> in your parsing code means the upstream schema changed, and no amount of backoff will help.</p>
+<p>The practical rule: retry on exceptions that represent <em>transport</em> problems, not <em>logic</em> problems. In Python, that usually means <code>requests.RequestException</code> and its subclasses, plus a small allowlist of OS-level errors.</p>
+<h2 id="a-decorator-that-does-one-thing">A decorator that does one thing</h2>
+<p>Here is the core implementation. It retries up to three times with linear backoff — 10, 20, then 30 seconds — and logs each attempt with its failure reason.</p>
 <pre class="codehilite"><code class="language-python">import functools
 import logging
 import time
 
 import requests
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-RETRYABLE = (
-    requests.exceptions.ConnectionError,
-    requests.exceptions.Timeout,
-    requests.exceptions.HTTPError,
-)
-
-BACKOFF_SECONDS = (10, 20)  # sleeps between attempt 1-&gt;2 and 2-&gt;3
+RETRYABLE = (requests.RequestException,)
 
 
-def retry_request(max_attempts: int = 3, backoff: tuple[int, ...] = BACKOFF_SECONDS):
-    &quot;&quot;&quot;Retry a function on transient requests failures.
+def retry(max_attempts: int = 3, base_delay: int = 10):
+    &quot;&quot;&quot;Retry a function on transport errors with linear backoff.
 
-    Never catches BaseException, so KeyboardInterrupt and SystemExit
-    propagate immediately.
+    Delays are base_delay * attempt: 10s, 20s, 30s for the default.
+    KeyboardInterrupt and SystemExit propagate untouched.
     &quot;&quot;&quot;
     def decorator(func):
         @functools.wraps(func)
@@ -85,166 +74,179 @@ def retry_request(max_attempts: int = 3, backoff: tuple[int, ...] = BACKOFF_SECO
             last_exc = None
             for attempt in range(1, max_attempts + 1):
                 try:
-                    result = func(*args, **kwargs)
-                    if attempt &gt; 1:
-                        log.info(&quot;%s succeeded on attempt %d&quot;, func.__name__, attempt)
-                    return result
+                    return func(*args, **kwargs)
                 except RETRYABLE as exc:
                     last_exc = exc
-                    status = getattr(getattr(exc, &quot;response&quot;, None), &quot;status_code&quot;, None)
-                    # Do not retry 4xx except 429.
-                    if status is not None and 400 &lt;= status &lt; 500 and status != 429:
-                        log.error(&quot;%s failed with non-retryable HTTP %s: %s&quot;,
-                                  func.__name__, status, exc)
-                        raise
-                    if attempt == max_attempts:
-                        log.error(&quot;%s failed after %d attempts: %s&quot;,
-                                  func.__name__, max_attempts, exc)
-                        raise
-                    delay = backoff[attempt - 1]
-                    log.warning(&quot;%s attempt %d/%d failed (%s); retrying in %ds&quot;,
-                                func.__name__, attempt, max_attempts, exc, delay)
-                    time.sleep(delay)
-            raise last_exc  # unreachable, but keeps type checkers happy
+                    logger.warning(
+                        &quot;%s attempt %d/%d failed: %s: %s&quot;,
+                        func.__name__, attempt, max_attempts,
+                        type(exc).__name__, exc,
+                    )
+                    if attempt &lt; max_attempts:
+                        delay = base_delay * attempt
+                        logger.info(&quot;Sleeping %ds before retry&quot;, delay)
+                        time.sleep(delay)
+            logger.error(
+                &quot;%s exhausted %d attempts, last error: %s&quot;,
+                func.__name__, max_attempts, last_exc,
+            )
+            raise last_exc
         return wrapper
     return decorator
 </code></pre>
 
-<p>A few deliberate choices:</p>
-<p><strong><code>RETRYABLE</code> is a tuple of specific exception classes.</strong> <code>requests.RequestException</code> is the parent of all of them, but <code>HTTPError</code> needs the status-code guard above, so listing the concrete classes makes the guard's intent readable. If you prefer one catch-all, catch <code>requests.RequestException</code> and keep the 4xx check.</p>
-<p><strong>Backoff is a tuple, not a computed formula.</strong> With three attempts you need exactly two sleeps. A tuple makes the schedule explicit and reviewable: 10s, 20s. If you later want jitter, you add it in one place.</p>
-<p><strong><code>KeyboardInterrupt</code> is not caught.</strong> It's a <code>BaseException</code> subclass, so it sails through the <code>except RETRYABLE</code> clause and kills the process. Same for <code>SystemExit</code>. This is the entire reason to avoid bare <code>except:</code>.</p>
-<p><strong>The 4xx guard runs before the retry decision.</strong> A 401 from a rotated API key is not going to resolve itself, and burning 30 seconds of backoff on it delays the alert.</p>
-<p>Usage is unremarkable:</p>
-<pre class="codehilite"><code class="language-python">@retry_request()
-def fetch_positions(session: requests.Session, url: str) -&gt; dict:
-    resp = session.get(url, timeout=(5, 15))
-    resp.raise_for_status()
-    return resp.json()
+<p>Three details matter here.</p>
+<p><strong><code>except RETRYABLE</code>, not <code>except Exception</code>.</strong> Catching <code>Exception</code> would swallow <code>KeyboardInterrupt</code>? No — <code>KeyboardInterrupt</code> inherits from <code>BaseException</code>, not <code>Exception</code>, so a bare <code>except Exception</code> would actually let it through. But <code>except Exception</code> <em>would</em> catch <code>SystemExit</code>? Also no. The real danger is catching <code>AttributeError</code>, <code>KeyError</code>, <code>ValueError</code> — logic errors that retrying cannot fix. Those should crash the job immediately so you see them in the log at 02:01, not at 02:06 after three pointless sleeps.</p>
+<p><strong>Explicit re-raise after the loop.</strong> If you let the loop fall through, the function returns <code>None</code>, and the caller has no idea anything went wrong. Re-raising <code>last_exc</code> preserves the original traceback context and lets the exit-code layer above decide what to do.</p>
+<p><strong>Logging on every attempt, not just the final failure.</strong> When you're debugging a flaky 3 AM job, the pattern matters. Three timeouts in a row points at the network. A 429 followed by two successes points at rate limiting. A 500 followed by a 200 followed by a 500 points at a load balancer routing to a bad backend. You only see these patterns if you log each attempt.</p>
+<h2 id="backoff-shape-linear-vs-exponential">Backoff shape: linear vs exponential</h2>
+<p>Linear backoff (10, 20, 30) is the right default for scheduled jobs that run on a fixed cadence. If your job runs every five minutes, the total retry window of 60 seconds fits comfortably inside the interval. Exponential backoff (10, 20, 40, 80…) is better for interactive or high-frequency callers where you want to shed load quickly, but for a job that fires every N minutes, linear keeps the worst-case runtime predictable.</p>
+<p>If you need to honor a server-provided delay, extract it before sleeping:</p>
+<pre class="codehilite"><code class="language-python">def _retry_after(exc: requests.RequestException) -&gt; int | None:
+    resp = getattr(exc, &quot;response&quot;, None)
+    if resp is None or resp.status_code != 429:
+        return None
+    header = resp.headers.get(&quot;Retry-After&quot;)
+    if header and header.isdigit():
+        return int(header)
+    return None
 </code></pre>
 
-<p>Note the <code>timeout=(connect, read)</code> tuple. A request with no timeout is the single most common way a "simple" scheduled script hangs forever and blocks its own next run.</p>
-<h2 id="exit-codes-the-scheduler-can-act-on">Exit codes the scheduler can act on</h2>
-<p>Task Scheduler and cron both care about one thing: the process exit code. A retry wrapper that always exits 0 hides failures; one that always exits 1 on any error makes "the market was closed" indistinguishable from "the API is down."</p>
-<p>Define a small, stable set of codes and use them consistently:</p>
+<p>Then in the loop, prefer <code>_retry_after(exc)</code> over the computed delay when it's present. This is the one case where the server knows better than you do.</p>
+<h2 id="exit-codes-the-contract-with-the-scheduler">Exit codes: the contract with the scheduler</h2>
+<p>Windows Task Scheduler records the exit code of every run, and you can filter on it in the history view. More importantly, a wrapper script can branch on it. The useful convention is small and unambiguous:</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>Success — work was done</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Failed after retries — investigate</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Nothing to do — no work this cycle</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Configuration or setup error — fix before next run</td>
+</tr>
+</tbody>
+</table>
+<p>The distinction between 1 and 2 is the one people skip, and it's the one that saves the most time. A job that polls an API for new records will legitimately find nothing most cycles. If "nothing to do" returns 1, your monitoring is useless — every quiet night looks like an outage. If it returns 0, you can't tell from the logs whether the job actually ran.</p>
+<p>Here's how the wrapper looks:</p>
 <pre class="codehilite"><code class="language-python">import sys
-from enum import IntEnum
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_NOTHING = 2
+EXIT_CONFIG = 3
 
 
-class ExitCode(IntEnum):
-    OK = 0            # did work, or nothing to do
-    NOTHING_TO_DO = 0 # alias: same exit, different log line
-    TRANSIENT_FAIL = 1  # failed after retries; safe to alert
-    CONFIG_ERROR = 2    # bad credentials, missing file; do not retry
-    LOCKED = 3          # another instance holds the run lock
-</code></pre>
-
-<p>The important distinction is between <strong>TRANSIENT_FAIL</strong> and <strong>NOTHING_TO_DO</strong>. Both are "the script ran," but only the first should page someone. A weekend run that finds no data to process should exit 0 with a clear log line, not 1.</p>
-<p>The main function wires it together:</p>
-<pre class="codehilite"><code class="language-python">def main() -&gt; int:
+def main() -&gt; int:
     try:
-        result = run_job()
-    except requests.RequestException as exc:
-        log.error(&quot;job failed after retries: %s&quot;, exc)
-        return ExitCode.TRANSIENT_FAIL
-    except (FileNotFoundError, KeyError) as exc:
-        log.error(&quot;configuration problem: %s&quot;, exc)
-        return ExitCode.CONFIG_ERROR
+        records = fetch_pending()
+    except requests.RequestException:
+        return EXIT_FAILED
+    except ConfigError:
+        return EXIT_CONFIG
 
-    if result is None:
-        log.info(&quot;nothing to do&quot;)
-        return ExitCode.NOTHING_TO_DO
-    log.info(&quot;processed %d items&quot;, result)
-    return ExitCode.OK
+    if not records:
+        logger.info(&quot;No pending work&quot;)
+        return EXIT_NOTHING
+
+    process(records)
+    return EXIT_OK
 
 
 if __name__ == &quot;__main__&quot;:
     sys.exit(main())
 </code></pre>
 
-<p>Two conventions worth enforcing:</p>
-<ol>
-<li><strong><code>sys.exit(main())</code></strong>, not <code>main()</code> followed by an implicit exit. The return value is the contract with the scheduler.</li>
-<li><strong>Never <code>sys.exit(1)</code> inside the retry decorator.</strong> The decorator raises; the top-level handler decides the code. Retry logic and exit policy stay separate, so you can change one without touching the other.</li>
-</ol>
-<p>If you're on Task Scheduler, map non-zero codes to a failure action (email, webhook) and leave 0 alone. If you're on a systemd timer, <code>OnFailure=</code> units give you the same thing. Either way, the scheduler layer never has to parse your logs to know whether to wake you up.</p>
-<h2 id="why-retry-state-must-be-re-read-from-disk">Why retry state must be re-read from disk</h2>
-<p>This is the part that bites people.</p>
-<p>Suppose a job processes a batch of records and writes a progress marker. A naive implementation keeps the marker in memory:</p>
-<pre class="codehilite"><code class="language-python"># Don't do this.
-state = {&quot;last_id&quot;: 0}
-
-@retry_request()
+<p>The <code>fetch_pending</code> function is decorated with <code>@retry()</code>. When it exhausts its attempts, it re-raises, <code>main</code> catches the specific exception type, and returns <code>EXIT_FAILED</code>. The scheduler sees 1, your alert rule fires, and the log already contains three timestamped failure reasons.</p>
+<h2 id="why-retry-state-must-live-on-disk">Why retry state must live on disk</h2>
+<p>This is the part that bites people who test their retry logic interactively and then deploy it. Consider a job that processes a queue of items:</p>
+<pre class="codehilite"><code class="language-python">@retry()
 def process_batch():
-    global state
-    rows = fetch_since(state[&quot;last_id&quot;])
-    for row in rows:
-        handle(row)
-        state[&quot;last_id&quot;] = row.id
+    items = load_queue()  # reads from disk
+    for item in items:
+        call_api(item)
+        mark_done(item)
 </code></pre>
 
-<p>Now the process is killed mid-batch — power event, Task Scheduler "Stop the task if it runs longer than," a <code>kill -9</code> from a deploy. The in-memory <code>state</code> is gone. On the next run, <code>last_id</code> is 0 again, and you reprocess everything. If <code>handle()</code> isn't idempotent, you've just double-posted a day of records.</p>
-<p>The fix is to treat disk as the source of truth and memory as a cache:</p>
-<pre class="codehilite"><code class="language-python">import json
-from pathlib import Path
-
-STATE_PATH = Path(r&quot;C:\jobs\state\positions.json&quot;)
-
-
-def load_state() -&gt; dict:
-    if not STATE_PATH.exists():
-        return {&quot;last_id&quot;: 0}
-    return json.loads(STATE_PATH.read_text(encoding=&quot;utf-8&quot;))
-
-
-def save_state(state: dict) -&gt; None:
-    tmp = STATE_PATH.with_suffix(&quot;.tmp&quot;)
-    tmp.write_text(json.dumps(state), encoding=&quot;utf-8&quot;)
-    tmp.replace(STATE_PATH)  # atomic on Windows and POSIX
-
-
-@retry_request()
+<p>The retry state here is <em>the queue on disk</em>. If attempt 1 processes items 1–5 and then fails on item 6, attempt 2 reloads the queue and sees items 6 onward. That's correct. The progress is durable because it lives in a file, not in a variable.</p>
+<p>Now consider the in-memory version:</p>
+<pre class="codehilite"><code class="language-python">@retry()
 def process_batch():
-    state = load_state()          # re-read on every attempt
-    rows = fetch_since(state[&quot;last_id&quot;])
-    for row in rows:
-        handle(row)
-        state[&quot;last_id&quot;] = row.id
-        save_state(state)         # persist after each row
+    items = load_queue()
+    for item in items:
+        call_api(item)
+        mark_done(item)
+    return items  # cached in memory
 </code></pre>
 
-<p>Three properties fall out of this:</p>
-<p><strong>Retries are safe.</strong> If attempt 1 fails halfway through, attempt 2 starts from the last persisted <code>last_id</code>, not from the top. The retry decorator doesn't need to know anything about the job's internals.</p>
-<p><strong>Restarts are safe.</strong> A new process reads the same file and resumes. There's no warm-up phase where you have to reconstruct state from logs.</p>
-<p><strong>The write is atomic.</strong> <code>Path.replace()</code> is atomic on Windows (it maps to <code>MoveFileEx</code> with <code>MOVEFILE_REPLACE_EXISTING</code>) and on POSIX. A crash mid-write leaves either the old file or the new one, never a truncated one. Writing directly to <code>STATE_PATH</code> risks a zero-byte file that fails to parse on the next run.</p>
-<h3 id="the-lock-file-and-why-its-the-same-problem">The lock file, and why it's the same problem</h3>
-<p>The same reasoning applies to preventing overlapping runs. A module-level <code>_running = True</code> flag does nothing across processes. Use a lock file with a PID and timestamp:</p>
-<pre class="codehilite"><code class="language-python">import os
-from datetime import datetime, timezone
-
-LOCK_PATH = Path(r&quot;C:\jobs\state\positions.lock&quot;)
-
-
-def acquire_lock() -&gt; bool:
-    try:
-        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return False
-    with os.fdopen(fd, &quot;w&quot;) as f:
-        f.write(f&quot;{os.getpid()} {datetime.now(timezone.utc).isoformat()}\n&quot;)
-    return True
-
-
-def release_lock() -&gt; None:
-    LOCK_PATH.unlink(missing_ok=True)
-</code></pre>
-
-<p><code>O_CREAT | os.O_EXCL</code> is the atomic test-and-set. The catch is stale locks: if the process dies without releasing, the lock persists. Either record the PID and check whether it's alive, or store a timestamp and treat locks older than the job's maximum runtime as stale. Whichever you pick, make it explicit — an unhandled stale lock silently stops the job forever, which is worse than the overlap you were guarding against.</p>
-<h2 id="what-this-design-does-not-do">What this design does not do</h2>
-<p>It doesn't handle exponential backoff with jitter, circuit breakers, or dead-letter queues. Those are worth adding when you have many jobs sharing one upstream and you need to avoid synchronized retry storms. For a single scheduled script talking to one API, three attempts with 10/20-second waits is the right amount of machinery.</p>
-<p>It also doesn't retry non-idempotent writes without thought. If <code>handle(row)</code> sends an email or places an order, a timeout after the server processed the request means a retry duplicates the effect. The persisted <code>last_id</code> helps, but the real fix is an idempotency key on the write itself — a topic for another post.</p>
-<p>The pattern to take away: catch narrowly, back off linearly, log every attempt, exit with codes the scheduler understands, and keep state on disk. That covers the boring failures without hiding the interesting ones.</p>
+<p>If you cache <code>items</code> at module level to avoid re-reading, a retry after a partial failure will re-process items 1–5. Depending on the API, that's either wasted work or a duplicate side effect. Worse, if the process is killed between attempts — a reboot, a <code>taskkill</code>, a power event — any in-memory state is gone entirely, and the next scheduled run has no idea what happened.</p>
+<p>The rule: <strong>the retry loop should re-read its input from the durable source on every attempt.</strong> The decorator doesn't know or care what the function does; it just calls it again. It's the function's responsibility to start from a consistent, on-disk state each time.</p>
+<p>This has a second benefit. If the job crashes hard — no retry, just a blue screen — the next scheduled run picks up from the same disk state. The retry decorator handles the fast failures; the disk state handles the slow ones.</p>
+<h2 id="wiring-it-into-task-scheduler">Wiring it into Task Scheduler</h2>
+<p>The scheduler itself has retry settings, and they interact with yours. Under the task's <em>Settings</em> tab, "If the task fails, restart every" is a separate mechanism from your in-process retry. Keep them distinct:</p>
+<ul>
+<li><strong>In-process retry</strong> handles transient errors within a single run. Fast, cheap, no scheduler involvement.</li>
+<li><strong>Scheduler restart</strong> handles process-level failures: a crash, a hung process killed by a timeout, a machine that rebooted mid-run.</li>
+</ul>
+<p>A reasonable pairing is three in-process attempts with linear backoff, and one scheduler restart after a short delay. That gives you four total chances spread over a few minutes without turning a broken job into an infinite loop.</p>
+<p>One Windows-specific gotcha: if your task uses "Stop the task if it runs longer than", set that duration longer than your worst-case retry window. Three attempts with 10/20/30 second backoff plus request timeouts can easily exceed two minutes. If the scheduler kills the process at 60 seconds, you never see the third attempt, and the exit code is a generic timeout rather than your <code>EXIT_FAILED</code>.</p>
+<h2 id="what-this-design-deliberately-doesnt-do">What this design deliberately doesn't do</h2>
+<p>It doesn't retry on HTTP 4xx (except 429). It doesn't use jitter, because scheduled jobs don't have the thundering-herd problem that interactive clients do. It doesn't persist retry counts across runs — if the job fails three times and the scheduler restarts it, that's a fresh three attempts, and the log will show eight failures total, which is a signal in itself.</p>
+<p>It also doesn't try to be clever about partial success. If a batch of 100 items processes 60 and then fails, the retry starts from item 61 because that's what the disk says. If your API doesn't support idempotent writes, you need a different design — one that records the exact operation before calling out, not after.</p>
+<p>The whole wrapper is about forty lines. Most of the value is in the parts that <em>don't</em> retry: the narrow exception tuple, the explicit re-raise, the exit code that separates "failed" from "empty." Fail fast, log everything, and let the disk be the source of truth.</p>
 <p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-06 12:36:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">retry</span><span class="tag-badge">backoff</span><span class="tag-badge">resilience</span><span class="tag-badge">Python</span><span class="tag-badge">scheduled jobs</span></div>
             <div class="post-footer">
