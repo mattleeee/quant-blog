@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Staggering Nine Scheduled Tasks to Eliminate Resource Contention - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Scheduled tasks are cheap to create and expensive to forget. A Windows box running a dozen Python jobs looks fine on pap...">
+        <meta name="description" content="A market-signal job ran at HH:00. A data-refresh job ran at HH:00....">
     <meta name="keywords" content="staggering,task scheduling,resource contention,cron-like design">
     <meta property="og:title" content="Staggering Nine Scheduled Tasks to Eliminate Resource Contention">
-    <meta property="og:description" content="Scheduled tasks are cheap to create and expensive to forget. A Windows box running a dozen Python jobs looks fine on pap...">
+    <meta property="og:description" content="A market-signal job ran at HH:00. A data-refresh job ran at HH:00....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/4.html">
@@ -33,254 +33,253 @@
         <article class="post">
             <h1>Staggering Nine Scheduled Tasks to Eliminate Resource Contention</h1>
             <div class="post-meta">
-                <span class="date">2026-10-03</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>Scheduled tasks are cheap to create and expensive to forget. A Windows box running a dozen Python jobs looks fine on paper until two of them wake up at the same minute, hit the same JSON state file, and one silently loses its write. That is exactly what happened here: a market-signal job and a data-refresh job both fired at the top of every hour. The signal job read a price snapshot while the refresh job was halfway through rewriting it. Neither crashed. The signal job just computed on stale data for a while, and nobody noticed until the numbers stopped matching the dashboard.</p>
-<p>The fix was not more hardware or a rewrite. It was a timetable: a deliberate offset schedule where each job gets its own slot and nothing collides. This post covers how to inventory your existing triggers, how to space CPU-bound and I/O-bound jobs, how to avoid file-lock hazards, and how to keep the whole fleet visible on one page.</p>
-<h2 id="step-1-inventory-every-trigger-before-you-touch-anything">Step 1: Inventory every trigger before you touch anything</h2>
-<p>You cannot stagger what you cannot see. On Windows, scheduled tasks live in the Task Scheduler, but they can also be created by <code>schtasks</code>, by Python's <code>schedule</code> library inside a long-running process, or by a cron-like loop in a service. Start by dumping everything to a single table.</p>
-<p>The most reliable inventory comes from the Task Scheduler's own XML, because it includes the exact repetition interval, not just the "next run time" the GUI shows.</p>
-<pre class="codehilite"><code class="language-python">import subprocess
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+<p>A market-signal job ran at <code>HH:00</code>. A data-refresh job ran at <code>HH:00</code>. Both touched the same JSON files and both wanted the CPU at the same instant. The result was predictable: <code>PermissionError</code> on Windows file locks, occasional half-written JSON that the signal job then parsed as empty, and a scheduler log full of overlapping runs.</p>
+<p>The fix wasn't a faster machine or a rewrite. It was a timetable. This post walks through how I inventoried the triggers, decided on offsets, handled the shared-state file locks, and ended up with a single page that shows the whole fleet.</p>
+<h2 id="why-top-of-hour-schedules-collide">Why top-of-hour schedules collide</h2>
+<p>Cron-style schedulers are seductive because <code>0 * * * *</code> reads like "do the thing." It doesn't say "do the thing when nothing else is doing the thing." Every job author independently picks round numbers, and round numbers cluster. If nine jobs all live on <code>0 * * * *</code> or <code>0 4 * * *</code>, they share a trigger boundary whether they need to or not.</p>
+<p>Two failure modes show up immediately:</p>
+<ol>
+<li><strong>CPU contention.</strong> Two CPU-bound jobs start together, each takes roughly twice as long as it would alone, and the overlap window grows.</li>
+<li><strong>File-lock collisions.</strong> On Windows, opening a file for write while another process holds it raises <code>PermissionError</code> or silently truncates depending on the flags. Two writers to the same JSON file is a data-corruption bug waiting for a slow disk.</li>
+</ol>
+<p>The signal job and the refresh job hit both. The signal job read <code>signals.json</code> and wrote <code>positions.json</code>. The refresh job wrote <code>signals.json</code>. When they ran together, the signal job sometimes read an empty file mid-write and produced an empty position list — which then propagated downstream.</p>
+<h2 id="step-1-inventory-every-trigger">Step 1: Inventory every trigger</h2>
+<p>You can't stagger what you haven't listed. I dumped every scheduled entry into one place. On Windows, the Task Scheduler is scriptable through <code>schtasks</code> or the COM interface. The COM path gives structured data without parsing text.</p>
+<pre class="codehilite"><code class="language-python">import win32com.client
 from datetime import datetime
 
-@dataclass
-class TaskInfo:
-    name: str
-    triggers: list[str] = field(default_factory=list)
-    action: str = &quot;&quot;
-    enabled: bool = True
+def list_scheduled_tasks(folder_path=&quot;\\&quot;):
+    &quot;&quot;&quot;Walk a Task Scheduler folder and return trigger summaries.&quot;&quot;&quot;
+    scheduler = win32com.client.Dispatch(&quot;Schedule.Service&quot;)
+    scheduler.Connect()
+    root = scheduler.GetFolder(folder_path)
+    tasks = root.GetTasks(1)  # 1 = include hidden
 
-def list_tasks() -&gt; list[TaskInfo]:
-    raw = subprocess.run(
-        [&quot;schtasks&quot;, &quot;/query&quot;, &quot;/xml&quot;, &quot;ONE&quot;],
-        capture_output=True, text=True, check=True,
-    ).stdout
+    rows = []
+    for task in tasks:
+        definition = task.Definition
+        for trigger in definition.Triggers:
+            rows.append({
+                &quot;name&quot;: task.Name,
+                &quot;enabled&quot;: task.Enabled,
+                &quot;type&quot;: trigger.Type,
+                &quot;start&quot;: getattr(trigger, &quot;StartBoundary&quot;, None),
+                &quot;repetition&quot;: getattr(trigger, &quot;Repetition&quot;, None),
+            })
+    return rows
 
-    tasks = []
-    # schtasks emits multiple &lt;Task&gt; documents concatenated; wrap them.
-    wrapped = f&quot;&lt;Root&gt;{raw}&lt;/Root&gt;&quot;
-    root = ET.fromstring(wrapped)
-
-    ns = {&quot;t&quot;: &quot;http://schemas.microsoft.com/windows/2004/02/mit/task&quot;}
-    for task in root.findall(&quot;t:Task&quot;, ns):
-        name_el = task.find(&quot;.//t:RegistrationInfo/t:URI&quot;, ns)
-        name = name_el.text if name_el is not None else &quot;unknown&quot;
-
-        triggers = []
-        for trig in task.findall(&quot;.//t:Triggers/*&quot;, ns):
-            # CalendarTrigger with a Repetition/Interval is the usual culprit
-            interval = trig.find(&quot;.//t:Repetition/t:Interval&quot;, ns)
-            start = trig.find(&quot;.//t:StartBoundary&quot;, ns)
-            parts = [trig.tag.split(&quot;}&quot;)[-1]]
-            if start is not None:
-                parts.append(f&quot;start={start.text}&quot;)
-            if interval is not None:
-                parts.append(f&quot;every={interval.text}&quot;)
-            triggers.append(&quot; &quot;.join(parts))
-
-        exec_el = task.find(&quot;.//t:Actions/t:Exec/t:Command&quot;, ns)
-        action = exec_el.text if exec_el is not None else &quot;&quot;
-
-        enabled_el = task.find(&quot;.//t:Settings/t:Enabled&quot;, ns)
-        enabled = enabled_el is None or enabled_el.text.lower() == &quot;true&quot;
-
-        tasks.append(TaskInfo(name, triggers, action, enabled))
-
-    return tasks
-
-if __name__ == &quot;__main__&quot;:
-    for t in list_tasks():
-        flag = &quot;&quot; if t.enabled else &quot;  [DISABLED]&quot;
-        print(f&quot;{t.name}{flag}&quot;)
-        print(f&quot;    action: {t.action}&quot;)
-        for trig in t.triggers:
-            print(f&quot;    trigger: {trig}&quot;)
+for row in list_scheduled_tasks():
+    print(f&quot;{row['name']:&lt;40} {row['start']}&quot;)
 </code></pre>
 
-<p>Run this once a week and diff the output. New tasks appear when you least expect them — an installer, a sync tool, a "temporary" script someone added six months ago. The diff is your early warning.</p>
-<p>What you are looking for is the <em>minute</em> field. A task that repeats every hour at <code>00:00</code> and another that repeats every hour at <code>00:00</code> will always collide. A task that repeats every 15 minutes at <code>00:00</code> collides with both, four times an hour.</p>
-<h2 id="step-2-classify-jobs-as-cpu-bound-or-io-bound">Step 2: Classify jobs as CPU-bound or I/O-bound</h2>
-<p>Spacing rules depend on what the job actually does, not on how long it usually takes. A job that pegs all cores for 40 seconds is a different problem from a job that waits on HTTP for 40 seconds.</p>
-<p>The distinction matters because CPU-bound jobs contend for a shared resource that cannot be queued away — the cores. I/O-bound jobs contend for the file system, network sockets, and the GIL, but they spend most of their wall-clock time <em>not</em> running. Two I/O-bound jobs can overlap almost harmlessly. Two CPU-bound jobs cannot.</p>
-<p>A quick way to classify a job is to measure its CPU time against its wall time. If the ratio is high, it is CPU-bound.</p>
-<pre class="codehilite"><code class="language-python">import subprocess
-import time
-
-def profile_job(command: list[str]) -&gt; dict:
-    start = time.perf_counter()
-    proc = subprocess.run(command, capture_output=True, text=True)
-    wall = time.perf_counter() - start
-
-    # On Windows, use the process's own accounting via a wrapper if needed.
-    # For a rough ratio, compare wall time against a known CPU baseline.
-    return {
-        &quot;wall_seconds&quot;: round(wall, 2),
-        &quot;returncode&quot;: proc.returncode,
-        &quot;cpu_ratio_estimate&quot;: &quot;high&quot; if wall &lt; 1.0 else &quot;low&quot;,
-    }
+<p>That gives you names and start boundaries. It doesn't tell you what the jobs <em>do</em> — which is the part that matters for spacing. So I added a second pass: for each task, record the action (the script path) and a manual tag for CPU-bound vs I/O-bound.</p>
+<pre class="codehilite"><code class="language-python">TAGS = {
+    &quot;MarketSignalHourly&quot;:   {&quot;kind&quot;: &quot;cpu&quot;, &quot;reads&quot;: [&quot;signals.json&quot;],
+                             &quot;writes&quot;: [&quot;positions.json&quot;]},
+    &quot;DataRefreshHourly&quot;:    {&quot;kind&quot;: &quot;io&quot;,  &quot;reads&quot;: [],
+                             &quot;writes&quot;: [&quot;signals.json&quot;]},
+    &quot;NightlyMaintenance&quot;:   {&quot;kind&quot;: &quot;cpu&quot;, &quot;reads&quot;: [&quot;positions.json&quot;],
+                             &quot;writes&quot;: [&quot;positions.json&quot;, &quot;audit.log&quot;]},
+    &quot;BlogPublish&quot;:          {&quot;kind&quot;: &quot;io&quot;,  &quot;reads&quot;: [&quot;posts/*.md&quot;],
+                             &quot;writes&quot;: [&quot;site/&quot;]},
+    &quot;BlogPublishDE&quot;:        {&quot;kind&quot;: &quot;io&quot;,  &quot;reads&quot;: [&quot;posts/de/*.md&quot;],
+                             &quot;writes&quot;: [&quot;site/de/&quot;]},
+}
 </code></pre>
 
-<p>For a more accurate number, run the job under <code>time</code> on Linux or use <code>Get-Process</code> / <code>Process.TotalProcessorTime</code> on Windows. The point is not precision. The point is knowing which jobs will fight each other.</p>
-<p>Rules of thumb that held up in practice:</p>
-<ul>
-<li><strong>CPU-bound jobs get at least 15 minutes of separation.</strong> A job that saturates the box for two minutes will still be flushing its caches and releasing file handles for a while after. Fifteen minutes is cheap insurance.</li>
-<li><strong>I/O-bound jobs can overlap, but not on the same files.</strong> Two jobs hitting different APIs at the same minute is fine. Two jobs reading and writing the same directory is not.</li>
-<li><strong>Jobs that touch the same state file must never overlap at all.</strong> This is not a spacing preference; it is a correctness requirement. More on this below.</li>
-<li><strong>Leave one slot per hour empty.</strong> If you have three hourly jobs, do not pack them at <code>:00</code>, <code>:05</code>, <code>:10</code>. Put them at <code>:00</code>, <code>:20</code>, <code>:40</code> so a slow run has room to finish before the next one starts.</li>
-</ul>
-<h2 id="step-3-the-file-lock-hazard">Step 3: The file-lock hazard</h2>
-<p>The original failure was not CPU contention. It was two processes writing the same JSON file. On Windows, <code>open(path, "w")</code> truncates the file immediately, before any data is written. If a reader opens the file in that window, it sees an empty file or a partial one. Python's <code>json.load</code> then raises <code>JSONDecodeError</code>, or worse, succeeds on a truncated-but-valid fragment.</p>
-<p>There are three ways to handle this, in increasing order of robustness.</p>
-<h3 id="option-a-atomic-writes-via-a-temp-file-and-rename">Option A: Atomic writes via a temp file and rename</h3>
-<p>Write to a temporary file in the same directory, then <code>os.replace</code> it over the target. <code>os.replace</code> is atomic on Windows and POSIX, so readers either see the old file or the new one, never a partial write.</p>
+<p>The <code>reads</code>/<code>writes</code> sets are the important column. Two jobs that share a write target must never overlap, regardless of how cheap they are.</p>
+<h2 id="step-2-rules-of-thumb-for-spacing">Step 2: Rules of thumb for spacing</h2>
+<p>Once you have the inventory, spacing is mostly mechanical. Three rules cover almost everything:</p>
+<h3 id="cpu-bound-jobs-need-a-full-estimated-runtime-of-separation">CPU-bound jobs need a full estimated runtime of separation</h3>
+<p>If a job takes 12 minutes of CPU on a busy box, don't schedule the next CPU-bound job 5 minutes later. Measure the p95 runtime, not the median. The overlap you're trying to avoid is the tail, not the typical case.</p>
+<h3 id="io-bound-jobs-can-share-a-slot-if-they-touch-different-files">I/O-bound jobs can share a slot if they touch different files</h3>
+<p>Two jobs that read disjoint file sets and write to disjoint outputs can run together. Disk throughput is usually fine for a handful of readers. The moment they write the same path, they can't share.</p>
+<h3 id="never-let-a-writer-and-a-reader-of-the-same-file-overlap">Never let a writer and a reader of the same file overlap</h3>
+<p>This is the hard rule. Even a fast reader can catch a partial write. Either serialize them or make the write atomic (see the next section).</p>
+<p>Applying these to the fleet:</p>
+<table>
+<thead>
+<tr>
+<th>Job</th>
+<th>Kind</th>
+<th>Runtime (p95)</th>
+<th>Constraint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MarketSignalHourly</td>
+<td>cpu</td>
+<td>14 min</td>
+<td>writes <code>positions.json</code></td>
+</tr>
+<tr>
+<td>DataRefreshHourly</td>
+<td>io</td>
+<td>6 min</td>
+<td>writes <code>signals.json</code></td>
+</tr>
+<tr>
+<td>NightlyMaintenance</td>
+<td>cpu</td>
+<td>40 min</td>
+<td>writes <code>positions.json</code>, <code>audit.log</code></td>
+</tr>
+<tr>
+<td>BlogPublish</td>
+<td>io</td>
+<td>3 min</td>
+<td>writes <code>site/</code></td>
+</tr>
+<tr>
+<td>BlogPublishDE</td>
+<td>io</td>
+<td>3 min</td>
+<td>writes <code>site/de/</code></td>
+</tr>
+</tbody>
+</table>
+<p>The signal job and the refresh job both ran at <code>HH:00</code>. The signal job reads <code>signals.json</code>; the refresh job writes it. That's the writer/reader overlap, and it's the one that corrupted data. The fix: move the refresh job off the top of the hour so it finishes before the signal job starts, or at least so the write window doesn't intersect the read window.</p>
+<p>I moved the refresh to <code>HH:45</code> — 15 minutes before the signal job. The refresh takes 6 minutes at p95, so it's done by <code>HH:51</code>, leaving a 9-minute buffer. That buffer absorbs the tail.</p>
+<h2 id="step-3-the-offset-schedule">Step 3: The offset schedule</h2>
+<p>Here's the timetable that emerged. The signal job stays at <code>HH:00</code> because downstream consumers expect it there. Everything else moves around it.</p>
+<pre class="codehilite"><code>HH:00  MarketSignalHourly      (cpu, 14 min)
+HH:45  DataRefreshHourly       (io, 6 min)  -&gt; completes before next HH:00
+04:30  NightlyMaintenance      (cpu, 40 min) -&gt; done by 05:10
+09:00  BlogPublish             (io, 3 min)
+10:30  BlogPublishDE           (io, 3 min)
+</code></pre>
+
+<p>The daily jobs sit in a quiet window. <code>04:30</code> is after the overnight batch and before the morning signal jobs ramp up. <code>09:00</code> and <code>10:30</code> are separated by 90 minutes, which is overkill for two 3-minute jobs, but the gap gives room for retries and for the English site build to finish before the German one starts — they share a <code>site/</code> parent directory, so a partial build on one side can confuse a deploy that scans the whole tree.</p>
+<p>The <code>HH:45</code> offset is the one that matters most. It's not a round number, which is the point. Round numbers cluster; odd offsets don't.</p>
+<h2 id="step-4-handle-the-shared-state-file">Step 4: Handle the shared state file</h2>
+<p>Staggering reduces overlap but doesn't eliminate it. A job that overruns its window will still collide with the next one. The durable fix is atomic writes plus a lock file.</p>
+<p>On Windows, <code>os.replace</code> is atomic on the same volume. Write to a temp file, then replace the target. Readers either see the old file or the new one, never a partial write.</p>
 <pre class="codehilite"><code class="language-python">import json
 import os
 import tempfile
 from pathlib import Path
 
-def atomic_write_json(path: Path, data: dict) -&gt; None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def atomic_write_json(path: Path, payload: dict) -&gt; None:
+    &quot;&quot;&quot;Write JSON so readers never observe a partial file.&quot;&quot;&quot;
+    path = Path(path)
     fd, tmp_name = tempfile.mkstemp(
-        dir=path.parent, prefix=path.name, suffix=&quot;.tmp&quot;
+        dir=path.parent, prefix=path.name + &quot;.&quot;, suffix=&quot;.tmp&quot;
     )
     try:
-        with os.fdopen(fd, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_name, path)
+        with os.fdopen(fd, &quot;w&quot;, encoding=&quot;utf-8&quot;) as fh:
+            json.dump(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)  # atomic on same volume
     except BaseException:
         os.unlink(tmp_name)
         raise
 </code></pre>
 
-<p>This eliminates the truncation window entirely. It does not eliminate the <em>lost update</em> problem: if two jobs read, modify, and write the same file, the second writer overwrites the first writer's changes. Atomicity is not isolation.</p>
-<h3 id="option-b-a-lock-file-with-a-timeout">Option B: A lock file with a timeout</h3>
-<p>If two jobs genuinely need to mutate the same state, serialize them with a lock. On Windows, use <code>msvcrt.locking</code> or a simple <code>O_CREAT | O_EXCL</code> lock file with a stale-lock timeout.</p>
+<p>That handles readers. For writers, add a lock so two processes can't both decide to write. A simple lock file with an exclusive create works on Windows and POSIX:</p>
 <pre class="codehilite"><code class="language-python">import time
-from pathlib import Path
+from contextlib import contextmanager
 
-class FileLock:
-    def __init__(self, path: Path, timeout: float = 30.0):
-        self.path = path
-        self.timeout = timeout
-
-    def __enter__(self):
-        deadline = time.monotonic() + self.timeout
-        while True:
-            try:
-                self.path.touch(exist_ok=False)
-                return self
-            except FileExistsError:
-                if time.monotonic() &gt; deadline:
-                    raise TimeoutError(f&quot;lock held: {self.path}&quot;)
-                time.sleep(0.5)
-
-    def __exit__(self, *exc):
-        self.path.unlink(missing_ok=True)
+@contextmanager
+def file_lock(path: Path, timeout: float = 30.0):
+    &quot;&quot;&quot;Exclusive lock via atomic create. Windows-safe.&quot;&quot;&quot;
+    lock = Path(str(path) + &quot;.lock&quot;)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() &gt; deadline:
+                raise TimeoutError(f&quot;lock held: {lock}&quot;)
+            time.sleep(0.5)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
 </code></pre>
 
-<p>The timeout matters. A crashed job that leaves a lock file behind will block every subsequent run until someone notices. Thirty seconds is usually enough for a job that finishes in two.</p>
-<h3 id="option-c-do-not-share-the-file">Option C: Do not share the file</h3>
-<p>The cleanest fix is architectural: give each job its own file and have a single consumer merge them. The signal job writes <code>signals.json</code>. The refresh job writes <code>prices.json</code>. A separate aggregation step reads both. No lock, no contention, no lost updates.</p>
-<p>This is the option to reach for first. Locks are a symptom of two jobs that should not have been coupled.</p>
-<h2 id="step-4-the-one-page-timetable">Step 4: The one-page timetable</h2>
-<p>After inventorying and classifying, the schedule becomes a table. Here is the actual layout that resolved the collision, with the reasoning in the last column.</p>
+<p>Then any job that writes <code>signals.json</code> wraps its write:</p>
+<pre class="codehilite"><code class="language-python">with file_lock(SIGNALS_PATH):
+    data = load_json(SIGNALS_PATH)
+    data.update(new_signals)
+    atomic_write_json(SIGNALS_PATH, data)
+</code></pre>
+
+<p>The lock serializes writers; the atomic replace protects readers. Together they make the schedule forgiving of small overruns. Staggering is still the first line of defense — locks are the second.</p>
+<p>One caveat: a stale lock file from a crashed process will block everything. Either add a PID check or a timestamp inside the lock file and expire it. For a small fleet, a timestamp is enough:</p>
+<pre class="codehilite"><code class="language-python">def lock_is_stale(lock: Path, max_age: float = 300.0) -&gt; bool:
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    return age &gt; max_age
+</code></pre>
+
+<p>Check <code>lock_is_stale</code> before raising <code>TimeoutError</code>, and unlink if it's old.</p>
+<h2 id="step-5-one-page-for-the-whole-fleet">Step 5: One page for the whole fleet</h2>
+<p>The inventory script and the tags table are useful, but they drift. The thing that actually kept the schedule sane was a single generated page — a timetable that lists every job, its trigger, its kind, and its file dependencies. I regenerate it from the source of truth (the task definitions plus the tags dict) and commit it.</p>
+<pre class="codehilite"><code class="language-python">def render_timetable(tasks, tags) -&gt; str:
+    lines = [&quot;| Job | Trigger | Kind | Reads | Writes |&quot;, &quot;|---|---|---|---|---|&quot;]
+    for task in sorted(tasks, key=lambda t: t[&quot;start&quot;]):
+        tag = tags.get(task[&quot;name&quot;], {})
+        lines.append(
+            f&quot;| {task['name']} | {task['start']} | {tag.get('kind', '?')} &quot;
+            f&quot;| {', '.join(tag.get('reads', [])) or '-'} &quot;
+            f&quot;| {', '.join(tag.get('writes', [])) or '-'} |&quot;
+        )
+    return &quot;\n&quot;.join(lines)
+</code></pre>
+
+<p>The value isn't the table itself — it's that adding a job forces you to fill in the <code>reads</code>/<code>writes</code> columns. That's the moment you notice two jobs want the same file at the same time. The timetable makes the collision visible before it happens, instead of after a corrupted JSON file shows up in the logs.</p>
+<h2 id="what-changed">What changed</h2>
+<p>After the rebalance, the <code>PermissionError</code> entries stopped. The signal job's parse failures went to zero because <code>signals.json</code> is now written by a job that finishes 9 minutes before the signal job reads it, and even if it overruns, the atomic write means the signal job reads a complete file. The nightly maintenance window moved off the top of the hour, so it no longer competes with the first morning signal run.</p>
+<p>None of this required new hardware. It required looking at the schedule as a system instead of a list of independent jobs, measuring the tail runtimes, and picking offsets that don't cluster on round numbers.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-06 12:36:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
 <table>
 <thead>
 <tr>
-<th>Time</th>
-<th>Job</th>
-<th>Type</th>
-<th>Why this slot</th>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>HH:00</code></td>
-<td>Market signal computation</td>
-<td>CPU-bound</td>
-<td>Top of hour, isolated; nothing else runs here</td>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
 </tr>
 <tr>
-<td><code>HH:30</code></td>
-<td>Data refresh (API pull)</td>
-<td>I/O-bound</td>
-<td>Offset from signals by 30 min; writes <code>prices.json</code> only</td>
-</tr>
-<tr>
-<td><code>04:30</code></td>
-<td>Heavy daily maintenance</td>
-<td>CPU-bound</td>
-<td>Night window, no market activity, full core budget</td>
-</tr>
-<tr>
-<td><code>09:00</code></td>
-<td>Blog publishing</td>
-<td>I/O-bound</td>
-<td>After maintenance, before the 10:30 slot</td>
-</tr>
-<tr>
-<td><code>10:30</code></td>
-<td>Second language site publish</td>
-<td>I/O-bound</td>
-<td>Offset from blog by 90 min; shares template cache</td>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
 </tr>
 </tbody>
 </table>
-<p>The market signal job still runs every hour at <code>:00</code>. The data refresh now runs at <code>:30</code>, so it never reads a snapshot that is being rewritten. The heavy maintenance job moved from midnight — where it collided with the first hourly signal — to <code>04:30</code>. Blog publishing and the second language site are 90 minutes apart, which is more than the template cache needs to settle.</p>
-<p>The timetable lives in a single Markdown file in the repo, and the actual task definitions are generated from it. That way the document and the scheduler cannot drift apart.</p>
-<pre class="codehilite"><code class="language-python">import subprocess
-from dataclasses import dataclass
-
-@dataclass
-class ScheduleEntry:
-    name: str
-    time: str          # &quot;HH:MM&quot; or &quot;HH:30&quot; for repeating
-    command: str
-    repeat_minutes: int | None = None
-
-SCHEDULE = [
-    ScheduleEntry(&quot;MarketSignals&quot;, &quot;00:00&quot;, &quot;python -m jobs.signals&quot;, 60),
-    ScheduleEntry(&quot;DataRefresh&quot;, &quot;00:30&quot;, &quot;python -m jobs.refresh&quot;, 60),
-    ScheduleEntry(&quot;HeavyMaintenance&quot;, &quot;04:30&quot;, &quot;python -m jobs.maintenance&quot;),
-    ScheduleEntry(&quot;BlogPublish&quot;, &quot;09:00&quot;, &quot;python -m jobs.blog&quot;),
-    ScheduleEntry(&quot;SecondLangPublish&quot;, &quot;10:30&quot;, &quot;python -m jobs.blog_alt&quot;),
-]
-
-def install(entry: ScheduleEntry) -&gt; None:
-    args = [
-        &quot;schtasks&quot;, &quot;/Create&quot;, &quot;/F&quot;,
-        &quot;/TN&quot;, f&quot;CodeQuant\\{entry.name}&quot;,
-        &quot;/TR&quot;, entry.command,
-        &quot;/SC&quot;, &quot;DAILY&quot; if entry.repeat_minutes is None else &quot;MINUTE&quot;,
-        &quot;/ST&quot;, entry.time,
-    ]
-    if entry.repeat_minutes:
-        args += [&quot;/MO&quot;, str(entry.repeat_minutes)]
-    subprocess.run(args, check=True)
-
-if __name__ == &quot;__main__&quot;:
-    for e in SCHEDULE:
-        install(e)
-        print(f&quot;installed {e.name} at {e.time}&quot;)
-</code></pre>
-
-<p>Two things to note. First, <code>schtasks /SC MINUTE /MO 60</code> with <code>/ST 00:30</code> produces a job that runs at <code>00:30</code>, <code>01:30</code>, <code>02:30</code>, and so on — the offset is preserved. Second, the <code>/F</code> flag overwrites an existing task, so re-running this script is idempotent. That makes the timetable the single source of truth.</p>
-<h2 id="what-to-check-after-you-stagger">What to check after you stagger</h2>
-<p>Staggering is not a one-time fix. Verify it holds:</p>
-<ul>
-<li><strong>Log the start and end time of every job.</strong> If a job's end time creeps into the next job's start time, the spacing is too tight.</li>
-<li><strong>Alert on lock timeouts.</strong> A <code>TimeoutError</code> from the lock means two jobs overlapped. That is a scheduling bug, not a runtime bug.</li>
-<li><strong>Re-run the inventory monthly.</strong> Tasks multiply. The diff catches the ones you forgot.</li>
-<li><strong>Keep the timetable in version control.</strong> If the schedule lives only in the Task Scheduler GUI, it is invisible and undocumented.</li>
-</ul>
-<p>The original problem — two jobs at the top of every hour — took about twenty minutes to diagnose and ten minutes to fix. The expensive part was the weeks of subtly wrong numbers before anyone noticed. A one-page timetable and a thirty-minute offset would have prevented all of it.</p>
-<p>More notes like this ship every week on this site.</p>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">staggering</span><span class="tag-badge">task scheduling</span><span class="tag-badge">resource contention</span><span class="tag-badge">cron-like design</span></div>
             <div class="post-footer">
