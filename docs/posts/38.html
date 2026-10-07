@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>市场情绪分析功能实现：综合分数+F&amp;G指标 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="市场情绪分析功能实现：综合分数+F&amp;G指标
+
+情绪是市场的短期定价因子之一。价格可以被操纵,成交量可以被对倒,但情绪指标往往能提供另一维度的参考。...">
+    <meta name="keywords" content="市场情绪,F&amp;G指标,情绪分析,Python">
+    <meta property="og:title" content="市场情绪分析功能实现：综合分数+F&amp;G指标">
+    <meta property="og:description" content="市场情绪分析功能实现：综合分数+F&amp;G指标
+
+情绪是市场的短期定价因子之一。价格可以被操纵,成交量可以被对倒,但情绪指标往往能提供另一维度的参考。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/38.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>市场情绪分析功能实现：综合分数+F&amp;G指标</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-07</span>
+                <span class="category"><span class="tag-badge">量化策略</span></span>
+            </div>
+            <div class="post-content">
+<p>情绪是市场的短期定价因子之一。价格可以被操纵,成交量可以被对倒,但情绪指标往往能提供另一维度的参考。这篇文章记录我在自己的量化系统里实现市场情绪分析模块的过程,包括 F&amp;G 指数获取、综合情绪分数计算、极端值信号,以及定时推送。</p>
+<h2 id="_1">一、为什么要做情绪分析</h2>
+<p>做趋势策略的时候,最难受的不是震荡,而是趋势末端的情绪亢奋期。价格连续拉升,系统不断给出买入信号,但实际风险在快速积累。纯粹依赖价格和成交量的策略,很难识别"市场已经过热"这件事。</p>
+<p>情绪指标的价值在于:它提供的是<strong>与价格相关性较低</strong>的信息。当综合情绪分数进入极端区域,可以作为仓位管理的辅助因子——不是用来反向开单,而是用来调整仓位系数。</p>
+<p>我的实现思路:</p>
+<ol>
+<li>抓取外部情绪数据(以 Fear &amp; Greed Index 为主)</li>
+<li>计算本地可量化的情绪代理指标(波动率、涨跌比、资金费率等)</li>
+<li>加权合成一个 0-100 的综合情绪分数</li>
+<li>在极端区间产生信号</li>
+<li>定时推送到 Telegram / 邮件</li>
+</ol>
+<h2 id="fg">二、F&amp;G 指数数据获取</h2>
+<p>Alternative.me 提供的 F&amp;G 数据是最常用的免费源,覆盖加密货币市场。接口简单,返回 JSON。</p>
+<pre class="codehilite"><code class="language-python">import requests
+import pandas as pd
+from datetime import datetime
+
+FG_URL = &quot;https://api.alternative.me/fng/&quot;
+
+def fetch_fear_greed(limit: int = 30) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    获取恐惧贪婪指数历史数据
+    limit: 返回最近 N 天的数据
+    &quot;&quot;&quot;
+    params = {&quot;limit&quot;: limit, &quot;format&quot;: &quot;json&quot;}
+    resp = requests.get(FG_URL, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()[&quot;data&quot;]
+
+    df = pd.DataFrame(data)
+    df[&quot;timestamp&quot;] = pd.to_datetime(df[&quot;timestamp&quot;].astype(int), unit=&quot;s&quot;)
+    df[&quot;value&quot;] = df[&quot;value&quot;].astype(int)
+    df = df[[&quot;timestamp&quot;, &quot;value&quot;, &quot;value_classification&quot;]]
+    df = df.sort_values(&quot;timestamp&quot;).reset_index(drop=True)
+    return df
+
+
+if __name__ == &quot;__main__&quot;:
+    fg = fetch_fear_greed(limit=10)
+    print(fg.tail())
+</code></pre>
+
+<p>返回字段里 <code>value_classification</code> 是官方给的文字标签(Extreme Fear / Fear / Neutral / Greed / Extreme Greed),可以直接用,也可以自己按区间划分。</p>
+<p>注意这个接口偶尔会超时,生产环境建议加一层重试和本地缓存:</p>
+<pre class="codehilite"><code class="language-python">import time
+import json
+from pathlib import Path
+
+CACHE_FILE = Path(&quot;fg_cache.json&quot;)
+
+def fetch_fg_with_cache(limit: int = 30) -&gt; pd.DataFrame:
+    try:
+        df = fetch_fear_greed(limit)
+        df.to_json(CACHE_FILE, orient=&quot;records&quot;, date_format=&quot;iso&quot;)
+        return df
+    except Exception as e:
+        print(f&quot;[warn] fetch failed: {e}, fallback to cache&quot;)
+        if CACHE_FILE.exists():
+            return pd.read_json(CACHE_FILE)
+        raise
+</code></pre>
+
+<h2 id="_2">三、综合情绪分数计算</h2>
+<p>F&amp;G 只有一个维度,而且更新频率是日级。要构建更有弹性的情绪分数,我会把几个本地可计算的指标合成进来。</p>
+<h3 id="31">3.1 情绪代理指标</h3>
+<p>选取四个维度:</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>含义</th>
+<th>情绪方向</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>波动率分位</td>
+<td>近期 ATR / 长期 ATR</td>
+<td>高波动 → 情绪极端</td>
+</tr>
+<tr>
+<td>涨跌比</td>
+<td>近 N 根 K 线上涨占比</td>
+<td>越高越贪婪</td>
+</tr>
+<tr>
+<td>动量偏离</td>
+<td>当前价相对 MA20 的偏离</td>
+<td>偏离越大越亢奋</td>
+</tr>
+<tr>
+<td>资金费率</td>
+<td>永续合约资金费率</td>
+<td>正费率越高越贪婪</td>
+</tr>
+</tbody>
+</table>
+<h3 id="32-0-100">3.2 归一化到 0-100</h3>
+<p>每个指标先做 min-max 或分位数归一化,再加权。</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def normalize_series(s: pd.Series, window: int = 90) -&gt; pd.Series:
+    &quot;&quot;&quot;滚动 min-max 归一化到 0-100&quot;&quot;&quot;
+    roll_min = s.rolling(window, min_periods=10).min()
+    roll_max = s.rolling(window, min_periods=10).max()
+    rng = (roll_max - roll_min).replace(0, np.nan)
+    return ((s - roll_min) / rng * 100).clip(0, 100)
+
+
+def compute_volatility_score(df: pd.DataFrame, window: int = 90) -&gt; pd.Series:
+    &quot;&quot;&quot;ATR 比率 -&gt; 情绪分&quot;&quot;&quot;
+    high, low, close = df[&quot;high&quot;], df[&quot;low&quot;], df[&quot;close&quot;]
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    atr_short = tr.rolling(14).mean()
+    atr_long = tr.rolling(60).mean()
+    ratio = atr_short / atr_long
+    return normalize_series(ratio, window)
+
+
+def compute_breadth_score(df: pd.DataFrame, n: int = 20, window: int = 90) -&gt; pd.Series:
+    &quot;&quot;&quot;近 n 根 K 线上涨占比&quot;&quot;&quot;
+    up = (df[&quot;close&quot;].diff() &gt; 0).astype(int)
+    breadth = up.rolling(n).mean() * 100
+    return normalize_series(breadth, window)
+
+
+def compute_momentum_score(df: pd.DataFrame, window: int = 90) -&gt; pd.Series:
+    &quot;&quot;&quot;价格相对 MA20 的偏离&quot;&quot;&quot;
+    ma20 = df[&quot;close&quot;].rolling(20).mean()
+    dev = (df[&quot;close&quot;] - ma20) / ma20
+    return normalize_series(dev, window)
+</code></pre>
+
+<h3 id="33">3.3 合成综合分数</h3>
+<p>权重我给的是经验值:波动率 0.25、涨跌比 0.25、动量 0.3、F&amp;G 0.2。可以根据自己的策略回测调整。</p>
+<pre class="codehilite"><code class="language-python">def compute_composite_score(df: pd.DataFrame, fg_df: pd.DataFrame) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    df: 含 open/high/low/close 的日线数据,index 为 datetime
+    fg_df: F&amp;G 数据,含 timestamp / value
+    &quot;&quot;&quot;
+    out = pd.DataFrame(index=df.index)
+    out[&quot;vol_score&quot;] = compute_volatility_score(df)
+    out[&quot;breadth_score&quot;] = compute_breadth_score(df)
+    out[&quot;mom_score&quot;] = compute_momentum_score(df)
+
+    # 对齐 F&amp;G 数据
+    fg = fg_df.set_index(&quot;timestamp&quot;)[&quot;value&quot;].rename(&quot;fg_score&quot;)
+    out = out.join(fg, how=&quot;left&quot;)
+    out[&quot;fg_score&quot;] = out[&quot;fg_score&quot;].ffill()
+
+    weights = {
+        &quot;vol_score&quot;: 0.25,
+        &quot;breadth_score&quot;: 0.25,
+        &quot;mom_score&quot;: 0.30,
+        &quot;fg_score&quot;: 0.20,
+    }
+    out[&quot;composite&quot;] = sum(out[k] * w for k, w in weights.items())
+    out[&quot;composite&quot;] = out[&quot;composite&quot;].clip(0, 100)
+    return out
+</code></pre>
+
+<p>跑完之后,<code>composite</code> 就是 0-100 的综合情绪分数。低于 20 视为极度恐慌,高于 80 视为极度贪婪。</p>
+<h2 id="_3">四、极端值作为交易参考</h2>
+<p>情绪分数本身不是开仓信号,它是<strong>仓位调节器</strong>。我的做法是:</p>
+<ul>
+<li>综合分数 &gt; 80:多头仓位系数 × 0.5,做空信号权重 × 1.2</li>
+<li>综合分数 &lt; 20:多头仓位系数 × 1.2,做空信号权重 × 0.5</li>
+<li>其他区间:系数 1.0</li>
+</ul>
+<pre class="codehilite"><code class="language-python">def sentiment_position_factor(score: float) -&gt; float:
+    &quot;&quot;&quot;根据情绪分数返回仓位系数&quot;&quot;&quot;
+    if score &gt;= 80:
+        return 0.5
+    if score &gt;= 65:
+        return 0.8
+    if score &lt;= 20:
+        return 1.2
+    if score &lt;= 35:
+        return 1.1
+    return 1.0
+
+
+def detect_extreme(score_series: pd.Series, high: float = 80, low: float = 20) -&gt; pd.Series:
+    &quot;&quot;&quot;标记情绪极端点&quot;&quot;&quot;
+    signal = pd.Series(0, index=score_series.index)
+    signal[score_series &gt;= high] = 1    # 贪婪
+    signal[score_series &lt;= low] = -1    # 恐慌
+    return signal
+</code></pre>
+
+<p>更稳妥的用法是<strong>结合极值持续时间</strong>。单日进入 80 以上意义不大,连续 3 天以上进入极值区,才说明情绪确实被推到了极端。可以加一个滚动窗口:</p>
+<pre class="codehilite"><code class="language-python">def persistent_extreme(score_series: pd.Series, days: int = 3) -&gt; pd.Series:
+    high_flag = (score_series &gt;= 80).rolling(days).sum() == days
+    low_flag = (score_series &lt;= 20).rolling(days).sum() == days
+    out = pd.Series(0, index=score_series.index)
+    out[high_flag] = 1
+    out[low_flag] = -1
+    return out
+</code></pre>
+
+<h2 id="_4">五、定时推送情绪报告</h2>
+<p>用 <code>schedule</code> 或者 APScheduler 都可以,这里用最轻量的 <code>schedule</code>。推送渠道以 Telegram 为例,邮件类似。</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time
+import requests
+
+TG_TOKEN = &quot;YOUR_BOT_TOKEN&quot;
+TG_CHAT_ID = &quot;YOUR_CHAT_ID&quot;
+
+
+def send_telegram(text: str):
+    url = f&quot;https://api.telegram.org/bot{TG_TOKEN}/sendMessage&quot;
+    payload = {&quot;chat_id&quot;: TG_CHAT_ID, &quot;text&quot;: text, &quot;parse_mode&quot;: &quot;Markdown&quot;}
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f&quot;[error] telegram push failed: {e}&quot;)
+
+
+def build_report(df: pd.DataFrame, scores: pd.DataFrame) -&gt; str:
+    last = scores.iloc[-1]
+    prev = scores.iloc[-2]
+    delta = last[&quot;composite&quot;] - prev[&quot;composite&quot;]
+
+    fg_value = int(last[&quot;fg_score&quot;]) if not pd.isna(last[&quot;fg_score&quot;]) else -1
+    label = &quot;极度贪婪&quot; if last[&quot;composite&quot;] &gt;= 80 else \
+            &quot;贪婪&quot; if last[&quot;composite&quot;] &gt;= 65 else \
+            &quot;极度恐慌&quot; if last[&quot;composite&quot;] &lt;= 20 else \
+            &quot;恐慌&quot; if last[&quot;composite&quot;] &lt;= 35 else &quot;中性&quot;
+
+    arrow = &quot;↑&quot; if delta &gt; 0 else &quot;↓&quot; if delta &lt; 0 else &quot;→&quot;
+
+    report = (
+        f&quot;*市场情绪日报* {last.name.date()}\n&quot;
+        f&quot;综合分数: `{last['composite']:.1f}` {arrow} ({delta:+.1f})\n&quot;
+        f&quot;状态: *{label}*\n&quot;
+        f&quot;F&amp;G: `{fg_value}`\n&quot;
+        f&quot;波动率分: `{last['vol_score']:.1f}`\n&quot;
+        f&quot;涨跌比分: `{last['breadth_score']:.1f}`\n&quot;
+        f&quot;动量分: `{last['mom_score']:.1f}`\n&quot;
+        f&quot;仓位系数: `{sentiment_position_factor(last['composite']):.2f}`&quot;
+    )
+    return report
+
+
+def job():
+    fg_df = fetch_fg_with_cache(limit=180)
+    # df 从你自己的行情源获取,这里省略
+    # df = load_ohlcv(&quot;BTCUSDT&quot;, &quot;1d&quot;, limit=500)
+    scores = compute_composite_score(df, fg_df)
+    report = build_report(df, scores)
+    send_telegram(report)
+
+
+if __name__ == &quot;__main__&quot;:
+    schedule.every().day.at(&quot;08:05&quot;).do(job)
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+</code></pre>
+
+<p>推送时间建议放在你所在时区的早晨,数据源刚完成更新,同时你也方便看一眼再决定当天的操作。</p>
+<h2 id="_5">六、几个实现细节</h2>
+<p><strong>数据对齐</strong>：F&amp;G 是 UTC 时间戳,本地 K 线可能是 UTC+8,join 之前统一时区,否则会出现 NaN。</p>
+<p><strong>缺失值处理</strong>：F&amp;G 接口偶尔抽风,<code>ffill()</code> 是必须的,但不要 <code>bfill</code>,那会引入未来数据。</p>
+<p><strong>权重不要过拟合</strong>：我给的权重是拍的,但不要为了回测好看去优化它。情绪分数的意义是稳健,不是精确。</p>
+<p><strong>分数不要单独用</strong>：单独看情绪分数会经常误判,它必须和价格结构、趋势状态一起判断。我的系统里它只占仓位系数的 20% 权重。</p>
+<p><strong>日志留存</strong>：每次计算完把分数写进数据库或 CSV,方便事后复盘哪次情绪信号有效、哪次失效。</p>
+<h2 id="_6">七、小结</h2>
+<p>这套实现的代码量不大,但补上了纯价格策略的一个盲区。核心逻辑是:</p>
+<ol>
+<li>用 F&amp;G 提供外部情绪锚点</li>
+<li>用本地指标补充高频信息</li>
+<li>加权合成 0-100 分数</li>
+<li>极端值 + 持续性判断产生信号</li>
+<li>定时推送,人工复核</li>
+</ol>
+<p>代码可以直接跑,替换数据源和推送渠道就能接入自己的系统。后续可以考虑把情绪分数做成因子,回测它和未来 N 日收益的相关性,验证权重是否合理。</p>
+<p>更多关于 Python 量化实战、自动化交易系统的内容,请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">市场情绪</span><span class="tag-badge">F&amp;G指标</span><span class="tag-badge">情绪分析</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
