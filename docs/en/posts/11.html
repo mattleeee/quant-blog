@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GB28181 Camera Cascading: When SIP INVITE Never Arrived - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Symptom: Online but Blind A school&#x27;s camera system cascades to a provincial education video platform through a Hikvi...">
+    <meta name="keywords" content="GB28181,SIP,INVITE,tcpdump,NAT,firewall">
+    <meta property="og:title" content="GB28181 Camera Cascading: When SIP INVITE Never Arrived">
+    <meta property="og:description" content="The Symptom: Online but Blind A school&#x27;s camera system cascades to a provincial education video platform through a Hikvi...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/11.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>GB28181 Camera Cascading: When SIP INVITE Never Arrived</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-07</span>
+                <span class="category"><span class="tag-badge">Network &amp; Security</span></span>
+            </div>
+            <div class="post-content">
+<p>A school's camera system cascades to a provincial education video platform through a Hikvision NCG (Network Camera Gateway). The platform dashboard showed the device as online — green light, heartbeat timestamps updating every few seconds. But when an operator clicked "Playback" in the provincial client, nothing happened. No video, no error, no timeout message. Just a spinner that eventually gave up.</p>
+<p>This is one of the more frustrating failure modes in GB28181 deployments because the monitoring layer says everything is fine. The device is registered. The keepalive is flowing. The platform considers the camera healthy. Yet the actual media session never establishes.</p>
+<p>The debugging path here is a good case study in how to isolate a network problem from an application problem, and how to produce evidence that a firewall engineer can act on without a three-hour conference call.</p>
+<h2 id="gb28181-signaling-two-very-different-flows">GB28181 Signaling: Two Very Different Flows</h2>
+<p>GB28181 runs SIP over UDP (usually port 5060) for signaling, and RTP over UDP for media. But the signaling itself splits into two distinct patterns that behave very differently on a firewall.</p>
+<h3 id="heartbeat-register-and-keepalive">Heartbeat: REGISTER and Keepalive</h3>
+<p>The device periodically sends a SIP REGISTER message to the platform. The platform responds with 200 OK. Between registrations, the device sends keepalive packets — often a SIP MESSAGE or a custom heartbeat — at a shorter interval, typically every 5 to 60 seconds depending on configuration.</p>
+<p>These packets are small. A typical REGISTER is 400–600 bytes. A keepalive MESSAGE is even smaller. They are also initiated by the device, which means they create a stateful entry in the firewall's connection tracking table. The firewall sees an outbound UDP packet from the school network to the platform IP, and it allows the return traffic.</p>
+<p>This is why the platform sees the device as online. The heartbeat path works. The firewall has an open pinhole for that specific UDP flow.</p>
+<h3 id="invite-the-platform-initiated-session">INVITE: The Platform-Initiated Session</h3>
+<p>When the operator clicks Playback, the platform sends a SIP INVITE to the device. This is the critical difference: the INVITE is initiated by the platform, not the device. It travels from the platform IP to the school's public IP, and then must be forwarded to the NCG's internal address.</p>
+<p>The INVITE is larger — often 800–1200 bytes because it carries SDP with media negotiation parameters. If the platform doesn't get a response, it retransmits. After a few retries, it gives up.</p>
+<p>The problem in this case: the INVITE never arrived at the NCG. Not the first attempt, not the retries.</p>
+<h2 id="the-tcpdump-evidence">The tcpdump Evidence</h2>
+<p>The engineer ran tcpdump on the NCG server for 3.5 minutes while the operator repeatedly pressed Playback. The capture showed:</p>
+<ul>
+<li>Heartbeat packets in both directions, every few seconds, exactly as expected.</li>
+<li>Zero SIP INVITE packets. Not a single one.</li>
+<li>On the platform side, the platform's own capture showed 16 retry bursts of roughly 950 bytes each — the INVITE retransmissions.</li>
+</ul>
+<p>This is the key diagnostic split. The platform sent the INVITEs. The NCG never saw them. The packets died somewhere between the platform's egress and the NCG's ingress. That narrows the fault domain to the school firewall, an upstream router, or a NAT device in between.</p>
+<h2 id="placing-tcpdump-correctly">Placing tcpdump Correctly</h2>
+<p>Where you run tcpdump determines what you can conclude. The mistake many people make is running it on the wrong interface or with a filter that misses the relevant traffic.</p>
+<h3 id="on-the-ncg">On the NCG</h3>
+<p>The NCG is the device that should receive the INVITE. Capture on the interface facing the upstream network (the WAN side), not the LAN side. If the NCG has a single NIC, capture on that.</p>
+<pre class="codehilite"><code class="language-bash"># Capture SIP traffic on the WAN interface, write to file for analysis
+tcpdump -i eth0 -n -s 0 -w /tmp/gb28181_capture.pcap 'udp port 5060'
+</code></pre>
+
+<p>The <code>-s 0</code> ensures full packet capture. SIP messages can be large, and truncating them loses SDP details. The <code>-n</code> avoids DNS lookups that slow down capture. Writing to a file lets you analyze later with Wireshark.</p>
+<h3 id="on-the-platform-side">On the Platform Side</h3>
+<p>If you have access to the platform server, capture there too. This gives you the other half of the conversation. You want to confirm the platform actually sent the INVITE and see the retry pattern.</p>
+<pre class="codehilite"><code class="language-bash"># On the platform, capture traffic to/from the school's public IP
+tcpdump -i any -n -s 0 -w /tmp/platform_capture.pcap \
+  'udp port 5060 and host 203.0.113.45'
+</code></pre>
+
+<p>Replace <code>203.0.113.45</code> with the school's public IP. The <code>-i any</code> captures on all interfaces, which is useful when you're not sure which interface the traffic uses.</p>
+<h3 id="what-to-look-for">What to Look For</h3>
+<p>In the NCG capture, you want to see:</p>
+<ul>
+<li>Heartbeat packets: source = NCG internal IP, destination = platform IP, port 5060.</li>
+<li>Any inbound SIP from the platform IP. If this is empty, the INVITE never arrived.</li>
+</ul>
+<p>In the platform capture, you want to see:</p>
+<ul>
+<li>Outbound INVITE to the school's public IP.</li>
+<li>Retransmissions at increasing intervals (typically 500ms, 1s, 2s, 4s...).</li>
+<li>No response from the school side.</li>
+</ul>
+<p>The combination proves the packets left the platform and never reached the NCG. The firewall or an upstream device is dropping them.</p>
+<h2 id="why-the-firewall-drops-the-invite">Why the Firewall Drops the INVITE</h2>
+<p>Several mechanisms can cause this. The heartbeat path works because it's outbound-initiated and the firewall's stateful tracking allows the return traffic. The INVITE is inbound-initiated, and the firewall has no existing state for it.</p>
+<h3 id="missing-inbound-rule">Missing Inbound Rule</h3>
+<p>The most common cause: the firewall has no rule allowing inbound UDP 5060 from the platform IP to the NCG. The heartbeat works because outbound traffic is allowed by default, and the return path is permitted by connection tracking. But a new inbound session from the platform is blocked.</p>
+<h3 id="nat-and-port-mapping">NAT and Port Mapping</h3>
+<p>If the school is behind NAT, the platform sends the INVITE to the school's public IP on port 5060. The NAT device needs a port-forwarding rule to send that traffic to the NCG's internal IP. Without it, the packet arrives at the NAT device and is dropped because there's no mapping.</p>
+<h3 id="asymmetric-routing">Asymmetric Routing</h3>
+<p>Sometimes the INVITE arrives at the firewall, but the firewall routes it out a different interface than the one the heartbeat uses. If the return path is asymmetric, the firewall may drop the packet as part of its stateful inspection.</p>
+<h3 id="sip-alg-interference">SIP ALG Interference</h3>
+<p>Some firewalls have a SIP ALG (Application Layer Gateway) enabled. The ALG inspects SIP traffic and tries to rewrite headers. If it doesn't understand the GB28181 message format — which is common, since GB28181 uses SIP in non-standard ways — it may drop the packet or mangle it.</p>
+<h2 id="building-the-evidence-pack">Building the Evidence Pack</h2>
+<p>The goal is to hand the firewall engineer a package that lets them find the rule or the drop without needing to reproduce the issue. Here's what to include:</p>
+<h3 id="1-packet-captures-from-both-sides">1. Packet Captures from Both Sides</h3>
+<p>The NCG capture showing heartbeats but no INVITE. The platform capture showing INVITE retries with no response. Name the files clearly with timestamps.</p>
+<h3 id="2-a-timeline">2. A Timeline</h3>
+<p>A simple table showing when the operator pressed Playback, when the platform sent the INVITE, and what the NCG saw. This helps correlate the two captures.</p>
+<h3 id="3-the-exact-5-tuple">3. The Exact 5-Tuple</h3>
+<p>The firewall engineer needs to know exactly what traffic to look for:</p>
+<ul>
+<li>Source IP: platform IP</li>
+<li>Source port: platform SIP port (often 5060, but can be ephemeral)</li>
+<li>Destination IP: school public IP</li>
+<li>Destination port: 5060</li>
+<li>Protocol: UDP</li>
+</ul>
+<h3 id="4-a-python-script-to-extract-the-relevant-packets">4. A Python Script to Extract the Relevant Packets</h3>
+<p>If you want to make their life easier, provide a script that filters the capture and prints the relevant packets. Here's one using <code>scapy</code>:</p>
+<pre class="codehilite"><code class="language-python">from scapy.all import rdpcap, UDP, IP
+from datetime import datetime
+
+def analyze_gb28181_capture(pcap_file, platform_ip, ncg_ip):
+    &quot;&quot;&quot;
+    Analyze a pcap for GB28181 signaling issues.
+    Prints heartbeat traffic and flags missing INVITEs.
+    &quot;&quot;&quot;
+    packets = rdpcap(pcap_file)
+
+    heartbeats = []
+    invites = []
+
+    for pkt in packets:
+        if IP not in pkt or UDP not in pkt:
+            continue
+
+        src = pkt[IP].src
+        dst = pkt[IP].dst
+        sport = pkt[UDP].sport
+        dport = pkt[UDP].dport
+
+        # SIP traffic on port 5060
+        if sport != 5060 and dport != 5060:
+            continue
+
+        payload = bytes(pkt[UDP].payload)
+
+        # Check for SIP method in payload
+        if b'INVITE' in payload[:100]:
+            invites.append({
+                'time': datetime.fromtimestamp(float(pkt.time)),
+                'src': src,
+                'dst': dst,
+                'size': len(pkt)
+            })
+        elif b'REGISTER' in payload[:100] or b'MESSAGE' in payload[:100]:
+            heartbeats.append({
+                'time': datetime.fromtimestamp(float(pkt.time)),
+                'src': src,
+                'dst': dst,
+                'size': len(pkt)
+            })
+
+    print(f&quot;Total packets: {len(packets)}&quot;)
+    print(f&quot;Heartbeat/REGISTER packets: {len(heartbeats)}&quot;)
+    print(f&quot;INVITE packets: {len(invites)}&quot;)
+    print()
+
+    if heartbeats:
+        print(&quot;First heartbeat:&quot;, heartbeats[0]['time'])
+        print(&quot;Last heartbeat:&quot;, heartbeats[-1]['time'])
+        print()
+
+    if not invites:
+        print(&quot;WARNING: No INVITE packets found in this capture.&quot;)
+        print(&quot;If the platform sent INVITEs, they are being dropped&quot;)
+        print(&quot;before reaching this capture point.&quot;)
+    else:
+        for inv in invites:
+            print(f&quot;INVITE at {inv['time']} from {inv['src']} &quot;
+                  f&quot;to {inv['dst']} ({inv['size']} bytes)&quot;)
+
+    return {
+        'heartbeats': heartbeats,
+        'invites': invites
+    }
+
+# Usage
+result = analyze_gb28181_capture(
+    '/tmp/gb28181_capture.pcap',
+    platform_ip='198.51.100.10',
+    ncg_ip='192.168.1.100'
+)
+</code></pre>
+
+<p>This script gives the firewall engineer a quick summary without needing to open Wireshark. It confirms the heartbeat is present and the INVITE is absent, which is the core evidence.</p>
+<h3 id="5-a-request-for-specific-logs">5. A Request for Specific Logs</h3>
+<p>Ask the firewall engineer to check:</p>
+<ul>
+<li>Drop logs for UDP 5060 from the platform IP to the school public IP.</li>
+<li>NAT session table for any existing mapping to the NCG.</li>
+<li>SIP ALG status and whether it's enabled for this traffic.</li>
+</ul>
+<h2 id="fixing-the-firewall">Fixing the Firewall</h2>
+<p>Once the evidence is in hand, the fix is usually straightforward:</p>
+<ol>
+<li><strong>Add an inbound rule</strong> allowing UDP 5060 from the platform IP to the NCG's internal IP.</li>
+<li><strong>Add a NAT port-forward</strong> if the school is behind NAT, mapping the public IP:5060 to the NCG's internal IP:5060.</li>
+<li><strong>Disable SIP ALG</strong> if it's enabled, since GB28181's SIP usage often confuses ALG implementations.</li>
+<li><strong>Verify the return path</strong> is symmetric — the NCG's response to the INVITE should go out the same interface the INVITE arrived on.</li>
+</ol>
+<p>After the fix, re-run the capture on both sides. You should see the INVITE arrive at the NCG, the NCG respond with 200 OK, and the media session establish.</p>
+<h2 id="the-broader-lesson">The Broader Lesson</h2>
+<p>GB28181 cascading failures often masquerade as application problems because the heartbeat creates a false sense of connectivity. The heartbeat proves the device can reach the platform, but it says nothing about whether the platform can reach the device. Those are two different firewall paths, and only one of them is exercised by the heartbeat.</p>
+<p>When you see "online but no video," the first question is always: did the INVITE arrive? If you can't answer that with a packet capture, you're guessing. And guessing at firewall rules without evidence wastes everyone's time.</p>
+<p>The evidence pack approach — captures from both sides, a timeline, the exact 5-tuple, and a script to summarize it — turns a vague "video doesn't work" ticket into a specific, actionable request. The firewall engineer doesn't need to understand GB28181. They just need to know which packets to allow.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-07 08:46:35</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>XRP</td>
+<td>弱做空</td>
+<td>$1.4976</td>
+<td>$1.4347</td>
+<td>$1.55</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">GB28181</span><span class="tag-badge">SIP</span><span class="tag-badge">INVITE</span><span class="tag-badge">tcpdump</span><span class="tag-badge">NAT</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
