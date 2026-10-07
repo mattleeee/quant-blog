@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Health Checks for a Fleet of Scheduled Tasks - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper...">
+        <meta name="description" content="Nine unattended scheduled tasks is a fleet, whether you call it that or not....">
     <meta name="keywords" content="health check,audit,LastTaskResult,scheduled tasks,monitoring">
     <meta property="og:title" content="Health Checks for a Fleet of Scheduled Tasks">
-    <meta property="og:description" content="Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper...">
+    <meta property="og:description" content="Nine unattended scheduled tasks is a fleet, whether you call it that or not....">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/7.html">
@@ -33,224 +33,289 @@
         <article class="post">
             <h1>Health Checks for a Fleet of Scheduled Tasks</h1>
             <div class="post-meta">
-                <span class="date">2026-10-05</span>
+                <span class="date">2026-10-06</span>
                 <span class="category"><span class="tag-badge">Windows Automation</span></span>
             </div>
             <div class="post-content">
-<p>Scheduled tasks are the duct tape of Windows automation. They run headless, survive reboots, and need no service wrapper. The failure mode is not that they break — it is that they break silently. A task that failed three days ago looks exactly like a task that succeeded three days ago if nobody is reading <code>LastTaskResult</code>.</p>
-<p>Nine unattended tasks is past the point where manual checking works. At that count you need a health check: a script that enumerates the fleet, reads each task's state, compares it against an expected schedule, and pages you when something is off.</p>
-<h2 id="what-the-task-scheduler-com-api-actually-gives-you">What the Task Scheduler COM API actually gives you</h2>
-<p>The <code>Schedule.Service</code> COM object exposes per-task fields that matter for monitoring. The ones worth wiring into an audit:</p>
-<ul>
-<li><strong><code>State</code></strong> — an enum: <code>0</code> Unknown, <code>1</code> Disabled, <code>2</code> Queued, <code>3</code> Ready, <code>4</code> Running. <code>Ready</code> is the healthy resting state. <code>Disabled</code> means someone turned it off (or a deployment did). <code>Running</code> means it is executing right now — useful context, but not a health signal by itself.</li>
-<li><strong><code>LastRunTime</code></strong> — a <code>datetime</code> in local time. Combined with the expected interval, this is what tells you a task is <em>stale</em>: it should have fired by now and did not.</li>
-<li><strong><code>LastTaskResult</code></strong> — the exit code of the last run. <code>0</code> is success. <code>0x41301</code> (<code>267009</code>) means "currently running". <code>0x41303</code> (<code>267011</code>) means "has not yet run". Everything else non-zero is a failure, and the exact code is often diagnostic (e.g. <code>1</code> for a generic script error, <code>0x80070002</code> for a missing file).</li>
-<li><strong><code>NextRunTime</code></strong> — derived from the trigger, not from history. A task can have a sane <code>NextRunTime</code> and still be stale because the last run never completed.</li>
-</ul>
-<p><code>LastRunTime</code> and <code>LastTaskResult</code> are only meaningful together. A task with <code>LastTaskResult == 0</code> but <code>LastRunTime</code> from four days ago on an hourly schedule is not healthy — it is a task whose trigger stopped firing, or whose run never recorded a result.</p>
-<h2 id="the-four-states-you-actually-care-about">The four states you actually care about</h2>
-<p>For an unattended fleet, collapse the raw fields into four verdicts:</p>
-<ol>
-<li><strong>Disabled</strong> — <code>State == 1</code>. Nothing runs. This is either intentional (retired task) or an incident (someone disabled it while debugging and forgot).</li>
-<li><strong>Running</strong> — <code>State == 4</code> or <code>LastTaskResult == 267009</code>. Not a failure, but a task stuck in <code>Running</code> for hours is a different problem: a hung process holding the scheduler slot.</li>
-<li><strong>Failed</strong> — <code>LastTaskResult</code> is non-zero and not one of the "no result yet" sentinels. This is the classic alert.</li>
-<li><strong>Stale</strong> — <code>LastRunTime</code> is older than <code>now - expected_interval - grace</code>. The task may report success from its last run, but it has stopped firing on schedule.</li>
-</ol>
-<p>A fifth implicit state, <code>Ready</code> with a recent successful run, is the only one that needs no action.</p>
-<h2 id="the-expected-schedule-table">The expected-schedule table</h2>
-<p>You cannot compute "stale" without knowing the intended cadence. The scheduler knows the triggers, but parsing trigger XML for arbitrary task definitions is fragile. A small hand-maintained table is more honest and easier to review:</p>
-<pre class="codehilite"><code class="language-python">from datetime import timedelta
-
-# task name -&gt; (expected interval, grace period)
-EXPECTED = {
-    &quot;Quant_Ingest&quot;:        (timedelta(minutes=15),  timedelta(minutes=5)),
-    &quot;Quant_Signal&quot;:        (timedelta(minutes=15),  timedelta(minutes=5)),
-    &quot;Quant_Risk&quot;:          (timedelta(minutes=30),  timedelta(minutes=10)),
-    &quot;Quant_Reconcile&quot;:     (timedelta(hours=1),     timedelta(minutes=15)),
-    &quot;Quant_Report&quot;:        (timedelta(days=1),      timedelta(hours=2)),
-    &quot;TeleAgent_Poll&quot;:      (timedelta(minutes=5),   timedelta(minutes=3)),
-    &quot;TeleAgent_Forward&quot;:   (timedelta(minutes=5),   timedelta(minutes=3)),
-    &quot;TeleAgent_Archive&quot;:   (timedelta(hours=6),     timedelta(minutes=30)),
-    &quot;TeleAgent_Heartbeat&quot;: (timedelta(minutes=10),  timedelta(minutes=5)),
-}
-</code></pre>
-
-<p>The grace period absorbs normal jitter: clock skew, a task that takes a few minutes to finish, a machine that was asleep. Without it you will get false positives and start ignoring the alerts, which defeats the purpose.</p>
-<h2 id="enumerating-the-fleet">Enumerating the fleet</h2>
-<p>The COM API is reachable through <code>win32com.client</code>. Enumerate the root folder, filter by name prefix, and read the fields:</p>
+<p>Nine unattended scheduled tasks is a fleet, whether you call it that or not. Once you pass three or four, checking <code>taskschd.msc</code> by hand stops being a habit and starts being a liability — you only look when something is visibly broken, which is exactly the failure mode you were trying to avoid by scheduling the work in the first place.</p>
+<p>This post covers a small audit script that enumerates a set of tasks by name pattern, reads their state and last result, compares them against an expected schedule, and pushes an alert when something is wrong. It runs as a scheduled task itself, because a monitoring script that depends on you remembering to run it is not monitoring.</p>
+<h2 id="what-the-task-scheduler-actually-exposes">What the Task Scheduler actually exposes</h2>
+<p>The Task Scheduler COM API (<code>Schedule.Service</code>) is the authoritative source. The <code>schtasks.exe</code> text output is fine for humans and terrible for parsing — column widths shift, and localized Windows installs translate the field names. Go through COM.</p>
 <pre class="codehilite"><code class="language-python">import win32com.client
-from datetime import datetime, timedelta
 
 TASK_ENUM_HIDDEN = 1
-TASK_STATE = {
-    0: &quot;Unknown&quot;, 1: &quot;Disabled&quot;, 2: &quot;Queued&quot;,
-    3: &quot;Ready&quot;, 4: &quot;Running&quot;,
-}
 
-def _com_to_dt(value):
-    &quot;&quot;&quot;pywintypes datetime -&gt; python datetime, or None.&quot;&quot;&quot;
-    if value is None:
-        return None
-    try:
-        return datetime(value.year, value.month, value.day,
-                        value.hour, value.minute, value.second)
-    except AttributeError:
-        return None
-
-def enumerate_tasks(prefixes=(&quot;Quant_&quot;, &quot;TeleAgent_&quot;)):
+def connect():
     service = win32com.client.Dispatch(&quot;Schedule.Service&quot;)
     service.Connect()
-    root = service.GetFolder(&quot;\\&quot;)
+    return service
 
-    found = {}
-    for task in root.GetTasks(TASK_ENUM_HIDDEN):
-        if not task.Name.startswith(prefixes):
-            continue
-        found[task.Name] = {
-            &quot;state&quot;: TASK_STATE.get(task.State, f&quot;Unknown({task.State})&quot;),
-            &quot;state_code&quot;: task.State,
-            &quot;last_run&quot;: _com_to_dt(task.LastRunTime),
-            &quot;last_result&quot;: task.LastTaskResult,
-            &quot;next_run&quot;: _com_to_dt(task.NextRunTime),
-            &quot;enabled&quot;: bool(task.Enabled),
-        }
-    return found
+def iter_tasks(service, folder_path=&quot;\\&quot;):
+    folder = service.GetFolder(folder_path)
+    for task in folder.GetTasks(TASK_ENUM_HIDDEN):
+        yield task
 </code></pre>
 
-<p>Two things to watch. First, <code>GetTasks(TASK_ENUM_HIDDEN)</code> includes hidden tasks; if you do not pass the flag you will silently miss tasks that were created with the hidden bit set. Second, <code>LastRunTime</code> comes back as a <code>pywintypes</code> datetime — convert it explicitly so comparisons with <code>datetime.now()</code> are predictable.</p>
+<p>Each <code>IRegisteredTask</code> gives you a handful of fields worth reading:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>What it tells you</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Name</code></td>
+<td>str</td>
+<td>Task name, without folder path</td>
+</tr>
+<tr>
+<td><code>Path</code></td>
+<td>str</td>
+<td>Full path including folder, e.g. <code>\Quant\Quant_Factor</code></td>
+</tr>
+<tr>
+<td><code>State</code></td>
+<td>int</td>
+<td><code>0</code> Unknown, <code>1</code> Disabled, <code>2</code> Queued, <code>3</code> Ready, <code>4</code> Running</td>
+</tr>
+<tr>
+<td><code>Enabled</code></td>
+<td>bool</td>
+<td>Separate from state; a disabled task can still report <code>Ready</code> in some edge cases</td>
+</tr>
+<tr>
+<td><code>LastRunTime</code></td>
+<td>datetime</td>
+<td>When the last run <em>started</em></td>
+</tr>
+<tr>
+<td><code>LastTaskResult</code></td>
+<td>int</td>
+<td>Exit code of the last completed run</td>
+</tr>
+<tr>
+<td><code>NextRunTime</code></td>
+<td>datetime</td>
+<td>Next scheduled fire, <code>1899-12-30</code> if none</td>
+</tr>
+</tbody>
+</table>
+<p>Two traps here. First, <code>State</code> and <code>Enabled</code> are not redundant. A task can be enabled but sitting in <code>Disabled</code> state if its trigger was disabled, or disabled at the task level while the state enum lags. Check both.</p>
+<p>Second, <code>LastTaskResult</code> is only meaningful after a run <em>completes</em>. While a task is running, <code>LastTaskResult</code> still holds the previous run's value. If you alert on a non-zero result without checking <code>State == 4</code>, you will page yourself about a task that is mid-run and about to succeed.</p>
+<p>The <code>1899-12-30</code> sentinel for "no next run" is a COM date artifact — it's the zero of the OLE automation date format. Treat anything before 1980 as "none".</p>
+<h2 id="defining-what-healthy-means">Defining what "healthy" means</h2>
+<p>The script needs a table of expectations, because "task exists and ran once" is not a health check. Each task has a cadence, and a task that last ran three days ago when it should run hourly is broken even if its exit code was zero.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+from datetime import timedelta
+
+@dataclass(frozen=True)
+class Expectation:
+    pattern: str            # fnmatch pattern against task Path
+    max_age: timedelta      # how stale LastRunTime may be
+    allow_disabled: bool = False
+    description: str = &quot;&quot;
+
+EXPECTED = [
+    Expectation(&quot;\\Quant\\Quant_*&quot;,        timedelta(hours=2),  description=&quot;quant pipeline&quot;),
+    Expectation(&quot;\\TeleAgent_*&quot;,           timedelta(minutes=30), description=&quot;telegram agent&quot;),
+    Expectation(&quot;\\Quant\\Quant_Nightly&quot;,  timedelta(hours=26), description=&quot;nightly batch&quot;),
+]
+</code></pre>
+
+<p><code>max_age</code> should be generous enough to absorb a single missed cycle plus jitter, but not so generous that a task can silently skip twice. For an hourly task, two hours is a reasonable ceiling. For a nightly job, 26 hours covers a late start without hiding a full day of silence.</p>
+<p>The <code>allow_disabled</code> flag matters for tasks you intentionally park. Without it, every disabled task shows up as a finding, and you learn to ignore the alerts — which defeats the point.</p>
 <h2 id="classifying-each-task">Classifying each task</h2>
-<p>With the raw fields and the expected table, the classification is a small pure function. Keeping it separate from the COM access makes it testable without a Windows box:</p>
-<pre class="codehilite"><code class="language-python">SENTINEL_RUNNING = 267009      # 0x41301
-SENTINEL_NOT_YET = 267011      # 0x41303
+<p>The classification logic is where most naive audits go wrong. There are four distinct failure modes and they need different messages.</p>
+<pre class="codehilite"><code class="language-python">import fnmatch
+from datetime import datetime, timezone
 
-def classify(name, info, expected, now=None):
-    now = now or datetime.now()
-    interval, grace = expected.get(name, (None, None))
+STATE_UNKNOWN, STATE_DISABLED, STATE_QUEUED, STATE_READY, STATE_RUNNING = range(5)
 
-    if info[&quot;state_code&quot;] == 1 or not info[&quot;enabled&quot;]:
-        return &quot;disabled&quot;, &quot;task is disabled&quot;
+def classify(task, expectation, now):
+    &quot;&quot;&quot;Return (severity, reason) where severity is 'ok', 'warn' or 'fail'.&quot;&quot;&quot;
+    state = task.State
+    enabled = task.Enabled
+    last_result = task.LastTaskResult
+    last_run = task.LastRunTime
 
-    if info[&quot;last_result&quot;] == SENTINEL_RUNNING:
-        return &quot;running&quot;, &quot;currently executing&quot;
+    if not enabled or state == STATE_DISABLED:
+        if expectation.allow_disabled:
+            return &quot;ok&quot;, &quot;disabled by design&quot;
+        return &quot;fail&quot;, &quot;task is disabled&quot;
 
-    if info[&quot;last_result&quot;] == SENTINEL_NOT_YET:
-        return &quot;stale&quot;, &quot;has never run&quot;
+    if state == STATE_RUNNING:
+        # Don't judge LastTaskResult while a run is in flight.
+        return &quot;ok&quot;, &quot;currently running&quot;
 
-    if info[&quot;last_result&quot;] != 0:
-        return &quot;failed&quot;, f&quot;exit code {info['last_result']:#x}&quot;
+    if last_result != 0:
+        return &quot;fail&quot;, f&quot;last result {last_result:#010x}&quot;
 
-    if interval is None:
-        return &quot;unknown&quot;, &quot;no expected schedule on file&quot;
+    if last_run is None or last_run.year &lt; 1980:
+        return &quot;fail&quot;, &quot;never ran&quot;
 
-    last = info[&quot;last_run&quot;]
-    if last is None:
-        return &quot;stale&quot;, &quot;no LastRunTime recorded&quot;
+    # COM returns naive local datetimes; compare in local time.
+    age = now - last_run
+    if age &gt; expectation.max_age:
+        hours = age.total_seconds() / 3600
+        return &quot;fail&quot;, f&quot;stale, last run {hours:.1f}h ago&quot;
 
-    age = now - last
-    if age &gt; interval + grace:
-        return &quot;stale&quot;, f&quot;last run {age} ago, expected every {interval}&quot;
-
-    return &quot;ok&quot;, f&quot;last run {age} ago&quot;
+    return &quot;ok&quot;, f&quot;ok, last run {age.total_seconds()/60:.0f}m ago&quot;
 </code></pre>
 
-<p>The order matters. Check <code>Disabled</code> before <code>Failed</code>, because a disabled task often carries a stale non-zero result from before it was turned off. Check the running sentinel before the failure branch, because <code>267009</code> is technically non-zero. And treat "never run" as stale rather than failed — a freshly deployed task has no result yet, and you want the alert to say so.</p>
-<h2 id="pushing-the-alert-through-pushplus">Pushing the alert through PushPlus</h2>
-<p>PushPlus takes a simple HTTP POST with a token and a message body. The audit should send one consolidated message, not one per task — nine separate pushes train you to mute the channel.</p>
-<pre class="codehilite"><code class="language-python">import json
-import urllib.request
+<p>The <code>last_result</code> non-zero check catches the common case: the task fired, the script inside exited with code 1, and nobody noticed because the scheduler doesn't care. <code>0x80070002</code> (file not found) and <code>0x80070005</code> (access denied) are the two you will see most often when someone moves a script or changes a service account.</p>
+<p>Note the running-state short-circuit. A long-running task that takes 90 minutes will otherwise trip the staleness check on every audit pass, because <code>LastRunTime</code> only updates when a run <em>starts</em>. If your task runs longer than your <code>max_age</code>, you need to either raise <code>max_age</code> or check <code>State == 4</code> before evaluating staleness — which is what the code above does.</p>
+<h2 id="walking-the-folder-tree">Walking the folder tree</h2>
+<p>Tasks live in folders, and <code>GetTasks</code> only returns the tasks directly in the folder you asked for. If your tasks are organized under <code>\Quant\</code> and <code>\</code>, you need to recurse.</p>
+<pre class="codehilite"><code class="language-python">def walk(service, folder_path=&quot;\\&quot;):
+    folder = service.GetFolder(folder_path)
+    for task in folder.GetTasks(TASK_ENUM_HIDDEN):
+        yield task
+    for sub in folder.GetFolders(0):
+        yield from walk(service, sub.Path)
+</code></pre>
+
+<p><code>GetFolders(0)</code> returns immediate subfolders only; the recursion handles the rest. The <code>0</code> flag is a reserved bitmask that must be zero — passing anything else raises.</p>
+<h2 id="matching-tasks-to-expectations">Matching tasks to expectations</h2>
+<p>Use <code>fnmatch</code> on the full <code>Path</code>, not the bare <code>Name</code>. Two folders can hold tasks with the same name, and matching on <code>Name</code> alone will silently pick the wrong one.</p>
+<pre class="codehilite"><code class="language-python">def audit(service, expectations, now):
+    findings = []
+    seen = set()
+
+    for task in walk(service):
+        for exp in expectations:
+            if fnmatch.fnmatch(task.Path, exp.pattern):
+                severity, reason = classify(task, exp, now)
+                findings.append({
+                    &quot;path&quot;: task.Path,
+                    &quot;severity&quot;: severity,
+                    &quot;reason&quot;: reason,
+                    &quot;result&quot;: task.LastTaskResult,
+                    &quot;last_run&quot;: task.LastRunTime,
+                })
+                seen.add(exp.pattern)
+                break
+
+    # Expectations that matched nothing are themselves a finding.
+    for exp in expectations:
+        if exp.pattern not in seen:
+            findings.append({
+                &quot;path&quot;: exp.pattern,
+                &quot;severity&quot;: &quot;fail&quot;,
+                &quot;reason&quot;: &quot;no matching task found&quot;,
+                &quot;result&quot;: None,
+                &quot;last_run&quot;: None,
+            })
+
+    return findings
+</code></pre>
+
+<p>The unmatched-expectation check is the one people skip, and it's the most valuable. A task that was deleted, renamed, or moved to a different folder disappears from the enumeration entirely — a naive audit reports "all clear" because there is nothing to complain about. The expectation table is what makes absence detectable.</p>
+<h2 id="the-alert">The alert</h2>
+<p>PushPlus takes a token and a message body over HTTP POST and delivers to WeChat. Keep the alert short: a subject line that says how many tasks failed, and a body that lists only the failures. Nobody reads a wall of green checkmarks.</p>
+<pre class="codehilite"><code class="language-python">import requests
 
 PUSHPLUS_TOKEN = &quot;your-token-here&quot;
-PUSHPLUS_URL = &quot;http://www.pushplus.plus/send&quot;
 
-def push(title, body):
-    payload = json.dumps({
-        &quot;token&quot;: PUSHPLUS_TOKEN,
-        &quot;title&quot;: title,
-        &quot;content&quot;: body,
-        &quot;template&quot;: &quot;txt&quot;,
-    }).encode(&quot;utf-8&quot;)
-    req = urllib.request.Request(
-        PUSHPLUS_URL, data=payload,
-        headers={&quot;Content-Type&quot;: &quot;application/json&quot;},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode(&quot;utf-8&quot;))
-</code></pre>
-
-<p>Then assemble the report. Only alert when there is something to say:</p>
-<pre class="codehilite"><code class="language-python">def build_report(results):
-    problems = {n: (v, r) for n, (v, r) in results.items() if v != &quot;ok&quot;}
-    if not problems:
+def format_alert(findings):
+    bad = [f for f in findings if f[&quot;severity&quot;] != &quot;ok&quot;]
+    if not bad:
         return None
-
-    lines = [f&quot;{len(problems)} task(s) need attention:&quot;, &quot;&quot;]
-    for name, (verdict, reason) in sorted(problems.items()):
-        lines.append(f&quot;[{verdict.upper()}] {name}: {reason}&quot;)
+    lines = [f&quot;{len(bad)} task(s) need attention&quot;, &quot;&quot;]
+    for f in bad:
+        lines.append(f&quot;{f['path']}&quot;)
+        lines.append(f&quot;  {f['reason']}&quot;)
     return &quot;\n&quot;.join(lines)
 
-def run_audit():
-    tasks = enumerate_tasks()
-    now = datetime.now()
-    results = {
-        name: classify(name, info, EXPECTED, now)
-        for name, info in tasks.items()
-    }
-
-    # Tasks in EXPECTED but missing from the scheduler are also a problem.
-    for name in EXPECTED:
-        if name not in tasks:
-            results[name] = (&quot;missing&quot;, &quot;not found in Task Scheduler&quot;)
-
-    report = build_report(results)
-    if report:
-        push(&quot;Task fleet health check&quot;, report)
-    return results
-</code></pre>
-
-<p>The "missing" check matters more than it looks. If a task gets deleted during a cleanup, the scheduler simply stops listing it, and an enumeration-only audit reports a clean fleet.</p>
-<h2 id="why-the-audit-must-itself-be-a-scheduled-task">Why the audit must itself be a scheduled task</h2>
-<p>The obvious failure mode of a monitoring script is that it is not running. If you launch the audit by hand, you have replaced nine tasks to babysit with one, and you will forget it on exactly the days something breaks.</p>
-<p>Register the audit as a scheduled task, ideally on a different cadence from the tasks it watches, and with a trigger that catches missed runs:</p>
-<pre class="codehilite"><code class="language-python">def register_audit_task(script_path, python_exe):
-    service = win32com.client.Dispatch(&quot;Schedule.Service&quot;)
-    service.Connect()
-    root = service.GetFolder(&quot;\\&quot;)
-
-    definition = service.NewTask(0)
-    definition.RegistrationInfo.Description = &quot;Fleet health check&quot;
-
-    # Run every 10 minutes, indefinitely.
-    trigger = definition.Triggers.Create(1)   # TASK_TRIGGER_TIME
-    trigger.StartBoundary = datetime.now().isoformat()
-    trigger.Repetition.Interval = &quot;PT10M&quot;
-    trigger.Repetition.Duration = &quot;&quot;          # empty = forever
-
-    # Catch up if the machine was off at trigger time.
-    definition.Settings.StartWhenAvailable = True
-    definition.Settings.ExecutionTimeLimit = &quot;PT5M&quot;
-
-    action = definition.Actions.Create(0)     # TASK_ACTION_EXEC
-    action.Path = python_exe
-    action.Arguments = f'&quot;{script_path}&quot;'
-
-    root.RegisterTaskDefinition(
-        &quot;Quant_FleetAudit&quot;, definition,
-        6,        # TASK_CREATE_OR_UPDATE
-        None, None, 3,   # TASK_LOGON_INTERACTIVE_TOKEN
+def push(message):
+    resp = requests.post(
+        &quot;https://www.pushplus.plus/send&quot;,
+        json={
+            &quot;token&quot;: PUSHPLUS_TOKEN,
+            &quot;title&quot;: &quot;Task fleet alert&quot;,
+            &quot;content&quot;: message,
+            &quot;template&quot;: &quot;txt&quot;,
+        },
+        timeout=15,
     )
+    resp.raise_for_status()
 </code></pre>
 
-<p>Two settings earn their keep. <code>StartWhenAvailable</code> makes the scheduler run a missed trigger as soon as the machine is back — without it, a laptop that was asleep at the scheduled minute silently skips the audit. And a short <code>ExecutionTimeLimit</code> prevents a wedged audit from holding the slot and blocking the next run.</p>
-<p>Keep the audit out of the <code>Quant_*</code> / <code>TeleAgent_*</code> namespace so it does not audit itself. A task that checks its own <code>LastRunTime</code> will report itself stale the moment it is running, which is noise at best.</p>
-<h2 id="operational-notes">Operational notes</h2>
+<p>Send only when there is something to say. An alert channel that fires every hour with "all fine" trains you to swipe past it, and then the one real alert gets swiped too.</p>
+<h2 id="wiring-it-together">Wiring it together</h2>
+<pre class="codehilite"><code class="language-python">def main():
+    service = connect()
+    now = datetime.now()
+    findings = audit(service, EXPECTED, now)
+
+    for f in findings:
+        print(f&quot;{f['severity']:4} {f['path']:40} {f['reason']}&quot;)
+
+    message = format_alert(findings)
+    if message:
+        push(message)
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+
+<p>Run it manually once, fix whatever it reports, then register it as a scheduled task. A 15-minute cadence is fine — the audit is cheap, and a shorter interval means you catch a failure closer to when it happened.</p>
+<h2 id="why-the-audit-must-itself-be-scheduled">Why the audit must itself be scheduled</h2>
+<p>The obvious objection: "I'll just run this when I think about it." That is the same failure mode the audit exists to catch. If you remember to check, you don't need the check; if you forget, the check never runs. The only configuration where the audit has value is one where it runs without you.</p>
+<p>That means the audit task is itself in the fleet, and it needs to be in the expectation table — a task that monitors nine tasks and is monitored by nobody is a single point of failure. Point an expectation at it with a <code>max_age</code> slightly larger than its own interval:</p>
+<pre class="codehilite"><code class="language-python">Expectation(&quot;\\Quant\\Audit_TaskFleet&quot;, timedelta(minutes=45), description=&quot;this audit&quot;),
+</code></pre>
+
+<p>If the audit task dies, you stop receiving alerts — and the way you find out is that you stop receiving alerts, which is exactly the signal you would miss. There is no fully self-healing answer here, but you can reduce the blast radius: have the audit write a heartbeat row to a table or a file, and check that heartbeat from a second, independent mechanism (a cron job on a different host, a cloud function, anything that doesn't share the same scheduler). Two schedulers watching each other is more resilient than one scheduler watching itself.</p>
+<h2 id="what-to-watch-over-time">What to watch over time</h2>
+<p>Three signals are worth tracking beyond pass/fail:</p>
 <ul>
-<li><strong>Log every run, not just failures.</strong> Append the full classification to a rotating log file. When a task fails at 03:00 and you get the push at 03:10, the log tells you whether it was the first failure or the fifth.</li>
-<li><strong>Alert on transitions, not states.</strong> If you push on every stale task every ten minutes, you will mute the channel within a day. Track the previous verdict per task and only push when it changes from <code>ok</code> to something else, or when a problem persists past a threshold.</li>
-<li><strong>Treat <code>LastTaskResult</code> codes as data.</strong> <code>0x80070002</code> is a missing executable, <code>0x80070005</code> is access denied, <code>1</code> is whatever the script returned. Put the hex code in the alert; it saves a trip to Event Viewer.</li>
-<li><strong>Beware the interactive-token trap.</strong> Tasks registered with <code>TASK_LOGON_INTERACTIVE_TOKEN</code> only run when the user is logged on. If your fleet must run headless, register with a stored password or a service account and verify that <code>LastRunTime</code> advances overnight.</li>
+<li><strong>Run duration drift.</strong> A task that used to finish in 40 seconds and now takes 12 minutes is heading for a timeout. Log <code>LastRunTime</code> deltas and alert on a sustained increase, not a single spike.</li>
+<li><strong>Result code distribution.</strong> A task that alternates between <code>0</code> and <code>0x80070002</code> is flapping. Count non-zero results over a rolling window rather than checking only the most recent.</li>
+<li><strong>Stale-but-zero.</strong> The nastiest case: exit code <code>0</code>, last run within tolerance, but the task is doing nothing because its input file is empty or its upstream dependency silently stopped producing. The scheduler can't see inside the process. If it matters, have the task itself emit a completion marker with a row count or a timestamp, and audit that marker instead of trusting the exit code.</li>
 </ul>
-<p>The audit is small — a couple hundred lines including the report formatting. What it buys is the ability to stop thinking about nine tasks and start thinking about the one alert that says something is wrong.</p>
+<p>The audit script is the first layer. It catches the failures the scheduler can see. The second layer — output validation — catches the ones it can't, and it belongs inside the task, not in the audit.</p>
 <p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-06 12:36:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">health check</span><span class="tag-badge">audit</span><span class="tag-badge">LastTaskResult</span><span class="tag-badge">scheduled tasks</span><span class="tag-badge">monitoring</span></div>
             <div class="post-footer">
