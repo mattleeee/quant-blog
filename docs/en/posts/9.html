@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Surviving Corporate HTTPS Interception: Life Behind Sangfor aTrust - Code & Quant</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Corporate laptops rarely talk to the internet directly anymore....">
+        <meta name="description" content="Corporate laptops are strange machines. You have admin rights on paper, but every outbound TLS connection is terminated ...">
     <meta name="keywords" content="Sangfor aTrust,MITM,TLS,proxy,corporate network">
     <meta property="og:title" content="Surviving Corporate HTTPS Interception: Life Behind Sangfor aTrust">
-    <meta property="og:description" content="Corporate laptops rarely talk to the internet directly anymore....">
+    <meta property="og:description" content="Corporate laptops are strange machines. You have admin rights on paper, but every outbound TLS connection is terminated ...">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="Code & Quant">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/9.html">
@@ -37,186 +37,163 @@
                 <span class="category"><span class="tag-badge">Network &amp; Security</span></span>
             </div>
             <div class="post-content">
-<p>Corporate laptops rarely talk to the internet directly anymore. If you work behind a zero-trust client like Sangfor aTrust, every TLS connection is terminated, inspected, and re-encrypted by a proxy. Your <code>pip install</code> works one day and fails the next. <code>git clone</code> hangs on "server certificate verification failed." Some CLI tools die instantly with <code>CERTIFICATE_VERIFY_FAILED</code> and no useful context.</p>
-<p>This is a field guide to figuring out what's happening and getting your tooling back to a working state — without picking a fight with the security team.</p>
-<h2 id="what-atrust-actually-does-to-your-traffic">What aTrust Actually Does to Your Traffic</h2>
-<p>aTrust is a zero-trust network access (ZTNA) client. Before it lets you reach anything, it installs a root CA into the OS trust store and routes traffic through a local proxy (often on <code>127.0.0.1</code> or a virtual adapter). The proxy performs TLS interception: it opens a connection to the real server, presents its own certificate to your client, and re-encrypts the response back to you.</p>
-<p>From the client's point of view, the certificate chain now looks like:</p>
-<pre class="codehilite"><code>your-client  →  aTrust proxy (presents Sangfor CA-signed cert)  →  real server
-</code></pre>
-
-<p>The OS-level trust store usually has the Sangfor root CA, so browsers and anything using the system store are fine. Everything else — Python's <code>certifi</code> bundle, Go binaries, Node's bundled CA store, <code>git</code> with its own config — is not.</p>
-<h2 id="step-1-confirm-youre-being-intercepted">Step 1: Confirm You're Being Intercepted</h2>
-<p>Don't guess. Run <code>openssl s_client</code> and look at the issuer:</p>
-<pre class="codehilite"><code class="language-bash">openssl s_client -connect github.com:443 -servername github.com &lt;/dev/null 2&gt;/dev/null \
+<p>Corporate laptops are strange machines. You have admin rights on paper, but every outbound TLS connection is terminated and re-originated by a local agent. Sangfor aTrust is one of the more common zero-trust clients in APAC enterprises, and it does exactly this: it installs a root CA into the OS trust store, proxies traffic through a local service, and re-signs certificates on the fly. Your browser shows a green padlock. <code>pip install</code> does not.</p>
+<p>This post is a field guide to living with that setup without getting your laptop quarantined.</p>
+<h2 id="how-the-interception-actually-works">How the interception actually works</h2>
+<p>aTrust runs a local proxy (typically on <code>127.0.0.1</code> on some port) and pushes a PAC file or system proxy setting. When you connect to <code>pypi.org</code>, the agent completes the TLS handshake with the real server using its own credentials, then presents <em>you</em> a certificate signed by the corporate root CA. The OS trust store contains that CA, so anything using the system store is fine. Anything shipping its own bundle is not.</p>
+<p>The tell is always in the chain. Run:</p>
+<pre class="codehilite"><code class="language-bash">openssl s_client -connect pypi.org:443 -servername pypi.org -showcerts &lt;/dev/null 2&gt;/dev/null \
   | openssl x509 -noout -issuer -subject
 </code></pre>
 
-<p>On a clean network you'd see something like <code>issuer=C=US, O=DigiCert Inc, CN=DigiCert TLS ...</code>. Behind aTrust you'll see the Sangfor CA in the issuer field, or a corporate CN that has nothing to do with the site you're connecting to.</p>
-<p>Compare against the browser. Open the same site in Chrome or Edge, click the padlock, and inspect the certificate chain. If the browser shows the corporate CA as an intermediate or root but <code>openssl</code> shows a different issuer, you're looking at two different interception layers — or the browser is trusting something the CLI isn't.</p>
-<p>A quick Python check that prints both the leaf issuer and whether verification succeeds:</p>
-<pre class="codehilite"><code class="language-python">import socket
-import ssl
-
-def probe(host: str, port: int = 443) -&gt; None:
-    ctx = ssl.create_default_context()
-    with socket.create_connection((host, port), timeout=5) as sock:
-        with ctx.wrap_socket(sock, server_hostname=host) as tls:
-            cert = tls.getpeercert()
-            issuer = dict(x[0] for x in cert[&quot;issuer&quot;])
-            subject = dict(x[0] for x in cert[&quot;subject&quot;])
-            print(f&quot;host={host}&quot;)
-            print(f&quot;  subject.CN = {subject.get('commonName')}&quot;)
-            print(f&quot;  issuer.CN  = {issuer.get('commonName')}&quot;)
-            print(f&quot;  issuer.O   = {issuer.get('organizationName')}&quot;)
-
-probe(&quot;github.com&quot;)
+<p>On a clean network you get something like <code>issuer=C=US, O=Let's Encrypt, CN=R3</code>. Behind aTrust you get <code>issuer=C=CN, O=Sangfor Technologies, CN=Sangfor SSL Proxy CA</code> or an internal enterprise CA name. That single line is the difference between a working environment and a day of debugging.</p>
+<h3 id="distinguishing-mitm-from-a-normal-corporate-proxy">Distinguishing MITM from a normal corporate proxy</h3>
+<p>A plain forward proxy does not terminate TLS — it just tunnels bytes and the issuer stays untouched. MITM means the issuer changed. To confirm it's the agent and not a rogue AP:</p>
+<ol>
+<li>Compare the issuer seen by <code>openssl s_client</code> against the issuer shown in the browser's certificate viewer for the same host. If they match and both are internal, it's the agent.</li>
+<li>Check the local proxy port: <code>netstat -ano | findstr LISTENING</code> on Windows, then match the PID to the aTrust process.</li>
+<li>Hit a host with a known public chain, e.g. <code>openssl s_client -connect github.com:443</code>. If GitHub is also re-signed, everything is being intercepted.</li>
+</ol>
+<p>Once you know the CA's subject and fingerprint, you can decide per-tool what to do.</p>
+<h2 id="which-tools-tolerate-the-corporate-ca">Which tools tolerate the corporate CA</h2>
+<p>The dividing line is <em>where the trust anchor comes from</em>.</p>
+<p><strong>Tolerates it (uses OS trust store):</strong>
+- Chrome, Edge, Firefox (with <code>security.enterprise_roots.enabled=true</code>)
+- Windows-native HTTP stacks, .NET, WinHTTP
+- <code>curl</code> on Windows when built against Schannel
+- macOS <code>curl</code> and <code>NSURLSession</code>-based tools
+- Python <code>requests</code> <em>only if</em> you point it at the system store or a bundle containing the corporate CA</p>
+<p><strong>Does not tolerate it (ships its own bundle or pins):</strong>
+- Python <code>certifi</code> (bundled, frozen at release time)
+- Node.js (bundles Mozilla's CA set)
+- Git for Windows (ships its own <code>ca-bundle.crt</code>)
+- Rust <code>reqwest</code> default roots
+- Anything doing certificate pinning: mobile SDKs, some CLI tools, <code>go</code> binaries with embedded roots</p>
+<p>The fix is almost always the same: build a bundle that contains both the Mozilla roots and the corporate root, then point the tool at it.</p>
+<h3 id="exporting-the-corporate-root-ca">Exporting the corporate root CA</h3>
+<p>On Windows:</p>
+<pre class="codehilite"><code class="language-powershell"># List candidate roots, then export the one you identified
+Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like &quot;*Sangfor*&quot; } |
+  ForEach-Object { Export-Certificate -Cert $_ -FilePath &quot;$env:USERPROFILE\corp-root.cer&quot; }
 </code></pre>
 
-<p>If <code>issuer.O</code> is your employer or "Sangfor", interception is active. If this throws <code>SSLCertVerificationError</code>, your trust store doesn't have the corporate root — that's the root cause of most CLI failures.</p>
-<h2 id="step-2-find-the-corporate-root-ca">Step 2: Find the Corporate Root CA</h2>
-<p>You need the actual PEM file, not a screenshot of the certificate. Common locations:</p>
-<ul>
-<li><strong>Windows:</strong> <code>certlm.msc</code> → Trusted Root Certification Authorities → export as Base-64 <code>.cer</code>.</li>
-<li><strong>macOS:</strong> Keychain Access → System Roots → export as PEM.</li>
-<li><strong>Linux:</strong> check <code>/usr/local/share/ca-certificates/</code> and <code>/etc/ssl/certs/</code>.</li>
-</ul>
-<p>On Windows with PowerShell:</p>
-<pre class="codehilite"><code class="language-powershell">Get-ChildItem Cert:\LocalMachine\Root |
-  Where-Object { $_.Subject -match &quot;Sangfor|YourCorp&quot; } |
-  ForEach-Object {
-    $path = &quot;C:\certs\$($_.Thumbprint).cer&quot;
-    Export-Certificate -Cert $_ -FilePath $path -Type CERT
-    Write-Host &quot;Exported $path&quot;
-  }
+<p>Then convert to PEM. If you have OpenSSL or Git's bundled one:</p>
+<pre class="codehilite"><code class="language-bash">openssl x509 -inform DER -in corp-root.cer -out corp-root.pem
 </code></pre>
 
-<p>Convert DER <code>.cer</code> to PEM if needed:</p>
-<pre class="codehilite"><code class="language-bash">openssl x509 -inform DER -in corp.cer -out corp-root.pem
-</code></pre>
-
-<p>Keep this file somewhere stable. Don't put it in a repo.</p>
-<h2 id="step-3-teach-each-tool-about-the-ca">Step 3: Teach Each Tool About the CA</h2>
-<p>The pattern is always the same: append the corporate root to whatever bundle the tool uses. The tricky part is knowing which bundle that is.</p>
-<h3 id="python-requests">Python <code>requests</code></h3>
-<p><code>requests</code> uses <code>certifi</code>'s bundle by default. You have three options, in order of preference:</p>
-<p><strong>Option A — environment variable (least invasive):</strong></p>
-<pre class="codehilite"><code class="language-bash">export REQUESTS_CA_BUNDLE=/path/to/corp-root.pem
-export SSL_CERT_FILE=/path/to/corp-root.pem
-</code></pre>
-
-<p><code>SSL_CERT_FILE</code> also affects <code>urllib</code>, <code>httpx</code>, and OpenSSL-based tools.</p>
-<p><strong>Option B — build a combined bundle</strong> so you don't lose the public roots:</p>
-<pre class="codehilite"><code class="language-python">import certifi
+<p>Keep this file somewhere stable, e.g. <code>~/.certs/corp-root.pem</code>.</p>
+<h2 id="fixing-python-certifi-requests-and-pip">Fixing Python: certifi, requests, and pip</h2>
+<p><code>certifi</code> is a vendored snapshot. The clean approach is to append the corporate root to a <em>copy</em> and set <code>REQUESTS_CA_BUNDLE</code> / <code>SSL_CERT_FILE</code>, not to mutate the installed certifi package (which breaks on every upgrade).</p>
+<pre class="codehilite"><code class="language-python">import os
+import shutil
 from pathlib import Path
 
-corp = Path(&quot;/path/to/corp-root.pem&quot;).read_text()
-combined = Path.home() / &quot;.config&quot; / &quot;ca-bundle.pem&quot;
-combined.write_text(Path(certifi.where()).read_text() + &quot;\n&quot; + corp)
-print(combined)
+import certifi
+
+CORP_ROOT = Path.home() / &quot;.certs&quot; / &quot;corp-root.pem&quot;
+BUNDLE = Path.home() / &quot;.certs&quot; / &quot;combined-ca.pem&quot;
+
+
+def build_combined_bundle() -&gt; Path:
+    &quot;&quot;&quot;Concatenate certifi's roots with the corporate root CA.&quot;&quot;&quot;
+    if not CORP_ROOT.exists():
+        raise FileNotFoundError(f&quot;missing corporate root: {CORP_ROOT}&quot;)
+
+    with BUNDLE.open(&quot;wb&quot;) as out:
+        out.write(Path(certifi.where()).read_bytes())
+        out.write(b&quot;\n&quot;)
+        out.write(CORP_ROOT.read_bytes())
+
+    return BUNDLE
+
+
+if __name__ == &quot;__main__&quot;:
+    bundle = build_combined_bundle()
+    os.environ[&quot;REQUESTS_CA_BUNDLE&quot;] = str(bundle)
+    os.environ[&quot;SSL_CERT_FILE&quot;] = str(bundle)
+
+    import requests
+
+    r = requests.get(&quot;https://pypi.org/simple/&quot;, timeout=10)
+    print(r.status_code, len(r.content))
 </code></pre>
 
-<p>Then point <code>REQUESTS_CA_BUNDLE</code> at <code>combined</code>. This is the safest approach because you keep both the corporate CA and the public roots.</p>
-<p><strong>Option C — per-session <code>verify=</code></strong> when you only need it for one script:</p>
-<pre class="codehilite"><code class="language-python">import requests
-
-r = requests.get(
-    &quot;https://internal.example.com/api/health&quot;,
-    verify=&quot;/path/to/corp-root.pem&quot;,
-    timeout=10,
-)
-print(r.status_code)
+<p>Set the two environment variables globally (<code>REQUESTS_CA_BUNDLE</code> for <code>requests</code>, <code>SSL_CERT_FILE</code> for the stdlib <code>ssl</code> module and most other tools) and most Python breakage disappears. For <code>pip</code> specifically, either rely on <code>SSL_CERT_FILE</code> or set it explicitly:</p>
+<pre class="codehilite"><code class="language-bash">pip config set global.cert ~/.certs/combined-ca.pem
 </code></pre>
 
-<p>Never set <code>verify=False</code> in code that ships. It works, it's a bad habit, and it hides real problems.</p>
-<h3 id="git"><code>git</code></h3>
-<p>Git has its own CA configuration and ignores <code>SSL_CERT_FILE</code> on most platforms.</p>
-<pre class="codehilite"><code class="language-bash">git config --global http.sslCAInfo ~/.config/ca-bundle.pem
+<p>If a package still fails, it's probably pinning. Check with:</p>
+<pre class="codehilite"><code class="language-python">import ssl, socket
+
+host = &quot;pypi.org&quot;
+ctx = ssl.create_default_context(cafile=str(BUNDLE))
+with socket.create_connection((host, 443), timeout=10) as sock:
+    with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+        print(ssock.getpeercert()[&quot;issuer&quot;])
 </code></pre>
 
-<p>Verify with:</p>
-<pre class="codehilite"><code class="language-bash">GIT_CURL_VERBOSE=1 git ls-remote https://github.com/git/git.git HEAD
+<p>If that succeeds but the package fails, the package is doing its own pinning or bundling — you'll need its own override (e.g. <code>NODE_EXTRA_CA_CERTS</code> for Node, <code>SSL_CERT_DIR</code> for Go).</p>
+<h2 id="fixing-git">Fixing Git</h2>
+<p>Git for Windows ignores the Windows store by default. Two options: point it at the combined bundle, or tell it to use Schannel.</p>
+<p>Option A — explicit bundle:</p>
+<pre class="codehilite"><code class="language-bash">git config --global http.sslCAInfo ~/.certs/combined-ca.pem
+git config --global http.sslBackend openssl
 </code></pre>
 
-<p>If you see <code>SSL certificate problem: unable to get local issuer certificate</code>, the bundle path is wrong or the file isn't PEM. If you see <code>self-signed certificate in certificate chain</code>, you're hitting a proxy that isn't in the bundle at all — usually a second interception layer.</p>
-<p>For per-host overrides (rare, but useful when one host uses a different CA):</p>
-<pre class="codehilite"><code class="language-bash">git config --global http.https://internal.example.com/.sslCAInfo ~/.config/corp-only.pem
+<p>Option B — use the OS store (Windows only, often the cleanest):</p>
+<pre class="codehilite"><code class="language-bash">git config --global http.sslBackend schannel
 </code></pre>
 
-<h3 id="pip"><code>pip</code></h3>
-<p><code>pip</code> uses <code>requests</code> under the hood, so <code>REQUESTS_CA_BUNDLE</code> and <code>SSL_CERT_FILE</code> cover it. You can also be explicit:</p>
-<pre class="codehilite"><code class="language-bash">pip install --cert /path/to/ca-bundle.pem some-package
+<p>With Schannel, Git trusts whatever Windows trusts, including the aTrust root. This is my default on corporate Windows machines. On macOS, <code>http.sslBackend</code> doesn't exist; use the combined bundle approach there.</p>
+<p>Verify:</p>
+<pre class="codehilite"><code class="language-bash">GIT_CURL_VERBOSE=1 git ls-remote https://github.com/git/git HEAD 2&gt;&amp;1 | grep -i &quot;issuer\|SSL certificate&quot;
 </code></pre>
 
-<p>If you're behind a proxy too, set <code>HTTPS_PROXY</code> and <code>HTTP_PROXY</code> and make sure <code>NO_PROXY</code> includes localhost and any internal hosts.</p>
-<h3 id="nodejs">Node.js</h3>
-<p>Node ships its own CA store. Set <code>NODE_EXTRA_CA_CERTS</code>:</p>
-<pre class="codehilite"><code class="language-bash">export NODE_EXTRA_CA_CERTS=/path/to/corp-root.pem
+<p>If you see the corporate issuer in the verbose output and the command succeeds, you're done.</p>
+<h3 id="ssh-is-usually-untouched">SSH is usually untouched</h3>
+<p>aTrust typically proxies HTTP/HTTPS. SSH over port 22 or 443 is usually passed through or blocked outright, not MITM'd. If <code>git clone git@github.com:...</code> works, prefer it — SSH keys don't care about CA chains. If port 22 is blocked, GitHub's <code>ssh.github.com:443</code> endpoint is the standard workaround:</p>
+<pre class="codehilite"><code>Host github.com
+  HostName ssh.github.com
+  Port 443
+  User git
 </code></pre>
 
-<h3 id="go">Go</h3>
-<p>Go uses the system store on most platforms. On Linux it reads <code>/etc/ssl/certs/ca-certificates.crt</code>. Append the corporate root there and run <code>update-ca-certificates</code>. Binaries built with <code>CGO_ENABLED=0</code> may use a bundled store instead — those need to be rebuilt or run with a custom <code>RootCAs</code> pool.</p>
-<h2 id="step-4-know-what-you-cannot-fix">Step 4: Know What You Cannot Fix</h2>
-<p>Some tools do certificate pinning and will not accept a corporate CA, period. Examples:</p>
-<ul>
-<li>Some mobile SDKs and desktop apps that pin to a specific public key.</li>
-<li>Certain language package managers with hardcoded fingerprints.</li>
-<li>Hardware tools, VPN clients, and anything with a "secure update" channel.</li>
-</ul>
-<p>For these, the honest answer is: don't fight it. If the tool is required for work, escalate to the security team and ask for a documented exception or an internal mirror. If it's not required, find an alternative that respects the system trust store.</p>
-<h2 id="step-5-route-around-blocked-hosts-politely">Step 5: Route Around Blocked Hosts Politely</h2>
-<p>Sometimes the problem isn't TLS — it's that a host is blocked outright. Before you do anything clever, check whether the block is policy or just a missing route.</p>
-<p><code>curl</code> with verbose output tells you a lot:</p>
-<pre class="codehilite"><code class="language-bash">curl -v --max-time 10 https://blocked.example.com/ 2&gt;&amp;1 | head -30
-</code></pre>
-
-<ul>
-<li><code>Connection timed out</code> → network-level block.</li>
-<li><code>403</code> from a proxy → policy block.</li>
-<li><code>SSL certificate problem</code> → interception, not blocking.</li>
-</ul>
-<p>If it's a policy block, the polite move is to use an approved path: an internal mirror, a corporate artifact registry, or a documented proxy exception. Setting up a personal tunnel to bypass corporate controls is a fast way to lose your laptop and your job. Don't.</p>
-<p>If it's a routing issue (e.g., an internal host isn't in the split-tunnel list), the fix belongs with the network team. File a ticket with the exact <code>curl -v</code> output and the destination IP. That gets resolved faster than any workaround.</p>
-<h2 id="a-small-diagnostic-script">A Small Diagnostic Script</h2>
-<p>Here's a script I keep around for the "is it just me?" moments:</p>
-<pre class="codehilite"><code class="language-python">import socket
+<h2 id="routing-around-blocked-hosts-politely">Routing around blocked hosts, politely</h2>
+<p>Some hosts are blocked by policy, not by the proxy's technical limits. The wrong move is to spin up a personal VPN and tunnel everything — that's the fastest way to a security incident. The right move depends on the reason for the block.</p>
+<p><strong>If it's a category block (e.g. a package registry mirrors the security team hasn't approved):</strong> file a ticket. Internal mirrors of PyPI, npm, and Go modules are common in these environments, and using them is both faster and sanctioned. Ask for the internal index URL; it's usually already configured for some team.</p>
+<p><strong>If it's an allowlist model:</strong> the block is on the destination, and the proxy will happily pass traffic to approved hosts. Route around it by using an approved equivalent. For container images, that often means the company's Harbor or Artifactory instance rather than Docker Hub.</p>
+<p><strong>If you need to reach a host for legitimate work and it's genuinely missing from the allowlist:</strong> the polite ask is specific. "I need <code>registry.npmjs.org</code> for build reproducibility on project X; the internal mirror at <code>npm.internal.corp</code> is missing package Y as of version Z." Concrete, scoped, and easy for a security engineer to approve.</p>
+<p>What you should <em>not</em> do: install a third-party VPN, use a public SOCKS proxy, or disable the aTrust agent. All three are detectable and all three turn a five-minute ticket into a meeting with your manager.</p>
+<h3 id="a-note-on-certificate-pinning">A note on certificate pinning</h3>
+<p>Some internal tools pin their own certs and will break the moment the corporate CA changes. If you maintain such a tool, don't pin the leaf; pin the corporate root's public key and make it configurable. A hardcoded SPKI hash is a time bomb.</p>
+<pre class="codehilite"><code class="language-python">import hashlib
 import ssl
-import sys
 
-HOSTS = [&quot;github.com&quot;, &quot;pypi.org&quot;, &quot;registry.npmjs.org&quot;]
-
-def check(host: str) -&gt; str:
-    try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((host, 443), timeout=5) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as tls:
-                cert = tls.getpeercert()
-                issuer = dict(x[0] for x in cert[&quot;issuer&quot;])
-                return f&quot;OK   {host:30} issuer={issuer.get('commonName')}&quot;
-    except ssl.SSLCertVerificationError as e:
-        return f&quot;CERT {host:30} {e.verify_message}&quot;
-    except (socket.timeout, OSError) as e:
-        return f&quot;NET  {host:30} {e}&quot;
-
-for h in HOSTS:
-    print(check(h))
+def spki_sha256(host: str, port: int = 443) -&gt; str:
+    &quot;&quot;&quot;Return the base64 SHA-256 of the leaf's SubjectPublicKeyInfo.&quot;&quot;&quot;
+    der = ssl.get_server_certificate((host, port), ca_certs=str(BUNDLE)).encode()
+    # In practice, parse with cryptography.x509 and hash the SPKI, not the whole cert.
+    return hashlib.sha256(der).hexdigest()
 </code></pre>
 
-<p>Run it once on the corporate network and once on a hotspot. The diff tells you whether you're dealing with interception, a bad bundle, or a genuine outage.</p>
-<h2 id="the-mental-model">The Mental Model</h2>
-<p>Three layers, in order:</p>
+<p>The point isn't the exact hash — it's that pinning should be a config value, not a constant buried in source.</p>
+<h2 id="a-short-checklist">A short checklist</h2>
+<p>When something breaks behind aTrust:</p>
 <ol>
-<li><strong>OS trust store</strong> — browsers and native apps use this. Usually fine.</li>
-<li><strong>Per-tool CA bundles</strong> — <code>certifi</code>, Node, Go, Git. This is where things break.</li>
-<li><strong>Certificate pinning</strong> — nothing you can do client-side. Escalate.</li>
+<li>Confirm the issuer with <code>openssl s_client</code>. If it's the corporate CA, you know the cause.</li>
+<li>Build <code>~/.certs/combined-ca.pem</code> from <code>certifi</code> plus the corporate root.</li>
+<li>Export <code>SSL_CERT_FILE</code> and <code>REQUESTS_CA_BUNDLE</code> to that path.</li>
+<li>For Git, set <code>http.sslBackend=schannel</code> on Windows or <code>http.sslCAInfo</code> everywhere.</li>
+<li>Prefer SSH where possible; it sidesteps the whole problem.</li>
+<li>For blocked hosts, use internal mirrors or file a scoped ticket — don't tunnel.</li>
 </ol>
-<p>Fix layer 2 by appending the corporate root to the bundle each tool actually reads. Use environment variables where possible so you don't mutate installed packages. Keep a combined bundle so you don't lose public roots. And when a host is blocked by policy, go through the approved channel — the security team is not the enemy, and the workaround is rarely worth the fallout.</p>
+<p>The interception isn't going away. Once you know where the trust anchors come from, most of the friction disappears.</p>
 <p>More notes like this ship every week on this site.</p>
 <hr />
 <h2 id="daily-picks">Daily Picks</h2>
 <blockquote>
 <p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
-Data updated: 2026-10-06 10:16:22</p>
+Data updated: 2026-10-06 12:36:33</p>
 </blockquote>
 <h3 id="long">Long</h3>
 <table>
@@ -232,16 +209,24 @@ Data updated: 2026-10-06 10:16:22</p>
 </thead>
 <tbody>
 <tr>
-<td>NEAR</td>
-<td>高质量标的做多</td>
-<td>$5.2985</td>
-<td>$5.5157</td>
-<td>$5.1872</td>
-<td>1:2.0</td>
+<td>SKYAI</td>
+<td></td>
+<td>$0.0416</td>
+<td>$0.0433</td>
+<td>$0.0406</td>
+<td>1:1.6</td>
+</tr>
+<tr>
+<td>RE</td>
+<td></td>
+<td>$0.4991</td>
+<td>$0.5181</td>
+<td>$0.4866</td>
+<td>1:1.5</td>
 </tr>
 </tbody>
 </table>
-<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
             </div>
             <div class="post-tags"><span class="tag-badge">Sangfor aTrust</span><span class="tag-badge">MITM</span><span class="tag-badge">TLS</span><span class="tag-badge">proxy</span><span class="tag-badge">corporate network</span></div>
             <div class="post-footer">
