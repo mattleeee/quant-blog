@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RSI指标在风险控制中的实际应用 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="RSI指标在风险控制中的实际应用
-
-RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。...">
+        <meta name="description" content="RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。这篇文章讲清楚三件事：RSI的计算原理、如何用它过滤开仓、如何用它做">
     <meta name="keywords" content="RSI,风险控制,技术指标,Python">
     <meta property="og:title" content="RSI指标在风险控制中的实际应用">
-    <meta property="og:description" content="RSI指标在风险控制中的实际应用
-
-RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。...">
+    <meta property="og:description" content="RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。这篇文章讲清楚三件事：RSI的计算原理、如何用它过滤开仓、如何用它做">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/29.html">
@@ -41,237 +37,469 @@ RSI（Relative Strength Index）是最常用的动量指标之一。大多数人
             </div>
             <div class="post-content">
 <p>RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：<strong>把RSI嵌入风控逻辑，而不是当作入场信号</strong>。这篇文章讲清楚三件事：RSI的计算原理、如何用它过滤开仓、如何用它做动态止损，并给出可直接运行的Python代码。</p>
+
 <h2 id="rsi">RSI的计算原理</h2>
+
 <p>RSI由Wilder在1978年提出，核心是衡量一段时间内上涨幅度与下跌幅度的相对强度。</p>
+
 <p>计算步骤：</p>
+
 <ol>
+
 <li>计算每根K线的涨跌幅：<code>delta = close.diff()</code></li>
+
 <li>分离上涨和下跌：<code>gain = delta.clip(lower=0)</code>，<code>loss = -delta.clip(upper=0)</code></li>
+
 <li>用<strong>Wilder平滑</strong>（类似EMA但平滑系数为<code>1/n</code>）计算平均涨跌幅</li>
+
 <li><code>RS = avg_gain / avg_loss</code>，<code>RSI = 100 - 100 / (1 + RS)</code></li>
+
 </ol>
+
 <p>关键点在于平滑方式。很多人用简单移动平均（SMA）算RSI，结果和主流行情软件对不上。Wilder用的是递归平滑，第一值用SMA初始化，之后递推。</p>
+
 <pre class="codehilite"><code class="language-python">import pandas as pd
+
 import numpy as np
 
+
+
 def rsi_wilder(close: pd.Series, period: int = 14) -&gt; pd.Series:
+
     &quot;&quot;&quot;
+
     使用Wilder平滑计算RSI，与TradingView/主流行情软件一致
+
     &quot;&quot;&quot;
+
     delta = close.diff()
+
     gain = delta.clip(lower=0)
+
     loss = -delta.clip(upper=0)
 
+
+
     # Wilder平滑：alpha = 1 / period
+
     avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+
     avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
 
+
+
     rs = avg_gain / avg_loss.replace(0, np.nan)
+
     rsi = 100 - 100 / (1 + rs)
+
     return rsi
+
 </code></pre>
 
 <p>验证一下：<code>avg_loss</code>为0时RSI应为100，<code>avg_gain</code>为0时RSI应为0。上面用<code>replace(0, np.nan)</code>会让这两种情况变NaN，需要补一下：</p>
+
 <pre class="codehilite"><code class="language-python">def rsi_wilder(close: pd.Series, period: int = 14) -&gt; pd.Series:
+
     delta = close.diff()
+
     gain = delta.clip(lower=0)
+
     loss = -delta.clip(upper=0)
 
+
+
     avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+
     avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
 
+
+
     rs = avg_gain / avg_loss
+
     rsi = 100 - 100 / (1 + rs)
 
+
+
     # 处理边界：avg_loss=0 -&gt; RSI=100；avg_gain=0 -&gt; RSI=0
+
     rsi = rsi.where(avg_loss != 0, 100)
+
     rsi = rsi.where(avg_gain != 0, 0)
+
     return rsi
+
 </code></pre>
 
 <h2 id="_1">超买超卖区域的判定陷阱</h2>
+
 <p>教科书说RSI&gt;70超买，&lt;30超卖。但在趋势行情里，强趋势品种的RSI可以长期停留在70以上或30以下。<strong>把70/30当反转信号，是新手亏钱最快的方式之一。</strong></p>
+
 <p>更实用的做法是分层：</p>
+
 <table>
+
 <thead>
+
 <tr>
+
 <th>区间</th>
+
 <th>含义</th>
+
 <th>风控动作</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td>RSI &gt; 80</td>
+
 <td>极端超买</td>
+
 <td>禁止新开多，考虑减仓</td>
+
 </tr>
+
 <tr>
+
 <td>70 &lt; RSI ≤ 80</td>
+
 <td>超买</td>
+
 <td>新开多需额外确认</td>
+
 </tr>
+
 <tr>
+
 <td>30 ≤ RSI &lt; 50</td>
+
 <td>中性偏弱</td>
+
 <td>正常</td>
+
 </tr>
+
 <tr>
+
 <td>20 ≤ RSI &lt; 30</td>
+
 <td>超卖</td>
+
 <td>新开空需额外确认</td>
+
 </tr>
+
 <tr>
+
 <td>RSI &lt; 20</td>
+
 <td>极端超卖</td>
+
 <td>禁止新开空，考虑减仓</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <p>注意这里的逻辑：<strong>RSI不是用来预测反转的，而是用来约束仓位方向的</strong>。当RSI进入极端区域，说明当前方向的动能已经透支，继续加仓的风险收益比很差。</p>
+
 <h2 id="rsi_1">RSI作为开仓过滤条件</h2>
+
 <p>假设你有一个趋势跟踪策略（比如双均线），在信号触发时用RSI做二次过滤：</p>
+
 <ul>
+
 <li>做多信号：要求RSI不在极端超买区（RSI &lt; 80）</li>
+
 <li>做空信号：要求RSI不在极端超卖区（RSI &gt; 20）</li>
+
 </ul>
+
 <p>这样做的效果是：<strong>避免在动能末端追单</strong>，牺牲一部分趋势初期的利润，换取更小的回撤。</p>
+
 <pre class="codehilite"><code class="language-python">def generate_signals(df: pd.DataFrame,
+
                      fast: int = 10,
+
                      slow: int = 30,
+
                      rsi_period: int = 14,
+
                      rsi_upper: float = 80,
+
                      rsi_lower: float = 20) -&gt; pd.DataFrame:
+
     &quot;&quot;&quot;
+
     双均线 + RSI过滤的开仓信号
+
     df 需要包含 'close' 列
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['ma_fast'] = df['close'].rolling(fast).mean()
+
     df['ma_slow'] = df['close'].rolling(slow).mean()
+
     df['rsi'] = rsi_wilder(df['close'], rsi_period)
 
+
+
     # 基础趋势信号
+
     long_signal = (df['ma_fast'] &gt; df['ma_slow']) &amp; (df['ma_fast'].shift(1) &lt;= df['ma_slow'].shift(1))
+
     short_signal = (df['ma_fast'] &lt; df['ma_slow']) &amp; (df['ma_fast'].shift(1) &gt;= df['ma_slow'].shift(1))
 
+
+
     # RSI过滤：极端区域不开新仓
+
     long_signal &amp;= df['rsi'] &lt; rsi_upper
+
     short_signal &amp;= df['rsi'] &gt; rsi_lower
 
+
+
     df['long_entry'] = long_signal
+
     df['short_entry'] = short_signal
+
     return df
+
 </code></pre>
 
 <p>这里的关键不是RSI本身给出了信号，而是它<strong>否决了一部分信号</strong>。在回测中，被否决的信号往往是那些追高杀跌的坏交易。</p>
+
 <h2 id="rsi_2">RSI作为动态止损参考</h2>
+
 <p>固定百分比止损的问题在于：它不考虑市场状态。同样是-3%，在低波动时是趋势反转，在高波动时只是噪音。</p>
+
 <p>RSI可以提供一个<strong>状态感知的止损触发条件</strong>：当持仓方向与RSI极端值背离时，提前离场。</p>
+
 <p>具体逻辑：</p>
+
 <ul>
+
 <li>持有多头，若RSI从超买区（&gt;70）快速跌破50，视为动能衰竭，减仓或平仓</li>
+
 <li>持有空头，若RSI从超卖区（&lt;30）快速升破50，视为空头动能衰竭，减仓或平仓</li>
+
 </ul>
+
 <p>这里的"快速"可以用N根K线内的变化幅度定义：</p>
+
 <pre class="codehilite"><code class="language-python">def rsi_exit_signal(df: pd.DataFrame,
+
                     rsi_col: str = 'rsi',
+
                     lookback: int = 3,
+
                     mid: float = 50,
+
                     extreme_high: float = 70,
+
                     extreme_low: float = 30) -&gt; pd.DataFrame:
+
     &quot;&quot;&quot;
+
     基于RSI的动能衰竭离场信号
+
     - 多头离场：过去lookback根内RSI曾&gt;extreme_high，且当前跌破mid
+
     - 空头离场：过去lookback根内RSI曾&lt;extreme_low，且当前升破mid
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     rsi = df[rsi_col]
 
+
+
     recent_high = rsi.rolling(lookback).max()
+
     recent_low = rsi.rolling(lookback).min()
 
+
+
     df['exit_long'] = (recent_high &gt; extreme_high) &amp; (rsi &lt; mid)
+
     df['exit_short'] = (recent_low &lt; extreme_low) &amp; (rsi &gt; mid)
+
     return df
+
 </code></pre>
 
 <p>把这个信号和固定止损结合：<strong>取两者中先触发的那个</strong>。RSI负责捕捉"动能反转"，固定止损负责兜底"跳空/极端行情"。</p>
+
 <h2 id="_2">完整回测框架</h2>
+
 <p>下面是一个最小可用的回测，把RSI过滤和RSI离场都串起来：</p>
+
 <pre class="codehilite"><code class="language-python">def backtest(df: pd.DataFrame,
+
              fast: int = 10,
+
              slow: int = 30,
+
              rsi_period: int = 14,
+
              stop_loss_pct: float = 0.03) -&gt; pd.DataFrame:
+
     df = generate_signals(df, fast, slow, rsi_period)
+
     df = rsi_exit_signal(df)
 
+
+
     position = 0          # 1 多, -1 空, 0 空仓
+
     entry_price = 0.0
+
     equity = [1.0]
+
     trades = []
 
+
+
     for i in range(1, len(df)):
+
         row = df.iloc[i]
+
         price = row['close']
+
         ret = 0.0
 
+
+
         if position != 0:
+
             ret = position * (price / df.iloc[i-1]['close'] - 1)
 
+
+
         # 止损检查
+
         if position == 1 and price &lt;= entry_price * (1 - stop_loss_pct):
+
             trades.append(('stop_long', df.index[i], price))
+
             position, entry_price = 0, 0.0
+
         elif position == -1 and price &gt;= entry_price * (1 + stop_loss_pct):
+
             trades.append(('stop_short', df.index[i], price))
+
             position, entry_price = 0, 0.0
+
+
 
         # RSI离场
+
         if position == 1 and row['exit_long']:
+
             trades.append(('rsi_exit_long', df.index[i], price))
-            position, entry_price = 0, 0.0
-        elif position == -1 and row['exit_short']:
-            trades.append(('rsi_exit_short', df.index[i], price))
+
             position, entry_price = 0, 0.0
 
+        elif position == -1 and row['exit_short']:
+
+            trades.append(('rsi_exit_short', df.index[i], price))
+
+            position, entry_price = 0, 0.0
+
+
+
         # 开仓（空仓时）
+
         if position == 0:
+
             if row['long_entry']:
+
                 position, entry_price = 1, price
+
                 trades.append(('long', df.index[i], price))
+
             elif row['short_entry']:
+
                 position, entry_price = -1, price
+
                 trades.append(('short', df.index[i], price))
+
+
 
         equity.append(equity[-1] * (1 + ret))
 
+
+
     df['equity'] = equity[1:]
+
     return df, pd.DataFrame(trades, columns=['action', 'time', 'price'])
+
 </code></pre>
 
 <p>跑完之后重点看三个指标：</p>
+
 <ol>
+
 <li><strong>最大回撤</strong>：RSI过滤是否降低了回撤</li>
+
 <li><strong>交易次数</strong>：过滤掉多少笔信号，是否牺牲了过多机会</li>
+
 <li><strong>盈亏比</strong>：RSI离场是否改善了平均盈亏比</li>
+
 </ol>
+
 <p>如果RSI过滤后交易次数减少超过50%，但回撤只降低10%，那这个过滤不值得。参数要按这个标准调。</p>
+
 <h2 id="_3">几个实践中的坑</h2>
+
 <p><strong>坑1：把RSI当独立信号。</strong> RSI单独用胜率接近随机，它的价值在于和其他逻辑组合。</p>
+
 <p><strong>坑2：参数过拟合。</strong> 14是默认值，但不同品种、不同周期的最优参数不同。不要为了回测好看去调RSI周期，容易过拟合。</p>
+
 <p><strong>坑3：忽略背离。</strong> RSI背离（价格新高但RSI不新高）是有效的预警，但背离的量化定义很主观，容易过度拟合。建议只作为减仓参考，不作为开仓依据。</p>
+
 <p><strong>坑4：周期选择。</strong> 日线RSI适合中长线风控，小时线适合日内。周期越短，RSI噪音越大，过滤效果越差。</p>
+
 <h2 id="_4">小结</h2>
+
 <p>RSI在风控中的正确姿势是<strong>做减法</strong>：</p>
+
 <ul>
+
 <li>用极端区域<strong>否决</strong>追单信号</li>
+
 <li>用动能衰竭<strong>提前</strong>离场</li>
+
 <li>和固定止损<strong>组合</strong>使用，各管一段</li>
+
 </ul>
+
 <p>代码里的三个函数可以直接拿去改：<code>rsi_wilder</code>、<code>generate_signals</code>、<code>rsi_exit_signal</code>。把数据换成你自己的，先跑通，再调参数。</p>
+
 <p>更多Python量化与自动化实战内容，请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;RSI&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;风险控制&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;技术指标&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;Python&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">RSI</span><span class="tag-badge">风险控制</span><span class="tag-badge">技术指标</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
