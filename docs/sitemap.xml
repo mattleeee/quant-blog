@@ -127,7 +127,7 @@
   </url>
   <url>
     <loc>https://www.hkcode.dpdns.org/posts/21.html</loc>
-    <lastmod>2026-09-20</lastmod>
+    <lastmod>2026-08-26</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
@@ -230,6 +230,12 @@
   <url>
     <loc>https://www.hkcode.dpdns.org/posts/38.html</loc>
     <lastmod>2026-10-07</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://www.hkcode.dpdns.org/posts/39.html</loc>
+    <lastmod>2026-10-08</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
