@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>模拟盘数据统计与月度复盘方法 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="模拟盘数据统计与月度复盘方法
-
-模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。...">
+        <meta name="description" content="模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。 这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可">
     <meta name="keywords" content="数据统计,月度复盘,模拟盘,Python">
     <meta property="og:title" content="模拟盘数据统计与月度复盘方法">
-    <meta property="og:description" content="模拟盘数据统计与月度复盘方法
-
-模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。...">
+    <meta property="og:description" content="模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。 这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/37.html">
@@ -41,372 +37,726 @@
             </div>
             <div class="post-content">
 <p>模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。</p>
+
 <p>这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。</p>
+
 <h2 id="_1">一、数据准备</h2>
+
 <p>假设你的模拟盘交易记录已经导出为CSV,字段大致如下:</p>
+
 <pre class="codehilite"><code class="language-csv">trade_id,symbol,direction,open_time,close_time,open_price,close_price,volume,pnl,commission
+
 1,RB2405,long,2024-01-02 09:35,2024-01-02 14:20,3980,4010,10,300,12
+
 2,RB2405,short,2024-01-03 10:10,2024-01-03 11:05,4020,4035,10,-150,12
+
 ...
+
 </code></pre>
 
 <p>先做统一的数据加载和预处理:</p>
+
 <pre class="codehilite"><code class="language-python">import pandas as pd
+
 import numpy as np
+
 import matplotlib.pyplot as plt
+
 from datetime import datetime
 
+
+
 plt.rcParams['font.sans-serif'] = ['SimHei']
+
 plt.rcParams['axes.unicode_minus'] = False
 
+
+
 def load_trades(filepath):
+
     df = pd.read_csv(filepath, parse_dates=['open_time', 'close_time'])
+
     # 净盈亏 = 毛利 - 手续费
+
     df['net_pnl'] = df['pnl'] - df['commission']
+
     # 持仓时长(分钟)
+
     df['hold_minutes'] = (df['close_time'] - df['open_time']).dt.total_seconds() / 60
+
     # 按平仓时间排序
+
     df = df.sort_values('close_time').reset_index(drop=True)
+
     return df
 
+
+
 trades = load_trades('sim_trades.csv')
+
 print(f&quot;总交易数: {len(trades)}&quot;)
+
 print(f&quot;时间范围: {trades['close_time'].min()} ~ {trades['close_time'].max()}&quot;)
+
 </code></pre>
 
 <h2 id="_2">二、核心统计指标</h2>
+
 <h3 id="21">2.1 胜率与盈亏比</h3>
+
 <p>胜率单独看没有意义,必须和盈亏比结合。一个胜率40%但盈亏比3:1的策略,远好于胜率70%但盈亏比0.5:1的策略。</p>
+
 <pre class="codehilite"><code class="language-python">def calc_basic_stats(df):
+
     wins = df[df['net_pnl'] &gt; 0]
+
     losses = df[df['net_pnl'] &lt; 0]
 
+
+
     win_rate = len(wins) / len(df) if len(df) &gt; 0 else 0
+
     avg_win = wins['net_pnl'].mean() if len(wins) &gt; 0 else 0
+
     avg_loss = abs(losses['net_pnl'].mean()) if len(losses) &gt; 0 else 0
+
     profit_loss_ratio = avg_win / avg_loss if avg_loss &gt; 0 else np.inf
 
+
+
     # 期望值 = 胜率 * 平均盈利 - 败率 * 平均亏损
+
     expectancy = win_rate * avg_win - (1 - win_rate) * avg_loss
 
+
+
     stats = {
+
         '总交易数': len(df),
+
         '盈利笔数': len(wins),
+
         '亏损笔数': len(losses),
+
         '胜率': round(win_rate, 4),
+
         '平均盈利': round(avg_win, 2),
+
         '平均亏损': round(avg_loss, 2),
+
         '盈亏比': round(profit_loss_ratio, 2),
+
         '单笔期望值': round(expectancy, 2),
+
         '总净盈亏': round(df['net_pnl'].sum(), 2),
+
         '最大单笔盈利': round(df['net_pnl'].max(), 2),
+
         '最大单笔亏损': round(df['net_pnl'].min(), 2),
+
     }
+
     return stats
 
+
+
 stats = calc_basic_stats(trades)
+
 for k, v in stats.items():
+
     print(f&quot;{k}: {v}&quot;)
+
 </code></pre>
 
 <h3 id="22">2.2 期望值的意义</h3>
+
 <p>单笔期望值是策略能否持续盈利的核心判断标准。如果期望值 ≤ 0,无论胜率多高,长期跑下去必然亏损。这个指标比总盈亏更能反映策略质量,因为它不受交易次数的影响。</p>
+
 <h3 id="23">2.3 最大连亏与最大回撤</h3>
+
 <pre class="codehilite"><code class="language-python">def calc_drawdown_series(df):
+
     &quot;&quot;&quot;计算资金曲线和回撤序列&quot;&quot;&quot;
+
     df = df.copy()
+
     df['cum_pnl'] = df['net_pnl'].cumsum()
+
     df['peak'] = df['cum_pnl'].cummax()
+
     df['drawdown'] = df['cum_pnl'] - df['peak']
+
     df['drawdown_pct'] = df['drawdown'] / (df['peak'].abs() + 1e-9)
+
     return df
 
+
+
 def calc_streak(df):
+
     &quot;&quot;&quot;计算最大连胜和最大连亏&quot;&quot;&quot;
+
     pnl_sign = np.sign(df['net_pnl'].values)
+
     max_win_streak = max_loss_streak = 0
+
     cur_win = cur_loss = 0
 
+
+
     for s in pnl_sign:
+
         if s &gt; 0:
+
             cur_win += 1
+
             cur_loss = 0
+
         elif s &lt; 0:
+
             cur_loss += 1
+
             cur_win = 0
+
         else:
+
             cur_win = cur_loss = 0
+
         max_win_streak = max(max_win_streak, cur_win)
+
         max_loss_streak = max(max_loss_streak, cur_loss)
+
+
 
     return max_win_streak, max_loss_streak
 
+
+
 trades = calc_drawdown_series(trades)
+
 max_win_streak, max_loss_streak = calc_streak(trades)
+
 max_dd = trades['drawdown'].min()
 
+
+
 print(f&quot;最大连胜: {max_win_streak}&quot;)
+
 print(f&quot;最大连亏: {max_loss_streak}&quot;)
+
 print(f&quot;最大回撤(绝对值): {max_dd:.2f}&quot;)
+
 </code></pre>
 
 <p>最大连亏决定了你需要的心理承受能力和资金储备。如果一个策略历史上出现过连续12笔亏损,那么你至少要做好连亏15笔的准备。</p>
+
 <h2 id="_3">三、资金曲线分析</h2>
+
 <h3 id="31">3.1 资金曲线绘制</h3>
+
 <pre class="codehilite"><code class="language-python">def plot_equity_curve(df, save_path='equity_curve.png'):
+
     fig, axes = plt.subplots(2, 1, figsize=(14, 8), 
+
                               gridspec_kw={'height_ratios': [3, 1]})
 
+
+
     # 资金曲线
+
     axes[0].plot(df['close_time'], df['cum_pnl'], 
+
                  color='#2196F3', linewidth=1.5)
+
     axes[0].fill_between(df['close_time'], df['cum_pnl'], 
+
                           alpha=0.15, color='#2196F3')
+
     axes[0].set_title('模拟盘资金曲线', fontsize=14)
+
     axes[0].set_ylabel('累计净盈亏')
+
     axes[0].grid(True, alpha=0.3)
 
+
+
     # 回撤
+
     axes[1].fill_between(df['close_time'], df['drawdown'], 0, 
+
                           color='#F44336', alpha=0.5)
+
     axes[1].set_title('回撤曲线', fontsize=12)
+
     axes[1].set_ylabel('回撤')
+
     axes[1].grid(True, alpha=0.3)
 
+
+
     plt.tight_layout()
+
     plt.savefig(save_path, dpi=150)
+
     plt.close()
 
+
+
 plot_equity_curve(trades)
+
 </code></pre>
 
 <h3 id="32">3.2 资金曲线的形态判断</h3>
+
 <p>看资金曲线不只是看涨跌,要关注形态:</p>
+
 <ul>
+
 <li><strong>平滑上升</strong>:策略稳定,回撤可控</li>
+
 <li><strong>阶梯式上升</strong>:策略有周期性,某些行情下表现好</li>
+
 <li><strong>高位震荡</strong>:策略可能已经失效,需要警惕</li>
+
 <li><strong>持续新低</strong>:策略逻辑有问题,应立即停止</li>
+
 </ul>
+
 <p>可以用线性回归斜率来量化资金曲线的趋势:</p>
+
 <pre class="codehilite"><code class="language-python">from scipy import stats as sp_stats
 
+
+
 def equity_trend(df):
+
     &quot;&quot;&quot;用线性回归斜率衡量资金曲线趋势&quot;&quot;&quot;
+
     x = np.arange(len(df))
+
     y = df['cum_pnl'].values
+
     slope, intercept, r_value, p_value, std_err = sp_stats.linregress(x, y)
+
     return {
+
         'slope': round(slope, 4),
+
         'r_squared': round(r_value**2, 4),
+
         'p_value': round(p_value, 6)
+
     }
 
+
+
 trend = equity_trend(trades)
+
 print(f&quot;资金曲线斜率: {trend['slope']} (每笔交易平均盈亏)&quot;)
+
 print(f&quot;R²: {trend['r_squared']}&quot;)
+
 </code></pre>
 
 <p>斜率代表每笔交易的平均贡献,R²代表资金曲线的稳定性。R²越高,说明盈利越稳定。</p>
+
 <h2 id="_4">四、月度复盘报告</h2>
+
 <h3 id="41">4.1 按月分组统计</h3>
+
 <pre class="codehilite"><code class="language-python">def monthly_report(df):
+
     df = df.copy()
+
     df['month'] = df['close_time'].dt.to_period('M')
 
+
+
     monthly = df.groupby('month').agg(
+
         trades=('net_pnl', 'count'),
+
         total_pnl=('net_pnl', 'sum'),
+
         avg_pnl=('net_pnl', 'mean'),
+
         win_count=('net_pnl', lambda x: (x &gt; 0).sum()),
+
         max_win=('net_pnl', 'max'),
+
         max_loss=('net_pnl', 'min'),
+
         avg_hold=('hold_minutes', 'mean'),
+
     ).reset_index()
 
+
+
     monthly['win_rate'] = (monthly['win_count'] / monthly['trades']).round(4)
+
     monthly['total_pnl'] = monthly['total_pnl'].round(2)
+
     monthly['avg_pnl'] = monthly['avg_pnl'].round(2)
+
+
 
     return monthly
 
+
+
 monthly = monthly_report(trades)
+
 print(monthly.to_string(index=False))
+
 </code></pre>
 
 <h3 id="42">4.2 月度对比可视化</h3>
+
 <pre class="codehilite"><code class="language-python">def plot_monthly_comparison(monthly_df, save_path='monthly_report.png'):
+
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+
+
 
     months = monthly_df['month'].astype(str)
 
+
+
     # 月度盈亏
+
     colors = ['#4CAF50' if x &gt; 0 else '#F44336' for x in monthly_df['total_pnl']]
+
     axes[0].bar(months, monthly_df['total_pnl'], color=colors)
+
     axes[0].set_title('月度净盈亏')
+
     axes[0].tick_params(axis='x', rotation=45)
+
     axes[0].axhline(y=0, color='black', linewidth=0.8)
 
+
+
     # 月度胜率
+
     axes[1].plot(months, monthly_df['win_rate'], 
+
                  marker='o', color='#2196F3', linewidth=2)
+
     axes[1].axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+
     axes[1].set_title('月度胜率')
+
     axes[1].set_ylim(0, 1)
+
     axes[1].tick_params(axis='x', rotation=45)
 
+
+
     # 月度交易次数
+
     axes[2].bar(months, monthly_df['trades'], color='#FF9800', alpha=0.7)
+
     axes[2].set_title('月度交易次数')
+
     axes[2].tick_params(axis='x', rotation=45)
 
+
+
     plt.tight_layout()
+
     plt.savefig(save_path, dpi=150)
+
     plt.close()
 
+
+
 plot_monthly_comparison(monthly)
+
 </code></pre>
 
 <h3 id="43">4.3 复盘报告模板</h3>
+
 <p>每月复盘时,按以下结构输出:</p>
+
 <pre class="codehilite"><code class="language-python">def generate_monthly_review(df, target_month):
+
     &quot;&quot;&quot;生成指定月份的复盘报告&quot;&quot;&quot;
+
     df['month'] = df['close_time'].dt.to_period('M')
+
     mdf = df[df['month'] == target_month]
 
+
+
     if len(mdf) == 0:
+
         return f&quot;{target_month} 无交易记录&quot;
 
+
+
     stats = calc_basic_stats(mdf)
+
     max_win_streak, max_loss_streak = calc_streak(mdf)
 
+
+
     # 分方向统计
+
     long_trades = mdf[mdf['direction'] == 'long']
+
     short_trades = mdf[mdf['direction'] == 'short']
 
+
+
     report = f&quot;&quot;&quot;
+
 {'='*50}
+
 {target_month} 月度复盘报告
+
 {'='*50}
+
+
 
 【整体表现】
+
   交易次数: {stats['总交易数']}
+
   净盈亏: {stats['总净盈亏']}
+
   胜率: {stats['胜率']*100:.1f}%
+
   盈亏比: {stats['盈亏比']}
+
   单笔期望值: {stats['单笔期望值']}
 
+
+
 【风险指标】
+
   最大连胜: {max_win_streak}
+
   最大连亏: {max_loss_streak}
+
   最大单笔盈利: {stats['最大单笔盈利']}
+
   最大单笔亏损: {stats['最大单笔亏损']}
 
+
+
 【分方向】
+
   多头: {len(long_trades)}笔, 盈亏 {long_trades['net_pnl'].sum():.2f}
+
   空头: {len(short_trades)}笔, 盈亏 {short_trades['net_pnl'].sum():.2f}
 
+
+
 【持仓分析】
+
   平均持仓时长: {mdf['hold_minutes'].mean():.0f} 分钟
+
   盈利单平均持仓: {mdf[mdf['net_pnl']&gt;0]['hold_minutes'].mean():.0f} 分钟
+
   亏损单平均持仓: {mdf[mdf['net_pnl']&lt;0]['hold_minutes'].mean():.0f} 分钟
+
 &quot;&quot;&quot;
+
     return report
 
+
+
 # 使用示例
+
 print(generate_monthly_review(trades, pd.Period('2024-01', 'M')))
+
 </code></pre>
 
 <h2 id="_5">五、策略表现趋势追踪</h2>
+
 <p>单月数据可能有偶然性,需要追踪指标的月度变化趋势,判断策略是否在衰减。</p>
+
 <pre class="codehilite"><code class="language-python">def track_performance_trend(df):
+
     &quot;&quot;&quot;追踪策略关键指标的月度趋势&quot;&quot;&quot;
+
     df = df.copy()
+
     df['month'] = df['close_time'].dt.to_period('M')
 
+
+
     monthly = df.groupby('month').apply(
+
         lambda x: pd.Series({
+
             'win_rate': (x['net_pnl'] &gt; 0).mean(),
+
             'avg_win': x[x['net_pnl'] &gt; 0]['net_pnl'].mean() if (x['net_pnl'] &gt; 0).any() else 0,
+
             'avg_loss': abs(x[x['net_pnl'] &lt; 0]['net_pnl'].mean()) if (x['net_pnl'] &lt; 0).any() else 0,
+
             'expectancy': x['net_pnl'].mean(),
+
             'trade_count': len(x),
+
         })
+
     ).reset_index()
+
+
 
     monthly['pl_ratio'] = monthly['avg_win'] / monthly['avg_loss'].replace(0, np.nan)
 
+
+
     # 计算滚动均值(3个月)
+
     for col in ['win_rate', 'pl_ratio', 'expectancy']:
+
         monthly[f'{col}_ma3'] = monthly[col].rolling(3, min_periods=1).mean()
+
+
 
     return monthly
 
+
+
 trend_df = track_performance_trend(trades)
+
 print(trend_df.to_string(index=False))
+
 </code></pre>
 
 <h3 id="51">5.1 衰减信号识别</h3>
+
 <pre class="codehilite"><code class="language-python">def detect_decay(trend_df, lookback=3):
+
     &quot;&quot;&quot;检测策略是否出现衰减&quot;&quot;&quot;
+
     if len(trend_df) &lt; lookback + 1:
+
         return &quot;数据不足,无法判断&quot;
 
+
+
     recent = trend_df.tail(lookback)
+
     signals = []
 
+
+
     # 期望值连续为负
+
     if (recent['expectancy'] &lt; 0).all():
+
         signals.append(&quot;⚠️ 近{}个月期望值持续为负&quot;.format(lookback))
 
+
+
     # 胜率持续下降
+
     if len(trend_df) &gt;= lookback * 2:
+
         prev_wr = trend_df['win_rate'].iloc[-lookback*2:-lookback].mean()
+
         curr_wr = recent['win_rate'].mean()
+
         if curr_wr &lt; prev_wr * 0.8:
+
             signals.append(f&quot;⚠️ 胜率下降超过20% ({prev_wr:.2%} → {curr_wr:.2%})&quot;)
 
+
+
     # 盈亏比恶化
+
     if len(trend_df) &gt;= lookback * 2:
+
         prev_pl = trend_df['pl_ratio'].iloc[-lookback*2:-lookback].mean()
+
         curr_pl = recent['pl_ratio'].mean()
+
         if curr_pl &lt; prev_pl * 0.7:
+
             signals.append(f&quot;⚠️ 盈亏比恶化 ({prev_pl:.2f} → {curr_pl:.2f})&quot;)
 
+
+
     if not signals:
+
         return &quot;✅ 策略表现正常,未检测到明显衰减&quot;
+
+
 
     return &quot;\n&quot;.join(signals)
 
+
+
 print(detect_decay(trend_df))
+
 </code></pre>
 
 <h3 id="52">5.2 按品种/方向拆分</h3>
+
 <p>如果策略同时交易多个品种,需要拆分统计,找出哪些品种在赚钱、哪些在亏钱:</p>
+
 <pre class="codehilite"><code class="language-python">def breakdown_by_symbol(df):
+
     &quot;&quot;&quot;按品种拆分统计&quot;&quot;&quot;
+
     result = df.groupby('symbol').agg(
+
         trades=('net_pnl', 'count'),
+
         total_pnl=('net_pnl', 'sum'),
+
         win_rate=('net_pnl', lambda x: (x &gt; 0).mean()),
+
         avg_pnl=('net_pnl', 'mean'),
+
     ).round(4).sort_values('total_pnl', ascending=False)
+
     return result
 
+
+
 symbol_stats = breakdown_by_symbol(trades)
+
 print(symbol_stats.to_string())
+
 </code></pre>
 
 <p>如果一个品种连续三个月亏损,考虑是否要把它从策略池中剔除。如果某个品种贡献了80%的利润,要警惕过度集中。</p>
+
 <h2 id="_6">六、自动化复盘流程</h2>
+
 <p>把上面的逻辑串起来,每月初自动生成上月复盘:</p>
+
 <p>```python
+
 def auto_monthly_review(filepath):
+
     """一键生成月度复盘"""
+
     trades = load_trades(filepath)
+
     trades = calc_drawdown_series(trades)</p>
+
 <pre class="codehilite"><code># 上月
+
 last_month = (datetime.now() - pd.DateOffset(months=1)).to_period('
+
+</code></pre>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;数据统计&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;月度复盘&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;模拟盘&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;Python&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
 </code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">数据统计</span><span class="tag-badge">月度复盘</span><span class="tag-badge">模拟盘</span><span class="tag-badge">Python</span></div>
