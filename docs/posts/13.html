@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>K线数据缓存机制：避免重复API调用的设计 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="K线数据缓存机制：避免重复API调用的设计
-
-量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。...">
+        <meta name="description" content="# K线数据缓存机制：避免重复API调用的设计 量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。如果每次请求都直接打到交易所API，不仅浪费额度，还会触发限频，">
     <meta name="keywords" content="K线,缓存,API,数据请求">
     <meta property="og:title" content="K线数据缓存机制：避免重复API调用的设计">
-    <meta property="og:description" content="K线数据缓存机制：避免重复API调用的设计
-
-量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。...">
+    <meta property="og:description" content="# K线数据缓存机制：避免重复API调用的设计 量化交易系统里，K线数据是最高频的请求资源。无论是策略回测、实时信号计算，还是指标绘图，你都会反复请求同一币种、同一周期的K线。如果每次请求都直接打到交易所API，不仅浪费额度，还会触发限频，">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/13.html">
