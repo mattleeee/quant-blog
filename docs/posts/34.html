@@ -5,18 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>资金管理：仓位控制的核心原则 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="资金管理：仓位控制的核心原则
-
-做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。
-
-原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。...">
+        <meta name="description" content="做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。 原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。 一">
     <meta name="keywords" content="资金管理,仓位控制,风险管理,凯利公式">
     <meta property="og:title" content="资金管理：仓位控制的核心原则">
-    <meta property="og:description" content="资金管理：仓位控制的核心原则
-
-做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。
-
-原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。...">
+    <meta property="og:description" content="做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。 原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。 一">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/34.html">
@@ -45,293 +37,569 @@
             </div>
             <div class="post-content">
 <p>做量化策略的人，迟早会撞上同一个问题：<strong>策略信号对了，钱却没赚到，甚至亏了。</strong></p>
+
 <p>原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定"往哪打"，资金管理决定"打多重"。这篇文章只讲后者。</p>
+
 <h2 id="_1">一、为什么仓位控制比择时更重要</h2>
+
 <p>先看一个简单的数学事实。假设账户回撤 50%，需要上涨 100% 才能回本。回撤 70%，需要上涨 233%。回撤是<strong>不对称</strong>的：</p>
+
 <pre class="codehilite"><code>回本所需涨幅 = 1 / (1 - 回撤比例) - 1
+
 </code></pre>
 
 <table>
+
 <thead>
+
 <tr>
+
 <th>回撤</th>
+
 <th>回本所需涨幅</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td>10%</td>
+
 <td>11.1%</td>
+
 </tr>
+
 <tr>
+
 <td>30%</td>
+
 <td>42.9%</td>
+
 </tr>
+
 <tr>
+
 <td>50%</td>
+
 <td>100%</td>
+
 </tr>
+
 <tr>
+
 <td>70%</td>
+
 <td>233%</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <p>这意味着控制回撤的优先级高于追求收益。而回撤的直接来源，就是仓位过重。一个胜率 60% 的策略，如果每次满仓，遇到连续 5 次亏损的概率并不低，账户可能直接归零。</p>
+
 <p><strong>仓位控制的第一原则：先保证活下来，再谈赚钱。</strong></p>
+
 <h2 id="fixed-fractional">二、固定比例仓位（Fixed Fractional）</h2>
+
 <p>最基础也最实用的方法。每次交易只投入总资金的一个固定比例。</p>
+
 <pre class="codehilite"><code class="language-python">import numpy as np
+
 import pandas as pd
 
+
+
 def fixed_fractional_position(capital, price, fraction=0.1):
+
     &quot;&quot;&quot;
+
     固定比例仓位
+
     capital: 当前总资金
+
     price: 当前价格
+
     fraction: 每次投入的资金比例
+
     返回：可买入数量
+
     &quot;&quot;&quot;
+
     alloc = capital * fraction
+
     shares = alloc / price
+
     return shares
 
+
+
 # 示例：10万资金，每次投入10%
+
 capital = 100000
+
 price = 25.0
+
 shares = fixed_fractional_position(capital, price, fraction=0.1)
+
 print(f&quot;可买入 {shares:.0f} 股，占用资金 {shares * price:.0f} 元&quot;)
+
 </code></pre>
 
 <p>固定比例的核心参数是 <code>fraction</code>。它决定了资金曲线的波动率：</p>
+
 <ul>
+
 <li><code>fraction</code> 越大，收益弹性越大，回撤也越大</li>
+
 <li><code>fraction</code> 越小，曲线越平滑，但资金利用率低</li>
+
 </ul>
+
 <p>一个经验做法是让单笔最大亏损不超过总资金的 1%~2%。如果策略止损幅度是 5%，那么仓位比例应该满足：</p>
+
 <pre class="codehilite"><code class="language-python">def position_by_risk(capital, stop_loss_pct, risk_per_trade=0.02):
+
     &quot;&quot;&quot;
+
     基于单笔风险反推仓位比例
+
     stop_loss_pct: 止损幅度（如 0.05 表示 5%）
+
     risk_per_trade: 单笔可承受的最大亏损占总资金比例
+
     &quot;&quot;&quot;
+
     fraction = risk_per_trade / stop_loss_pct
+
     return min(fraction, 1.0)
 
+
+
 fraction = position_by_risk(100000, stop_loss_pct=0.05, risk_per_trade=0.02)
+
 print(f&quot;建议仓位比例: {fraction:.1%}&quot;)  # 40%
+
 </code></pre>
 
 <p>这个方法把"止损幅度"和"仓位"绑定，止损越宽，仓位越轻，保证单笔亏损恒定。</p>
+
 <h2 id="_2">三、凯利公式的简化应用</h2>
+
 <p>凯利公式（Kelly Criterion）回答的是：<strong>在已知胜率和赔率的情况下，最优下注比例是多少。</strong></p>
+
 <p>完整形式：</p>
+
 <pre class="codehilite"><code>f* = (bp - q) / b
+
 </code></pre>
 
 <p>其中 <code>b</code> 是赔率（盈亏比），<code>p</code> 是胜率，<code>q = 1 - p</code>。</p>
+
 <pre class="codehilite"><code class="language-python">def kelly_fraction(win_rate, win_loss_ratio):
+
     &quot;&quot;&quot;
+
     凯利公式
+
     win_rate: 胜率
+
     win_loss_ratio: 盈亏比（平均盈利 / 平均亏损）
+
     &quot;&quot;&quot;
+
     p = win_rate
+
     q = 1 - p
+
     b = win_loss_ratio
+
     f = (b * p - q) / b
+
     return max(f, 0)  # 负值表示不该下注
 
+
+
 # 胜率50%，盈亏比2:1
+
 f = kelly_fraction(0.5, 2.0)
+
 print(f&quot;凯利仓位: {f:.1%}&quot;)  # 25%
+
 </code></pre>
 
 <h3 id="_3">为什么实战中要用"半凯利"</h3>
+
 <p>完整凯利在理论上能最大化长期增长率，但有两个致命问题：</p>
+
 <ol>
+
 <li><strong>参数估计误差</strong>：胜率和盈亏比是从历史数据估出来的，本身有噪声。凯利公式对参数极其敏感，高估一点点就会导致过度下注。</li>
+
 <li><strong>波动巨大</strong>：完整凯利的资金曲线波动非常剧烈，心理上很难承受。</li>
+
 </ol>
+
 <p>所以实战普遍采用<strong>分数凯利</strong>，通常取 1/4 到 1/2：</p>
+
 <pre class="codehilite"><code class="language-python">def fractional_kelly(win_rate, win_loss_ratio, fraction=0.5):
+
     &quot;&quot;&quot;分数凯利，fraction 通常取 0.25 ~ 0.5&quot;&quot;&quot;
+
     full = kelly_fraction(win_rate, win_loss_ratio)
+
     return full * fraction
 
+
+
 f = fractional_kelly(0.5, 2.0, fraction=0.5)
+
 print(f&quot;半凯利仓位: {f:.1%}&quot;)  # 12.5%
+
 </code></pre>
 
 <p>注意：凯利公式假设每笔交易独立、赔率固定。真实市场里这两个假设都不成立，所以它只能作为<strong>仓位上限的参考</strong>，不能直接照搬。</p>
+
 <h2 id="_4">四、最大回撤控制</h2>
+
 <p>回撤控制有两种思路：<strong>事前控制</strong>（限制仓位）和<strong>事后控制</strong>（触发减仓）。</p>
+
 <h3 id="41-volatility-targeting">4.1 波动率目标（Volatility Targeting）</h3>
+
 <p>让组合的波动率保持恒定。波动大时降仓，波动小时加仓。</p>
+
 <pre class="codehilite"><code class="language-python">def vol_target_position(returns, target_vol=0.15, window=20, max_leverage=2.0):
+
     &quot;&quot;&quot;
+
     波动率目标仓位
+
     returns: 收益率序列
+
     target_vol: 目标年化波动率
+
     window: 滚动窗口
+
     &quot;&quot;&quot;
+
     realized_vol = returns.rolling(window).std() * np.sqrt(252)
+
     leverage = target_vol / realized_vol
+
     leverage = leverage.clip(upper=max_leverage).fillna(0)
+
     return leverage
 
+
+
 # 模拟一段收益率
+
 np.random.seed(42)
+
 returns = pd.Series(np.random.normal(0.0005, 0.02, 500))
+
 lev = vol_target_position(returns, target_vol=0.15)
+
 print(lev.tail())
+
 </code></pre>
 
 <p>这个方法的逻辑是：<strong>风险是波动的函数，不是价格的函数。</strong> 波动率上升时，同样的仓位承担的风险更大，所以要主动降低仓位。</p>
+
 <h3 id="42">4.2 回撤触发减仓</h3>
+
 <p>设定回撤阈值，触及后强制降低仓位，直到资金曲线修复。</p>
+
 <pre class="codehilite"><code class="language-python">class DrawdownController:
+
     def __init__(self, max_dd=0.15, reduce_ratio=0.5):
+
         self.peak = 1.0
+
         self.max_dd = max_dd
+
         self.reduce_ratio = reduce_ratio
+
         self.equity = 1.0
 
+
+
     def update(self, ret):
+
         &quot;&quot;&quot;输入单期收益率，返回仓位调整系数&quot;&quot;&quot;
+
         self.equity *= (1 + ret)
+
         self.peak = max(self.peak, self.equity)
+
         current_dd = 1 - self.equity / self.peak
 
+
+
         if current_dd &gt;= self.max_dd:
+
             return self.reduce_ratio  # 减仓
+
         return 1.0  # 正常仓位
 
+
+
 # 测试
+
 dc = DrawdownController(max_dd=0.15, reduce_ratio=0.5)
+
 np.random.seed(1)
+
 rets = np.random.normal(-0.002, 0.03, 100)
+
 for r in rets:
+
     coef = dc.update(r)
+
     if coef &lt; 1:
+
         print(f&quot;触发减仓，当前回撤: {1 - dc.equity/dc.peak:.1%}&quot;)
+
         break
+
 </code></pre>
 
 <p>关键点是<strong>减仓后如何恢复</strong>。常见做法是：回撤修复到阈值的一半以内，才逐步恢复仓位。不要一修复就立刻满仓，否则容易在震荡中反复被打。</p>
+
 <h2 id="_5">五、多策略仓位分配</h2>
+
 <p>单一策略的仓位管理解决的是"下多重"，多策略还要解决"怎么分"。</p>
+
 <h3 id="51-risk-parity">5.1 等风险贡献（Risk Parity）</h3>
+
 <p>不是按资金平均分，而是按<strong>风险贡献</strong>平均分。波动大的策略分配更少资金。</p>
+
 <pre class="codehilite"><code class="language-python">def risk_parity_weights(returns_df):
+
     &quot;&quot;&quot;
+
     简化风险平价：权重与波动率成反比
+
     returns_df: 各策略收益率 DataFrame
+
     &quot;&quot;&quot;
+
     vols = returns_df.std()
+
     inv_vol = 1 / vols
+
     weights = inv_vol / inv_vol.sum()
+
     return weights
 
+
+
 # 模拟三个策略
+
 np.random.seed(7)
+
 df = pd.DataFrame({
+
     'strat_a': np.random.normal(0.0005, 0.01, 500),
+
     'strat_b': np.random.normal(0.0008, 0.02, 500),
+
     'strat_c': np.random.normal(0.0003, 0.005, 500),
+
 })
+
 w = risk_parity_weights(df)
+
 print(w)
+
 </code></pre>
 
 <h3 id="52">5.2 相关性调整</h3>
+
 <p>如果两个策略高度相关，同时给它们满仓，等于变相加杠杆。分配前先看相关矩阵：</p>
+
 <pre class="codehilite"><code class="language-python">corr = df.corr()
+
 print(corr)
 
+
+
 # 相关性超过阈值的策略对，整体降权
+
 def correlation_penalty(weights, corr, threshold=0.7):
+
     adjusted = weights.copy()
+
     cols = weights.index
+
     for i in range(len(cols)):
+
         for j in range(i+1, len(cols)):
+
             if abs(corr.iloc[i, j]) &gt; threshold:
+
                 adjusted[cols[i]] *= 0.8
+
                 adjusted[cols[j]] *= 0.8
+
     return adjusted / adjusted.sum()
 
+
+
 w_adj = correlation_penalty(w, corr)
+
 print(w_adj)
+
 </code></pre>
 
 <p>多策略的核心不是策略数量多，而是<strong>策略之间低相关</strong>。三个高相关的策略，分散效果约等于一个。</p>
+
 <h2 id="_6">六、把原则落地成代码</h2>
+
 <p>把上面的方法串起来，形成一个完整的仓位管理模块：</p>
+
 <pre class="codehilite"><code class="language-python">class PositionManager:
+
     def __init__(self, base_fraction=0.1, max_dd=0.15,
+
                  kelly_fraction=0.5, target_vol=0.15):
+
         self.base_fraction = base_fraction
+
         self.max_dd = max_dd
+
         self.kelly_fraction = kelly_fraction
+
         self.target_vol = target_vol
+
         self.equity = 1.0
+
         self.peak = 1.0
 
+
+
     def kelly_cap(self, win_rate, win_loss_ratio):
+
         &quot;&quot;&quot;凯利上限&quot;&quot;&quot;
+
         f = kelly_fraction(win_rate, win_loss_ratio)
+
         return f * self.kelly_fraction
 
+
+
     def drawdown_coef(self):
+
         &quot;&quot;&quot;回撤系数&quot;&quot;&quot;
+
         dd = 1 - self.equity / self.peak
+
         if dd &gt;= self.max_dd:
+
             return 0.5
+
         elif dd &gt;= self.max_dd * 0.5:
+
             return 0.75
+
         return 1.0
 
+
+
     def get_position(self, capital, price, win_rate, win_loss_ratio):
+
         &quot;&quot;&quot;综合计算仓位&quot;&quot;&quot;
+
         kelly = self.kelly_cap(win_rate, win_loss_ratio)
+
         dd_coef = self.drawdown_coef()
+
         fraction = min(self.base_fraction, kelly) * dd_coef
+
         shares = capital * fraction / price
+
         return shares, fraction
 
+
+
     def update_equity(self, ret):
+
         self.equity *= (1 + ret)
+
         self.peak = max(self.peak, self.equity)
 
+
+
 # 使用示例
+
 pm = PositionManager(base_fraction=0.15, max_dd=0.2)
+
 shares, frac = pm.get_position(100000, 30.0, win_rate=0.55, win_loss_ratio=1.8)
+
 print(f&quot;仓位比例 {frac:.2%}，可买 {shares:.0f} 股&quot;)
+
 </code></pre>
 
 <p>这个模块的逻辑是：<strong>取固定比例和凯利比例的较小值，再乘以回撤系数。</strong> 三层保护叠加，任何一层触发都会降低仓位。</p>
+
 <h2 id="_7">七、几条实战原则</h2>
+
 <p>最后总结几条踩过坑才明白的原则：</p>
+
 <ol>
+
 <li>
+
 <p><strong>仓位上限永远由最坏情况决定</strong>，不是由最好情况决定。先问"这笔最多亏多少"，再问"能赚多少"。</p>
+
 </li>
+
 <li>
+
 <p><strong>参数要留安全边际</strong>。凯利算出 25%，就下 12%；波动率目标算出 2 倍杠杆，就压到 1.5 倍。理论最优在实盘中往往是过度优化。</p>
+
 </li>
+
 <li>
+
 <p><strong>回撤控制要机械化</strong>。人在亏损时会本能地想加仓摊平，这恰恰是最危险的。把减仓规则写进代码，让程序执行。</p>
+
 </li>
+
 <li>
+
 <p><strong>多策略看相关性，不看数量</strong>。三个低相关策略，胜过十个高相关策略。</p>
+
 </li>
+
 <li>
+
 <p><strong>仓位管理不能拯救烂策略</strong>。它只能让好策略活得更久，让坏策略死得慢一点。信号质量是前提。</p>
+
 </li>
+
 </ol>
+
 <p>资金管理不是策略的附属品，它本身就是策略的一部分。一个胜率 55% 的策略配上合理的仓位管理，长期能跑出不错的曲线；同样的信号配上满仓梭哈，大概率在某次连续亏损中出局。</p>
+
 <hr />
+
 <p><em>更多关于 Python 量化交易与自动化的实战内容，欢迎关注本站。</em></p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;资金管理&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;仓位控制&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;风险管理&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;凯利公式&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">资金管理</span><span class="tag-badge">仓位控制</span><span class="tag-badge">风险管理</span><span class="tag-badge">凯利公式</span></div>
             <div class="post-footer">
