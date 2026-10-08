@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
-
-做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。...">
+        <meta name="description" content="做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。 问题在于：这种弱信号到底值不值得执行？ 直接上实">
     <meta name="keywords" content="弱信号,回测,胜率,拉黑机制">
     <meta property="og:title" content="弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑">
-    <meta property="og:description" content="弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
-
-做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。...">
+    <meta property="og:description" content="做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。 问题在于：这种弱信号到底值不值得执行？ 直接上实">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/31.html">
@@ -41,316 +37,627 @@
             </div>
             <div class="post-content">
 <p>做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个"强信号"，但组合起来可能有一定的统计优势。</p>
+
 <p>问题在于：<strong>这种弱信号到底值不值得执行？</strong></p>
+
 <p>直接上实盘肯定不行，得先回测。但弱信号的回测和强信号不一样——强信号样本少但质量高，弱信号样本多但噪声大。如果用常规的回测框架，很容易被平均收益掩盖掉真实的胜率分布。</p>
+
 <p>这篇文章分享一套专门针对弱信号的回测设计：<strong>2个月滚动窗口 + 70%胜率门槛 + 3连败拉黑机制</strong>。核心思路是：不追求单次信号的爆发力，而是通过滚动窗口持续验证信号的稳定性，一旦连续失效就临时剔除。</p>
+
 <h2 id="_1">一、什么是"弱信号"</h2>
+
 <p>先给个操作性定义，避免概念空转。</p>
+
 <p>弱信号指的是满足以下特征的交易触发条件：</p>
+
 <ul>
+
 <li><strong>触发频率高</strong>：平均每周至少 1-2 次，样本量足够做统计</li>
+
 <li><strong>单次期望收益低</strong>：扣除手续费后，单次收益期望在 0.3% - 1% 之间</li>
+
 <li><strong>胜率是主要收益来源</strong>：不是靠盈亏比，而是靠"赢多输少"</li>
+
 <li><strong>对市场状态敏感</strong>：趋势市有效，震荡市容易失效</li>
+
 </ul>
+
 <p>典型的弱信号包括：短期均线金叉配合量能温和放大、RSI 从超卖区回升但未突破中轴、布林带收口后的首次突破等。</p>
+
 <p>这类信号的问题在于：<strong>你不能因为一次失败就否定它，也不能因为它长期统计上有效就一直用</strong>。市场状态是变化的，信号的有效性也是时变的。</p>
+
 <p>所以我们需要一个<strong>动态判定机制</strong>，而不是一个静态的回测报告。</p>
+
 <h2 id="_2">二、回测框架设计</h2>
+
 <h3 id="21">2.1 核心参数</h3>
+
 <table>
+
 <thead>
+
 <tr>
+
 <th>参数</th>
+
 <th>值</th>
+
 <th>说明</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td>窗口长度</td>
+
 <td>60 天（约2个月）</td>
+
 <td>滚动统计周期</td>
+
 </tr>
+
 <tr>
+
 <td>胜率门槛</td>
+
 <td>70%</td>
+
 <td>窗口内胜率低于此值则暂停</td>
+
 </tr>
+
 <tr>
+
 <td>连败阈值</td>
+
 <td>3</td>
+
 <td>连续3次失败则拉黑</td>
+
 </tr>
+
 <tr>
+
 <td>拉黑时长</td>
+
 <td>20 个交易日</td>
+
 <td>拉黑后冷却期</td>
+
 </tr>
+
 <tr>
+
 <td>最小样本数</td>
+
 <td>10</td>
+
 <td>窗口内样本不足不做判定</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <h3 id="22">2.2 判定逻辑</h3>
+
 <p>整个机制分三层：</p>
+
 <p><strong>第一层：滚动窗口胜率判定</strong></p>
+
 <p>每 60 天为一个窗口，统计窗口内所有信号的胜率。如果胜率 ≥ 70%，信号保持"激活"状态；如果低于 70%，信号进入"观察"状态。</p>
+
 <p><strong>第二层：连败拉黑</strong></p>
+
 <p>无论窗口胜率如何，只要出现连续 3 次失败，立即拉黑。这是为了防止窗口统计的滞后性——窗口胜率可能还很好看，但最近几笔已经在恶化。</p>
+
 <p><strong>第三层：冷却后重新评估</strong></p>
+
 <p>拉黑 20 个交易日后，信号重新进入候选池。此时不直接激活，而是等下一个窗口统计结果出来再决定。</p>
+
 <h3 id="23">2.3 为什么是这些参数</h3>
+
 <ul>
+
 <li><strong>2个月窗口</strong>：太短噪声大，太长反应慢。60 天大约覆盖 8-10 周，对弱信号来说样本量通常在 15-30 之间，统计上勉强够用。</li>
+
 <li><strong>70% 胜率</strong>：弱信号单次收益低，必须靠高胜率覆盖手续费和滑点。低于 70% 基本没有执行价值。</li>
+
 <li><strong>3连败</strong>：这是经验值。2 连败太敏感，4 连败反应太慢。3 连败在弱信号上大约对应 3%-5% 的回撤，是可以接受的止损边界。</li>
+
 </ul>
+
 <h2 id="python">三、Python 实现</h2>
+
 <p>下面是一套可以直接跑的框架。我用 <code>pandas</code> 做数据处理，信号生成部分用一个简单的均线+量能条件做示例，你可以替换成自己的信号逻辑。</p>
+
 <h3 id="31">3.1 信号生成与回测基础</h3>
+
 <pre class="codehilite"><code class="language-python">import pandas as pd
+
 import numpy as np
+
 from dataclasses import dataclass, field
+
 from typing import List, Optional
 
+
+
 @dataclass
+
 class Trade:
+
     entry_date: pd.Timestamp
+
     exit_date: pd.Timestamp
+
     entry_price: float
+
     exit_price: float
+
     pnl_pct: float
+
     is_win: bool
 
+
+
 def generate_weak_signal(df: pd.DataFrame) -&gt; pd.Series:
+
     &quot;&quot;&quot;
+
     示例弱信号：5日均线上穿20日均线，且成交量温和放大
+
     返回布尔序列，True 表示触发信号
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['ma5'] = df['close'].rolling(5).mean()
+
     df['ma20'] = df['close'].rolling(20).mean()
+
     df['vol_ma5'] = df['volume'].rolling(5).mean()
 
+
+
     # 金叉
+
     cross_up = (df['ma5'] &gt; df['ma20']) &amp; (df['ma5'].shift(1) &lt;= df['ma20'].shift(1))
+
     # 量能温和放大：当日成交量在5日均量的1.0-1.5倍之间
+
     vol_ok = (df['volume'] &gt; df['vol_ma5']) &amp; (df['volume'] &lt; df['vol_ma5'] * 1.5)
+
+
 
     return cross_up &amp; vol_ok
 
+
+
 def backtest_signal(df: pd.DataFrame, signal: pd.Series, 
+
                     hold_days: int = 5) -&gt; List[Trade]:
+
     &quot;&quot;&quot;
+
     简单回测：信号触发后次日开盘买入，持有 hold_days 天后收盘卖出
+
     &quot;&quot;&quot;
+
     trades = []
+
     signal_dates = df.index[signal]
 
+
+
     for i, entry_date in enumerate(signal_dates):
+
         # 次日开盘买入
+
         entry_idx = df.index.get_loc(entry_date)
+
         if entry_idx + 1 &gt;= len(df):
+
             continue
+
         actual_entry_date = df.index[entry_idx + 1]
 
+
+
         exit_idx = entry_idx + 1 + hold_days
+
         if exit_idx &gt;= len(df):
+
             continue
+
         actual_exit_date = df.index[exit_idx]
 
+
+
         entry_price = df.loc[actual_entry_date, 'open']
+
         exit_price = df.loc[actual_exit_date, 'close']
 
+
+
         # 扣除手续费和滑点，假设双边 0.2%
+
         cost = 0.002
+
         pnl_pct = (exit_price - entry_price) / entry_price - cost
 
+
+
         trades.append(Trade(
+
             entry_date=actual_entry_date,
+
             exit_date=actual_exit_date,
+
             entry_price=entry_price,
+
             exit_price=exit_price,
+
             pnl_pct=pnl_pct,
+
             is_win=pnl_pct &gt; 0
+
         ))
 
+
+
     return trades
+
 </code></pre>
 
 <h3 id="32">3.2 滚动窗口判定器</h3>
+
 <p>这是核心部分。我们把交易记录按时间排序，然后滚动评估。</p>
+
 <pre class="codehilite"><code class="language-python">@dataclass
+
 class SignalState:
+
     status: str = 'active'  # active / observing / blacklisted
+
     blacklist_until: Optional[pd.Timestamp] = None
+
     consecutive_losses: int = 0
+
     history: List[Trade] = field(default_factory=list)
 
+
+
 class RollingEvaluator:
+
     def __init__(self, window_days: int = 60, win_rate_threshold: float = 0.7,
+
                  max_consecutive_losses: int = 3, blacklist_days: int = 20,
+
                  min_samples: int = 10):
+
         self.window_days = window_days
+
         self.win_rate_threshold = win_rate_threshold
+
         self.max_consecutive_losses = max_consecutive_losses
+
         self.blacklist_days = blacklist_days
+
         self.min_samples = min_samples
+
         self.state = SignalState()
 
+
+
     def evaluate(self, trade: Trade) -&gt; dict:
+
         &quot;&quot;&quot;每笔交易结束后调用，返回当前信号状态&quot;&quot;&quot;
+
         self.state.history.append(trade)
 
+
+
         # 更新连败计数
+
         if trade.is_win:
+
             self.state.consecutive_losses = 0
+
         else:
+
             self.state.consecutive_losses += 1
 
+
+
         # 检查是否触发拉黑
+
         if self.state.consecutive_losses &gt;= self.max_consecutive_losses:
+
             self.state.status = 'blacklisted'
+
             self.state.blacklist_until = trade.exit_date + pd.Timedelta(days=self.blacklist_days)
+
             self.state.consecutive_losses = 0
+
             return self._snapshot(trade.exit_date, reason='consecutive_losses')
 
+
+
         # 检查黑名单是否到期
+
         if self.state.status == 'blacklisted':
+
             if trade.exit_date &gt;= self.state.blacklist_until:
+
                 self.state.status = 'observing'
+
             else:
+
                 return self._snapshot(trade.exit_date, reason='blacklisted')
 
+
+
         # 滚动窗口胜率判定
+
         window_start = trade.exit_date - pd.Timedelta(days=self.window_days)
+
         window_trades = [t for t in self.state.history if t.exit_date &gt;= window_start]
 
+
+
         if len(window_trades) &gt;= self.min_samples:
+
             win_rate = sum(t.is_win for t in window_trades) / len(window_trades)
+
             if win_rate &gt;= self.win_rate_threshold:
+
                 self.state.status = 'active'
+
             else:
+
                 self.state.status = 'observing'
+
             return self._snapshot(trade.exit_date, reason='window', win_rate=win_rate)
+
+
 
         return self._snapshot(trade.exit_date, reason='insufficient_samples')
 
+
+
     def _snapshot(self, date, reason, win_rate=None):
+
         return {
+
             'date': date,
+
             'status': self.state.status,
+
             'consecutive_losses': self.state.consecutive_losses,
+
             'win_rate': win_rate,
+
             'reason': reason
+
         }
+
 </code></pre>
 
 <h3 id="33">3.3 整合运行</h3>
+
 <p>把上面两部分串起来，跑一次完整回测。</p>
+
 <pre class="codehilite"><code class="language-python">def run_full_backtest(df: pd.DataFrame, hold_days: int = 5):
+
     signal = generate_weak_signal(df)
+
     trades = backtest_signal(df, signal, hold_days=hold_days)
 
+
+
     evaluator = RollingEvaluator(
+
         window_days=60,
+
         win_rate_threshold=0.7,
+
         max_consecutive_losses=3,
+
         blacklist_days=20,
+
         min_samples=10
+
     )
 
+
+
     results = []
+
     for trade in trades:
+
         snapshot = evaluator.evaluate(trade)
+
         snapshot['trade_pnl'] = trade.pnl_pct
+
         snapshot['is_win'] = trade.is_win
+
         results.append(snapshot)
+
+
 
     return pd.DataFrame(results)
 
+
+
 # 假设 df 是包含 open/close/volume 的日线数据
+
 # df = pd.read_csv('your_data.csv', index_col='date', parse_dates=True)
+
 # result_df = run_full_backtest(df)
+
 # print(result_df.tail(20))
+
 </code></pre>
 
 <h3 id="34">3.4 结果分析</h3>
+
 <p>跑完之后，你需要看几个关键指标：</p>
+
 <pre class="codehilite"><code class="language-python">def analyze_results(result_df: pd.DataFrame):
+
     # 只统计 active 状态下的交易表现
+
     active_trades = result_df[result_df['status'] == 'active']
 
+
+
     print(f&quot;总交易数: {len(result_df)}&quot;)
+
     print(f&quot;激活状态交易数: {len(active_trades)}&quot;)
+
     print(f&quot;激活状态胜率: {active_trades['is_win'].mean():.2%}&quot;)
+
     print(f&quot;激活状态平均收益: {active_trades['trade_pnl'].mean():.4%}&quot;)
 
+
+
     # 拉黑次数
+
     blacklist_events = result_df[result_df['reason'] == 'consecutive_losses']
+
     print(f&quot;拉黑触发次数: {len(blacklist_events)}&quot;)
 
+
+
     # 对比：如果不做任何过滤
+
     print(f&quot;\n无过滤胜率: {result_df['is_win'].mean():.2%}&quot;)
+
     print(f&quot;无过滤平均收益: {result_df['trade_pnl'].mean():.4%}&quot;)
 
+
+
     # 状态分布
+
     print(f&quot;\n状态分布:&quot;)
+
     print(result_df['status'].value_counts())
+
 </code></pre>
 
 <p>这套分析能直接回答一个问题：<strong>过滤机制到底有没有提升信号质量？</strong></p>
+
 <p>如果激活状态下的胜率显著高于无过滤胜率，说明机制有效。如果差不多，说明你的信号本身就不适合用这套框架——要么信号太强不需要过滤，要么信号太弱过滤也救不回来。</p>
+
 <h2 id="_3">四、几个实战中的坑</h2>
+
 <h3 id="41">4.1 前视偏差</h3>
+
 <p>滚动窗口统计的是<strong>已完成的交易</strong>，但你在做决策时只能用历史数据。上面的代码里，<code>evaluate</code> 是在交易结束后调用的，这是对的。但如果你在信号触发时就查询状态，要确保用的是<strong>上一笔交易结束后</strong>的状态，而不是当前这笔。</p>
+
 <h3 id="42">4.2 样本不足的处理</h3>
+
 <p><code>min_samples=10</code> 是个保守值。如果窗口内样本不足 10 笔，不做胜率判定，保持当前状态。这避免了对小样本的过度反应。</p>
+
 <h3 id="43">4.3 拉黑后的重新激活</h3>
+
 <p>拉黑 20 天后，信号进入 <code>observing</code> 状态，但不会自动激活。必须等窗口胜率重新回到 70% 以上才会回到 <code>active</code>。这个设计是故意的——<strong>冷却期结束不代表信号恢复，只是允许它重新参与评估</strong>。</p>
+
 <h3 id="44">4.4 参数敏感性</h3>
+
 <p>这套框架对参数比较敏感。建议做参数扫描：</p>
+
 <pre class="codehilite"><code class="language-python">def param_sweep(df, window_range, threshold_range, loss_range):
+
     results = []
+
     for w in window_range:
+
         for t in threshold_range:
+
             for l in loss_range:
+
                 evaluator = RollingEvaluator(
+
                     window_days=w, win_rate_threshold=t,
+
                     max_consecutive_losses=l
+
                 )
+
                 trades = backtest_signal(df, generate_weak_signal(df))
+
                 active_pnls = []
+
                 for trade in trades:
+
                     snap = evaluator.evaluate(trade)
+
                     if snap['status'] == 'active':
+
                         active_pnls.append(trade.pnl_pct)
+
                 if active_pnls:
+
                     results.append({
+
                         'window': w, 'threshold': t, 'max_losses': l,
+
                         'trades': len(active_pnls),
+
                         'win_rate': sum(p &gt; 0 for p in active_pnls) / len(active_pnls),
+
                         'avg_pnl': np.mean(active_pnls)
+
                     })
+
     return pd.DataFrame(results)
+
 </code></pre>
 
 <p>跑完这个扫描，你会看到参数组合的分布。选一个<strong>在多个参数组合下都表现稳定</strong>的区域，而不是选单点最优。</p>
+
 <h2 id="_4">五、总结</h2>
+
 <p>弱信号回测的核心不是"这个信号能不能赚钱"，而是"这个信号在什么条件下值得执行"。</p>
+
 <p>2个月窗口 + 70%胜率门槛 + 3连败拉黑，本质是一套<strong>动态准入机制</strong>。它不改变信号本身，只是决定什么时候执行、什么时候停手。</p>
+
 <p>几个关键点：</p>
+
 <ul>
+
 <li>弱信号靠胜率吃饭，不靠盈亏比</li>
+
 <li>滚动窗口解决的是"信号有效性时变"的问题</li>
+
 <li>连败拉黑解决的是"窗口统计滞后"的问题</li>
+
 <li>冷却期解决的是"拉黑后如何恢复"的问题</li>
+
 </ul>
+
 <p>代码框架可以直接用，信号逻辑替换成你自己的即可。建议先在历史数据上跑参数扫描，找到稳定区域再考虑实盘。</p>
+
 <p>更多Python量化实战内容，欢迎关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;弱信号&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;回测&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;胜率&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;拉黑机制&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">弱信号</span><span class="tag-badge">回测</span><span class="tag-badge">胜率</span><span class="tag-badge">拉黑机制</span></div>
             <div class="post-footer">
