@@ -5,18 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>回测数据清洗：如何处理缺失K线和异常数据 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="回测数据清洗：如何处理缺失K线和异常数据
-
-做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。
-
-这篇文章不讲策略，只讲数据清洗。...">
+        <meta name="description" content="做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。 这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性">
     <meta name="keywords" content="数据清洗,K线,异常数据,回测">
     <meta property="og:title" content="回测数据清洗：如何处理缺失K线和异常数据">
-    <meta property="og:description" content="回测数据清洗：如何处理缺失K线和异常数据
-
-做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。
-
-这篇文章不讲策略，只讲数据清洗。...">
+    <meta property="og:description" content="做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。 这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/35.html">
@@ -45,387 +37,759 @@
             </div>
             <div class="post-content">
 <p>做回测的人都有一个共识：<strong>垃圾数据进，垃圾结果出</strong>。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。</p>
+
 <p>这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。全部用可运行的Python代码演示。</p>
+
 <h2 id="_1">一、先搞清楚数据长什么样</h2>
+
 <p>拿到一份K线数据，第一步不是急着清洗，而是先做体检。常见的脏数据有几类：</p>
+
 <ul>
+
 <li><strong>时间戳缺失</strong>：该有K线的时间点没有记录，比如5分钟线里少了10:35这根</li>
+
 <li><strong>时间戳重复</strong>：同一时间出现两条记录</li>
+
 <li><strong>OHLC逻辑错误</strong>：high &lt; low，或者 close 超出 [low, high] 范围</li>
+
 <li><strong>价格异常</strong>：价格突然变成0、负数，或者出现不可能的大幅跳变</li>
+
 <li><strong>成交量异常</strong>：成交量为负或为0但价格有波动</li>
+
 </ul>
+
 <p>先写一个体检函数：</p>
+
 <pre class="codehilite"><code class="language-python">import pandas as pd
+
 import numpy as np
 
+
+
 def data_health_check(df, freq='5min'):
+
     &quot;&quot;&quot;
+
     对K线数据做基础体检
+
     df: 必须包含 columns: ['datetime', 'open', 'high', 'low', 'close', 'volume']
+
     freq: K线周期，如 '1min', '5min', '1D'
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['datetime'] = pd.to_datetime(df['datetime'])
+
     df = df.sort_values('datetime').reset_index(drop=True)
 
+
+
     print(&quot;=&quot; * 50)
+
     print(f&quot;总记录数: {len(df)}&quot;)
+
     print(f&quot;时间范围: {df['datetime'].iloc[0]} ~ {df['datetime'].iloc[-1]}&quot;)
 
+
+
     # 1. 重复时间戳
+
     dup = df[df.duplicated('datetime', keep=False)]
+
     print(f&quot;\n重复时间戳记录数: {len(dup)}&quot;)
 
+
+
     # 2. OHLC逻辑检查
+
     bad_ohlc = df[
+
         (df['high'] &lt; df['low']) |
+
         (df['close'] &gt; df['high']) |
+
         (df['close'] &lt; df['low']) |
+
         (df['open'] &gt; df['high']) |
+
         (df['open'] &lt; df['low'])
+
     ]
+
     print(f&quot;OHLC逻辑错误记录数: {len(bad_ohlc)}&quot;)
 
+
+
     # 3. 价格异常
+
     bad_price = df[
+
         (df[['open','high','low','close']] &lt;= 0).any(axis=1)
+
     ]
+
     print(f&quot;价格&lt;=0的记录数: {len(bad_price)}&quot;)
 
+
+
     # 4. 成交量异常
+
     bad_vol = df[df['volume'] &lt; 0]
+
     print(f&quot;成交量为负的记录数: {len(bad_vol)}&quot;)
 
+
+
     # 5. 缺失K线检测
+
     expected_range = pd.date_range(
+
         start=df['datetime'].min(),
+
         end=df['datetime'].max(),
+
         freq=freq
+
     )
+
     missing = expected_range.difference(df['datetime'])
+
     print(f&quot;缺失K线数量: {len(missing)}&quot;)
+
     if len(missing) &gt; 0:
+
         print(f&quot;缺失时间点示例: {list(missing[:5])}&quot;)
 
+
+
     print(&quot;=&quot; * 50)
+
     return {
+
         'duplicates': dup,
+
         'bad_ohlc': bad_ohlc,
+
         'bad_price': bad_price,
+
         'bad_vol': bad_vol,
+
         'missing_times': missing
+
     }
+
 </code></pre>
 
 <p>这个函数直接告诉你数据有多脏。跑一遍再决定怎么处理。</p>
+
 <h2 id="k">二、缺失K线的检测与填充</h2>
+
 <p>缺失K线分两种情况，处理方式完全不同：</p>
+
 <h3 id="21-vs">2.1 正常缺失 vs 异常缺失</h3>
+
 <ul>
+
 <li><strong>正常缺失</strong>：非交易时段（夜间、周末、节假日），这些不该填充</li>
+
 <li><strong>异常缺失</strong>：交易时段内该有K线但没有，必须处理</li>
+
 </ul>
+
 <p>所以填充之前，先要有一份交易日历。没有交易日历怎么办？可以用数据自身的密度来推断。</p>
+
 <pre class="codehilite"><code class="language-python">def detect_missing_bars(df, freq='5min', trading_hours=None):
+
     &quot;&quot;&quot;
+
     检测交易时段内的缺失K线
+
     trading_hours: list of (start, end) tuples, 如 [('09:30','11:30'), ('13:00','15:00')]
+
                    如果为None，则用数据自身推断
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['datetime'] = pd.to_datetime(df['datetime'])
+
     df = df.sort_values('datetime').reset_index(drop=True)
 
+
+
     if trading_hours is not None:
+
         # 按指定交易时段过滤
+
         mask = pd.Series(False, index=df.index)
+
         for start, end in trading_hours:
+
             t = df['datetime'].dt.time
+
             mask |= (t &gt;= pd.Timestamp(start).time()) &amp; (t &lt;= pd.Timestamp(end).time())
+
         trading_df = df[mask]
+
     else:
+
         trading_df = df
 
+
+
     if len(trading_df) &lt; 2:
+
         return pd.DatetimeIndex([])
 
+
+
     # 生成完整时间序列
+
     full_range = pd.date_range(
+
         start=trading_df['datetime'].min(),
+
         end=trading_df['datetime'].max(),
+
         freq=freq
+
     )
 
+
+
     # 如果指定了交易时段，过滤掉非交易时段
+
     if trading_hours is not None:
+
         mask = pd.Series(False, index=full_range)
+
         for start, end in trading_hours:
+
             t = full_range.time
+
             mask |= (t &gt;= pd.Timestamp(start).time()) &amp; (t &lt;= pd.Timestamp(end).time())
+
         full_range = full_range[mask]
 
+
+
     missing = full_range.difference(trading_df['datetime'])
+
     return missing
+
 </code></pre>
 
 <h3 id="22">2.2 填充策略</h3>
+
 <p>缺失K线怎么填？三种常见做法：</p>
+
 <ol>
+
 <li><strong>前值填充（forward fill）</strong>：用上一根K线的close作为缺失K线的OHLC，volume=0。适合流动性好的品种，短期缺失影响不大。</li>
+
 <li><strong>线性插值</strong>：在前后K线之间做线性插值。适合缺失连续多根的情况。</li>
+
 <li><strong>直接删除</strong>：如果缺失太多，或者缺失位置关键，直接删掉这段区间，不参与回测。</li>
+
 </ol>
+
 <pre class="codehilite"><code class="language-python">def fill_missing_bars(df, freq='5min', method='ffill', trading_hours=None):
+
     &quot;&quot;&quot;
+
     填充缺失K线
+
     method: 'ffill' (前值填充) 或 'linear' (线性插值)
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['datetime'] = pd.to_datetime(df['datetime'])
+
     df = df.sort_values('datetime').set_index('datetime')
 
+
+
     # 生成完整时间索引
+
     full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq=freq)
 
+
+
     if trading_hours is not None:
+
         mask = pd.Series(False, index=full_range)
+
         for start, end in trading_hours:
+
             t = full_range.time
+
             mask |= (t &gt;= pd.Timestamp(start).time()) &amp; (t &lt;= pd.Timestamp(end).time())
+
         full_range = full_range[mask]
 
+
+
     # 重新索引
+
     df = df.reindex(full_range)
+
     df.index.name = 'datetime'
 
+
+
     if method == 'ffill':
+
         # 前值填充价格，成交量填0
+
         for col in ['open', 'high', 'low', 'close']:
+
             df[col] = df[col].ffill()
+
         df['volume'] = df['volume'].fillna(0)
+
         # 标记哪些是填充的
+
         df['is_filled'] = df['volume'] == 0
 
+
+
     elif method == 'linear':
+
         for col in ['open', 'high', 'low', 'close', 'volume']:
+
             df[col] = df[col].interpolate(method='linear')
+
         df['is_filled'] = False
+
         df.loc[df['volume'] == 0, 'is_filled'] = True
 
+
+
     df = df.reset_index()
+
     return df
+
 </code></pre>
 
 <p>关键点：<strong>填充后一定要打标记</strong>。回测时可以选择性地跳过填充的K线，或者在填充K线上不产生交易信号。</p>
+
 <h2 id="_2">三、异常价格处理</h2>
+
 <p>异常价格比缺失更危险，因为它会直接导致错误的交易信号。</p>
+
 <h3 id="31">3.1 基于统计的异常检测</h3>
+
 <p>用滚动窗口的MAD（Median Absolute Deviation）来检测价格跳变：</p>
+
 <pre class="codehilite"><code class="language-python">def detect_price_outliers(df, window=20, threshold=5):
+
     &quot;&quot;&quot;
+
     用滚动MAD检测异常价格跳变
+
     threshold: MAD的倍数，超过则认为异常
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['return'] = df['close'].pct_change()
 
+
+
     # 滚动中位数和MAD
+
     rolling_median = df['return'].rolling(window=window, min_periods=5).median()
+
     rolling_mad = (df['return'] - rolling_median).abs().rolling(window=window, min_periods=5).median()
 
+
+
     # 避免除以0
+
     rolling_mad = rolling_mad.replace(0, np.nan)
 
+
+
     # 修正Z-score
+
     modified_z = 0.6745 * (df['return'] - rolling_median) / rolling_mad
 
+
+
     df['is_outlier'] = modified_z.abs() &gt; threshold
+
     return df
+
 </code></pre>
 
 <h3 id="32">3.2 异常价格修复</h3>
+
 <p>检测到异常后，有两种处理方式：</p>
+
 <ul>
+
 <li><strong>直接删除</strong>：把异常K线整根删掉，然后用前面的填充逻辑补回来</li>
+
 <li><strong>Winsorize</strong>：把异常价格截断到合理范围</li>
+
 </ul>
+
 <pre class="codehilite"><code class="language-python">def fix_price_outliers(df, window=20, threshold=5):
+
     &quot;&quot;&quot;
+
     修复异常价格：将异常K线的OHLC替换为前一根K线的close
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df = detect_price_outliers(df, window, threshold)
 
+
+
     outlier_idx = df[df['is_outlier']].index
+
     for idx in outlier_idx:
+
         if idx == 0:
+
             continue
+
         prev_close = df.loc[idx - 1, 'close']
+
         df.loc[idx, ['open', 'high', 'low', 'close']] = prev_close
+
         df.loc[idx, 'volume'] = 0
+
         df.loc[idx, 'is_fixed'] = True
 
+
+
     df['is_fixed'] = df.get('is_fixed', False)
+
     return df
+
 </code></pre>
 
 <h3 id="33-ohlc">3.3 OHLC逻辑修正</h3>
+
 <p>有些数据源的high/low会写反，或者close超出范围。直接修正：</p>
+
 <pre class="codehilite"><code class="language-python">def fix_ohlc_logic(df):
+
     &quot;&quot;&quot;
+
     修正OHLC逻辑错误
+
     &quot;&quot;&quot;
+
     df = df.copy()
 
+
+
     # high应该是四个价格中最大的
+
     df['high'] = df[['open', 'high', 'low', 'close']].max(axis=1)
+
     # low应该是最小的
+
     df['low'] = df[['open', 'high', 'low', 'close']].min(axis=1)
 
+
+
     return df
+
 </code></pre>
 
 <h2 id="_3">四、时间对齐</h2>
+
 <p>时间对齐是回测里最容易被忽视的坑。不同数据源的时间戳含义可能不同：</p>
+
 <ul>
+
 <li><strong>K线开始时间</strong>：这根K线的起始时间</li>
+
 <li><strong>K线结束时间</strong>：这根K线的结束时间</li>
+
 <li><strong>时区问题</strong>：UTC vs 本地时间</li>
+
 </ul>
+
 <h3 id="41">4.1 统一时间戳含义</h3>
+
 <pre class="codehilite"><code class="language-python">def align_timestamp(df, timestamp_type='start', freq='5min'):
+
     &quot;&quot;&quot;
+
     统一时间戳为K线开始时间
+
     timestamp_type: 'start' 表示原数据是开始时间，'end' 表示是结束时间
+
     &quot;&quot;&quot;
+
     df = df.copy()
+
     df['datetime'] = pd.to_datetime(df['datetime'])
 
+
+
     if timestamp_type == 'end':
+
         # 结束时间转开始时间
+
         df['datetime'] = df['datetime'] - pd.Timedelta(freq)
 
+
+
     return df
+
 </code></pre>
 
 <h3 id="42">4.2 多数据源对齐</h3>
+
 <p>如果你同时用多个数据源（比如价格来自A，成交量来自B），需要按时间对齐：</p>
+
 <pre class="codehilite"><code class="language-python">def align_multiple_sources(df_price, df_volume, freq='5min'):
+
     &quot;&quot;&quot;
+
     对齐两个数据源
+
     &quot;&quot;&quot;
+
     df_price = df_price.set_index('datetime')
+
     df_volume = df_volume.set_index('datetime')
 
+
+
     # 取交集
+
     common_idx = df_price.index.intersection(df_volume.index)
 
+
+
     df_aligned = df_price.loc[common_idx].copy()
+
     df_aligned['volume'] = df_volume.loc[common_idx, 'volume']
 
+
+
     return df_aligned.reset_index()
+
 </code></pre>
 
 <h2 id="_4">五、数据完整性验证</h2>
+
 <p>清洗完之后，写一个验证函数，确保数据可以安全用于回测：</p>
+
 <pre class="codehilite"><code class="language-python">def validate_clean_data(df, freq='5min'):
+
     &quot;&quot;&quot;
+
     清洗后的数据验证
+
     &quot;&quot;&quot;
+
     errors = []
+
     warnings = []
 
+
+
     df = df.copy()
+
     df['datetime'] = pd.to_datetime(df['datetime'])
 
+
+
     # 1. 时间戳唯一性
+
     if df['datetime'].duplicated().any():
+
         errors.append(&quot;存在重复时间戳&quot;)
 
+
+
     # 2. 时间戳单调递增
+
     if not df['datetime'].is_monotonic_increasing:
+
         errors.append(&quot;时间戳不是单调递增&quot;)
 
+
+
     # 3. OHLC逻辑
+
     bad = df[
+
         (df['high'] &lt; df['low']) |
+
         (df['close'] &gt; df['high']) |
+
         (df['close'] &lt; df['low'])
+
     ]
+
     if len(bad) &gt; 0:
+
         errors.append(f&quot;存在{len(bad)}条OHLC逻辑错误&quot;)
 
+
+
     # 4. 价格正数
+
     if (df[['open','high','low','close']] &lt;= 0).any().any():
+
         errors.append(&quot;存在非正价格&quot;)
 
+
+
     # 5. 缺失K线
+
     expected = pd.date_range(df['datetime'].min(), df['datetime'].max(), freq=freq)
+
     missing_count = len(expected.difference(df['datetime']))
+
     if missing_count &gt; 0:
+
         warnings.append(f&quot;存在{missing_count}根缺失K线&quot;)
 
+
+
     # 6. 填充比例
+
     if 'is_filled' in df.columns:
+
         fill_ratio = df['is_filled'].mean()
+
         if fill_ratio &gt; 0.05:
+
             warnings.append(f&quot;填充K线比例过高: {fill_ratio:.2%}&quot;)
 
+
+
     print(&quot;验证结果:&quot;)
+
     if errors:
+
         print(&quot;  [错误]&quot;)
+
         for e in errors:
+
             print(f&quot;    - {e}&quot;)
+
     if warnings:
+
         print(&quot;  [警告]&quot;)
+
         for w in warnings:
+
             print(f&quot;    - {w}&quot;)
+
     if not errors and not warnings:
+
         print(&quot;  数据完整，可以用于回测&quot;)
 
+
+
     return len(errors) == 0
+
 </code></pre>
 
 <h2 id="_5">六、完整清洗流程</h2>
+
 <p>把上面的步骤串起来：</p>
+
 <pre class="codehilite"><code class="language-python">def clean_kline_data(df, freq='5min', trading_hours=None):
+
     &quot;&quot;&quot;
+
     完整的K线数据清洗流程
+
     &quot;&quot;&quot;
+
     # 1. 体检
+
     print(&quot;&gt;&gt;&gt; 数据体检&quot;)
+
     health = data_health_check(df, freq)
 
+
+
     # 2. 去重
+
     df = df.drop_duplicates('datetime', keep='first')
 
+
+
     # 3. 修正OHLC逻辑
+
     df = fix_ohlc_logic(df)
 
+
+
     # 4. 修复异常价格
+
     df = fix_price_outliers(df)
 
+
+
     # 5. 填充缺失K线
+
     df = fill_missing_bars(df, freq, method='ffill', trading_hours=trading_hours)
 
+
+
     # 6. 验证
+
     print(&quot;\n&gt;&gt;&gt; 清洗后验证&quot;)
+
     validate_clean_data(df, freq)
 
+
+
     return df
+
 </code></pre>
 
 <h2 id="_6">七、几个实战建议</h2>
+
 <ol>
+
 <li><strong>保留is_filled标记</strong>：回测时可以选择在填充K线上不产生信号，避免虚假交易。</li>
+
 <li><strong>填充比例超过5%要警惕</strong>：如果缺失太多，说明数据源有问题，考虑换数据源。</li>
+
 <li><strong>异常检测的阈值要调</strong>：不同品种波动率不同，threshold=5不一定适合所有情况，建议先用历史数据跑一遍看分布。</li>
+
 <li><strong>时间对齐要在清洗前做</strong>：如果时间戳含义不统一，后面的缺失检测全是错的。</li>
+
 <li><strong>清洗日志要保存</strong>：每次清洗记录删了多少、填了多少、修了多少，方便追溯。</li>
+
 </ol>
+
 <p>数据清洗没有一劳永逸的方案，核心原则是：<strong>知道数据哪里脏，知道怎么处理，知道处理后有什么影响</strong>。把这三点搞清楚，回测结果才有可信度。</p>
+
 <p>更多内容请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;数据清洗&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;K线&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;异常数据&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;回测&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">数据清洗</span><span class="tag-badge">K线</span><span class="tag-badge">异常数据</span><span class="tag-badge">回测</span></div>
             <div class="post-footer">
