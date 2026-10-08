@@ -5,18 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="分批止盈实现：浮盈3%半仓止盈的Python代码逻辑
-
-为什么需要分批止盈
-
-一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。...">
+        <meta name="description" content="为什么需要分批止盈 一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。 本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。这个规">
     <meta name="keywords" content="分批止盈,Python,仓位管理,止盈">
     <meta property="og:title" content="分批止盈实现：浮盈3%半仓止盈的Python代码逻辑">
-    <meta property="og:description" content="分批止盈实现：浮盈3%半仓止盈的Python代码逻辑
-
-为什么需要分批止盈
-
-一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。...">
+    <meta property="og:description" content="为什么需要分批止盈 一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。 本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。这个规">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/28.html">
@@ -45,241 +37,479 @@
             </div>
             <div class="post-content">
 <h2 id="_1">为什么需要分批止盈</h2>
+
 <p>一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。</p>
+
 <p>本文实现一个具体规则：<strong>浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓</strong>。这个规则简单、可量化、容易回测。</p>
+
 <h2 id="_2">设计思路</h2>
+
 <h3 id="_3">核心状态机</h3>
+
 <p>每笔持仓需要维护几个状态：</p>
+
 <table>
+
 <thead>
+
 <tr>
+
 <th>状态变量</th>
+
 <th>含义</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td><code>entry_price</code></td>
+
 <td>开仓均价</td>
+
 </tr>
+
 <tr>
+
 <td><code>remaining_qty</code></td>
+
 <td>当前剩余持仓数量</td>
+
 </tr>
+
 <tr>
+
 <td><code>half_closed</code></td>
+
 <td>是否已执行过半仓止盈</td>
+
 </tr>
+
 <tr>
+
 <td><code>initial_qty</code></td>
+
 <td>初始开仓数量</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <p>逐K线判断时，只需检查当前浮盈比例是否触发阈值，并且对应动作尚未执行。</p>
+
 <h3 id="_4">仓位计算逻辑</h3>
+
 <p>假设初始开仓 1000 股：</p>
+
 <ul>
+
 <li>浮盈 ≥ 3% 且 <code>half_closed == False</code>：卖出 <code>initial_qty // 2</code> 股，标记 <code>half_closed = True</code></li>
+
 <li>浮盈 ≥ 6% 且 <code>remaining_qty &gt; 0</code>：卖出全部剩余仓位</li>
+
 </ul>
+
 <p>注意用 <code>initial_qty // 2</code> 而不是 <code>remaining_qty // 2</code>，避免后续逻辑混乱。A股卖出需要整数股，用整除处理。</p>
+
 <h3 id="_5">边界情况</h3>
+
 <p>几个必须处理的细节：</p>
+
 <ol>
+
 <li><strong>跳空高开</strong>：如果某根K线开盘直接超过6%，3%的半仓止盈和6%的清仓可能在同一根K线触发。代码里按顺序判断即可——先触发3%半仓，再判断6%清仓。</li>
+
 <li><strong>浮盈回撤</strong>：如果触发3%半仓后价格回落，剩余仓位不设移动止损的话会一直持有。本文只实现固定阈值止盈，移动止损另文讨论。</li>
+
 <li><strong>手续费与滑点</strong>：回测时应计入，本文代码留出接口。</li>
+
 <li><strong>除权除息</strong>：实盘中 <code>entry_price</code> 需要做复权处理，否则浮盈计算会失真。</li>
+
 </ol>
+
 <h2 id="k">逐K线判断逻辑</h2>
+
 <p>用伪代码描述单根K线的处理流程：</p>
+
 <pre class="codehilite"><code>for each bar:
+
     current_price = bar.close
+
     profit_pct = (current_price - entry_price) / entry_price
 
+
+
     if not half_closed and profit_pct &gt;= 0.03:
+
         sell(initial_qty // 2)
+
         half_closed = True
 
+
+
     if half_closed and remaining_qty &gt; 0 and profit_pct &gt;= 0.06:
+
         sell(remaining_qty)
+
         remaining_qty = 0
+
 </code></pre>
 
 <p>关键点：<strong>6%的清仓必须在半仓止盈已执行的前提下才判断</strong>，否则如果价格直接从开仓跳到6%以上，会跳过半仓逻辑直接清仓——这取决于你的策略意图。如果你希望无论如何都先执行半仓，那这个顺序是对的；如果你希望跳空时直接全清，可以去掉 <code>half_closed</code> 条件。</p>
+
 <h2 id="python">完整Python代码实现</h2>
+
 <p>下面是一个可运行的实现，用 pandas 处理K线数据，模拟逐K线判断。</p>
+
 <pre class="codehilite"><code class="language-python">import pandas as pd
+
 import numpy as np
 
 
+
+
+
 class BatchTakeProfit:
+
     &quot;&quot;&quot;
+
     分批止盈策略：
+
     - 浮盈 &gt;= 3% 时平掉一半仓位
+
     - 浮盈 &gt;= 6% 时平掉剩余全部仓位
+
     &quot;&quot;&quot;
+
+
 
     def __init__(self, entry_price: float, initial_qty: int,
+
                  first_tp_pct: float = 0.03,
+
                  second_tp_pct: float = 0.06,
+
                  commission_rate: float = 0.0003,
+
                  slippage: float = 0.0):
+
         &quot;&quot;&quot;
+
         :param entry_price: 开仓均价
+
         :param initial_qty: 初始持仓数量（股）
+
         :param first_tp_pct: 第一次止盈阈值（浮盈比例）
+
         :param second_tp_pct: 第二次止盈阈值
+
         :param commission_rate: 单边手续费率
+
         :param slippage: 单边滑点（价格绝对值）
+
         &quot;&quot;&quot;
+
         self.entry_price = entry_price
+
         self.initial_qty = initial_qty
+
         self.remaining_qty = initial_qty
+
         self.first_tp_pct = first_tp_pct
+
         self.second_tp_pct = second_tp_pct
+
         self.commission_rate = commission_rate
+
         self.slippage = slippage
 
+
+
         self.half_closed = False
+
         self.trades = []  # 记录成交明细
 
+
+
     def _sell(self, price: float, qty: int, reason: str, bar_time):
+
         &quot;&quot;&quot;执行卖出并记录&quot;&quot;&quot;
+
         if qty &lt;= 0:
+
             return
+
         exec_price = price - self.slippage
+
         amount = exec_price * qty
+
         commission = amount * self.commission_rate
 
+
+
         self.remaining_qty -= qty
+
         self.trades.append({
+
             &quot;time&quot;: bar_time,
+
             &quot;action&quot;: &quot;SELL&quot;,
+
             &quot;price&quot;: round(exec_price, 4),
+
             &quot;qty&quot;: qty,
+
             &quot;amount&quot;: round(amount, 2),
+
             &quot;commission&quot;: round(commission, 2),
+
             &quot;reason&quot;: reason,
+
             &quot;remaining_qty&quot;: self.remaining_qty,
+
         })
 
+
+
     def on_bar(self, bar_time, close_price: float):
+
         &quot;&quot;&quot;逐K线调用，传入时间戳和收盘价&quot;&quot;&quot;
+
         if self.remaining_qty &lt;= 0:
+
             return
+
+
 
         profit_pct = (close_price - self.entry_price) / self.entry_price
 
+
+
         # 第一档：浮盈3%，平半仓
+
         if not self.half_closed and profit_pct &gt;= self.first_tp_pct:
+
             half_qty = self.initial_qty // 2
+
             # 确保不超过当前剩余
+
             half_qty = min(half_qty, self.remaining_qty)
+
             self._sell(close_price, half_qty, &quot;first_tp_3pct&quot;, bar_time)
+
             self.half_closed = True
 
+
+
         # 第二档：浮盈6%，清仓
+
         if self.half_closed and self.remaining_qty &gt; 0 \
+
                 and profit_pct &gt;= self.second_tp_pct:
+
             self._sell(close_price, self.remaining_qty,
+
                        &quot;second_tp_6pct&quot;, bar_time)
 
+
+
     def summary(self):
+
         &quot;&quot;&quot;输出成交汇总&quot;&quot;&quot;
+
         df = pd.DataFrame(self.trades)
+
         if df.empty:
+
             print(&quot;无成交&quot;)
+
             return df
+
         print(df.to_string(index=False))
+
         total_commission = df[&quot;commission&quot;].sum()
+
         print(f&quot;\n总手续费: {total_commission:.2f}&quot;)
+
         return df
 
 
+
+
+
 # ============ 模拟运行 ============
+
 if __name__ == &quot;__main__&quot;:
+
     # 构造一段模拟K线：价格从10元逐步上涨到10.8元再回落
+
     prices = [10.0, 10.15, 10.28, 10.35, 10.50,
+
               10.62, 10.70, 10.80, 10.75, 10.60]
+
     times = pd.date_range(&quot;2024-01-02 09:30&quot;, periods=len(prices), freq=&quot;5min&quot;)
 
+
+
     strategy = BatchTakeProfit(
+
         entry_price=10.0,
+
         initial_qty=1000,
+
         first_tp_pct=0.03,
+
         second_tp_pct=0.06,
+
         commission_rate=0.0003,
+
         slippage=0.01,
+
     )
 
+
+
     for t, p in zip(times, prices):
+
         strategy.on_bar(t, p)
 
+
+
     strategy.summary()
+
 </code></pre>
 
 <p>运行结果大致如下：</p>
+
 <pre class="codehilite"><code>                 time action  price  qty  amount  commission         reason  remaining_qty
+
 2024-01-02 09:45:00   SELL  10.27  500  5135.0        1.54  first_tp_3pct            500
+
 2024-01-02 10:05:00   SELL  10.69  500  5345.0        1.60 second_tp_6pct              0
 
+
+
 总手续费: 3.14
+
 </code></pre>
 
 <p>价格在 10.28 时浮盈 2.8%，还没触发；到 10.35 时浮盈 3.5%，触发半仓止盈。之后到 10.70 时浮盈 7%，触发清仓。</p>
+
 <h2 id="_6">与回测框架集成</h2>
+
 <p>上面的类可以嵌入到 backtrader、vnpy 或自研回测框架中。以 backtrader 为例，核心逻辑放在 <code>next()</code> 里：</p>
+
 <pre class="codehilite"><code class="language-python">import backtrader as bt
 
 
+
+
+
 class BatchTPStrategy(bt.Strategy):
+
     params = (
+
         (&quot;first_tp&quot;, 0.03),
+
         (&quot;second_tp&quot;, 0.06),
+
     )
 
+
+
     def __init__(self):
+
         self.entry_price = None
+
         self.half_closed = False
+
         self.initial_qty = 0
 
+
+
     def next(self):
+
         if not self.position:
+
             return
 
+
+
         price = self.data.close[0]
+
         profit_pct = (price - self.entry_price) / self.entry_price
 
+
+
         if not self.half_closed and profit_pct &gt;= self.p.first_tp:
+
             qty = self.initial_qty // 2
+
             self.sell(size=qty)
+
             self.half_closed = True
 
+
+
         elif self.half_closed and profit_pct &gt;= self.p.second_tp:
+
             self.close()
+
 </code></pre>
 
 <p>注意 backtrader 的 <code>self.sell(size=qty)</code> 在净持仓模式下会自动处理，但如果你用的是 <code>cheat_on_close</code> 或其他模式，成交价会有差异，回测时需要注意。</p>
+
 <h2 id="_7">几个实战中的坑</h2>
+
 <p><strong>1. 浮盈计算的分母</strong></p>
+
 <p>用 <code>entry_price</code> 还是用当前持仓成本？如果是加仓过的仓位，<code>entry_price</code> 应该是加权均价。分批止盈的阈值基于<strong>加权均价</strong>计算才合理。</p>
+
 <p><strong>2. 半仓的"半"怎么定义</strong></p>
+
 <p><code>initial_qty // 2</code> 在A股是向下取整。如果初始开仓是奇数（比如 1001 股），半仓是 500 股，剩余 501 股。第二次清仓时卖出 501 股。这个细节在代码里已经处理。</p>
+
 <p><strong>3. 阈值触发的时机</strong></p>
+
 <p>用收盘价判断还是用最高价判断？用收盘价更保守，用最高价可能触发但实际无法成交（如果价格瞬间冲高回落）。建议回测时用收盘价，实盘中可以用限价单挂在高位。</p>
+
 <p><strong>4. 半仓止盈后的剩余仓位</strong></p>
+
 <p>剩余仓位如果一直不涨到6%，会一直持有。实际策略中通常还会加一个移动止损或时间止损，否则遇到趋势反转会把利润全部回吐。这部分可以扩展 <code>on_bar</code> 方法。</p>
+
 <h2 id="_8">扩展方向</h2>
+
 <ul>
+
 <li><strong>多档止盈</strong>：把阈值和仓位比例做成列表，比如 <code>[(0.03, 0.5), (0.06, 0.3), (0.10, 0.2)]</code></li>
+
 <li><strong>动态阈值</strong>：用 ATR 或波动率调整止盈比例，高波动时放宽阈值</li>
+
 <li><strong>移动止损</strong>：半仓止盈后，剩余仓位设置跟踪止损，锁定利润</li>
+
 <li><strong>回测统计</strong>：记录每笔交易的盈亏比、胜率、最大回撤</li>
+
 </ul>
+
 <p>分批止盈的本质是<strong>用确定性换空间</strong>。3%半仓止盈锁定了部分利润，6%清仓保证了策略的纪律性。代码不复杂，难的是执行——尤其是价格在3%附近反复震荡时，能否严格按照规则执行。</p>
+
 <p>更多内容请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;分批止盈&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;Python&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;仓位管理&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;止盈&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">分批止盈</span><span class="tag-badge">Python</span><span class="tag-badge">仓位管理</span><span class="tag-badge">止盈</span></div>
             <div class="post-footer">
