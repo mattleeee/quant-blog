@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>增量代码备份方案设计：版本管理最佳实践 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="增量代码备份方案设计：版本管理最佳实践
+
+在量化交易项目中,策略代码的迭代频率远高于普通业务系统。一个因子权重的微调、一段风控逻辑的修改,都可能直接影响实盘表现。如果没有可靠的备份机制,一次误操作就可能让数周的优化工作付诸东流。...">
+    <meta name="keywords" content="代码备份,版本管理,增量备份,最佳实践">
+    <meta property="og:title" content="增量代码备份方案设计：版本管理最佳实践">
+    <meta property="og:description" content="增量代码备份方案设计：版本管理最佳实践
+
+在量化交易项目中,策略代码的迭代频率远高于普通业务系统。一个因子权重的微调、一段风控逻辑的修改,都可能直接影响实盘表现。如果没有可靠的备份机制,一次误操作就可能让数周的优化工作付诸东流。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/39.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>增量代码备份方案设计：版本管理最佳实践</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-08</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>在量化交易项目中,策略代码的迭代频率远高于普通业务系统。一个因子权重的微调、一段风控逻辑的修改,都可能直接影响实盘表现。如果没有可靠的备份机制,一次误操作就可能让数周的优化工作付诸东流。</p>
+<p>Git 当然可以做版本管理,但实盘服务器上往往有诸多限制:不能随意推到远程仓库、不希望暴露策略细节、或者干脆就是离线环境。这时候,一套轻量的本地增量备份方案就很有必要。</p>
+<p>本文分享一套我在多个量化项目中使用的备份方案,核心思路很简单:</p>
+<ul>
+<li>每次代码优化完成后,自动打包备份到指定目录</li>
+<li>命名规则:<code>v{N}_{日期}_简述</code></li>
+<li>用 <code>CHANGELOG.md</code> 记录每次变更</li>
+<li>支持快速恢复</li>
+</ul>
+<h2 id="_1">一、目录结构设计</h2>
+<p>先看整体结构,后面所有脚本都围绕它展开:</p>
+<pre class="codehilite"><code>project/
+├── strategy/              # 实际运行的代码
+│   ├── main.py
+│   └── ...
+├── backups/               # 备份根目录
+│   ├── v1_20240115_初始版本/
+│   ├── v2_20240118_加入动量因子/
+│   └── v3_20240122_修复止损逻辑/
+├── CHANGELOG.md           # 变更日志
+└── backup.py              # 备份脚本
+</code></pre>
+
+<p>备份目录里存的是<strong>完整快照</strong>,不是 diff。原因很直接:量化策略代码量通常不大(几千行级别),全量快照占用可控,恢复时零心智负担。真正的"增量"体现在<strong>只备份变更过的版本</strong>,而不是在文件层面做 delta 压缩。</p>
+<h2 id="_2">二、备份脚本设计</h2>
+<p>核心脚本 <code>backup.py</code> 需要完成几件事:读取当前版本号、生成备份目录名、复制代码、更新 CHANGELOG。</p>
+<pre class="codehilite"><code class="language-python"># backup.py
+import os
+import re
+import shutil
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).parent.resolve()
+SOURCE_DIR = PROJECT_ROOT / &quot;strategy&quot;
+BACKUP_ROOT = PROJECT_ROOT / &quot;backups&quot;
+CHANGELOG = PROJECT_ROOT / &quot;CHANGELOG.md&quot;
+
+# 需要排除的文件/目录
+EXCLUDE = {&quot;.git&quot;, &quot;__pycache__&quot;, &quot;.pytest_cache&quot;, &quot;.idea&quot;, &quot;.vscode&quot;}
+
+
+def get_latest_version() -&gt; int:
+    &quot;&quot;&quot;扫描 backups 目录,返回当前最大版本号&quot;&quot;&quot;
+    if not BACKUP_ROOT.exists():
+        return 0
+    pattern = re.compile(r&quot;^v(\d+)_&quot;)
+    versions = []
+    for name in BACKUP_ROOT.iterdir():
+        if name.is_dir():
+            m = pattern.match(name.name)
+            if m:
+                versions.append(int(m.group(1)))
+    return max(versions) if versions else 0
+
+
+def make_backup_dir(version: int, desc: str) -&gt; Path:
+    &quot;&quot;&quot;生成备份目录,格式 v{N}_{日期}_{简述}&quot;&quot;&quot;
+    date_str = datetime.now().strftime(&quot;%Y%m%d&quot;)
+    # 简述中的空格替换为下划线,避免路径问题
+    safe_desc = re.sub(r&quot;\s+&quot;, &quot;_&quot;, desc.strip())
+    dir_name = f&quot;v{version}_{date_str}_{safe_desc}&quot;
+    target = BACKUP_ROOT / dir_name
+    target.mkdir(parents=True, exist_ok=False)
+    return target
+
+
+def copy_source(target: Path):
+    &quot;&quot;&quot;复制源代码,忽略排除项&quot;&quot;&quot;
+    def ignore(directory, files):
+        return [f for f in files if f in EXCLUDE]
+
+    shutil.copytree(SOURCE_DIR, target / &quot;strategy&quot;, ignore=ignore)
+
+
+def update_changelog(version: int, desc: str):
+    &quot;&quot;&quot;在 CHANGELOG.md 顶部插入新条目&quot;&quot;&quot;
+    date_str = datetime.now().strftime(&quot;%Y-%m-%d %H:%M&quot;)
+    entry = f&quot;## v{version} - {date_str}\n\n- {desc}\n\n&quot;
+
+    if CHANGELOG.exists():
+        content = CHANGELOG.read_text(encoding=&quot;utf-8&quot;)
+    else:
+        content = &quot;# CHANGELOG\n\n&quot;
+
+    # 保留标题,新条目插在标题之后
+    if content.startswith(&quot;# CHANGELOG&quot;):
+        header, _, body = content.partition(&quot;\n\n&quot;)
+        new_content = f&quot;{header}\n\n{entry}{body}&quot;
+    else:
+        new_content = entry + content
+
+    CHANGELOG.write_text(new_content, encoding=&quot;utf-8&quot;)
+
+
+def backup(desc: str) -&gt; Path:
+    if not SOURCE_DIR.exists():
+        raise FileNotFoundError(f&quot;源码目录不存在: {SOURCE_DIR}&quot;)
+
+    next_version = get_latest_version() + 1
+    target = make_backup_dir(next_version, desc)
+    copy_source(target)
+    update_changelog(next_version, desc)
+
+    print(f&quot;[OK] 已备份到: {target}&quot;)
+    print(f&quot;[OK] 版本号: v{next_version}&quot;)
+    return target
+
+
+if __name__ == &quot;__main__&quot;:
+    parser = argparse.ArgumentParser(description=&quot;增量代码备份&quot;)
+    parser.add_argument(&quot;-m&quot;, &quot;--message&quot;, required=True, help=&quot;本次变更简述&quot;)
+    args = parser.parse_args()
+    backup(args.message)
+</code></pre>
+
+<p>使用方式:</p>
+<pre class="codehilite"><code class="language-bash">python backup.py -m &quot;加入动量因子,回测夏普提升至2.1&quot;
+</code></pre>
+
+<p>脚本会自动生成 <code>backups/v4_20240122_加入动量因子.../</code> 这样的目录,并在 CHANGELOG 顶部插入记录。</p>
+<h3 id="_3">关键设计点</h3>
+<p><strong>1. 版本号从目录扫描得出,而非存文件</strong></p>
+<p>用 <code>get_latest_version()</code> 扫描目录,避免了"版本号文件丢失导致冲突"的问题。备份目录本身就是版本号的事实来源。</p>
+<p><strong>2. 简述中的空格处理</strong></p>
+<p>Windows、Linux 对路径中的空格处理不一致,统一替换成下划线,减少后续脚本解析的麻烦。</p>
+<p><strong>3. 排除项集中管理</strong></p>
+<p><code>__pycache__</code>、<code>.git</code> 这类目录没必要备份,反而会让备份体积膨胀。集中定义 <code>EXCLUDE</code> 集合,后续维护方便。</p>
+<h2 id="_4">三、版本号管理策略</h2>
+<p>版本号不是随便加的,推荐遵循以下规则:</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>示例</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>策略逻辑变更</td>
+<td>v5 → v6</td>
+<td>因子、信号、仓位规则改动</td>
+</tr>
+<tr>
+<td>参数微调</td>
+<td>v6 → v7</td>
+<td>阈值、周期等参数调整</td>
+</tr>
+<tr>
+<td>Bug 修复</td>
+<td>v7 → v8</td>
+<td>不影响策略逻辑</td>
+</tr>
+<tr>
+<td>重构</td>
+<td>v8 → v9</td>
+<td>结构变化但行为一致</td>
+</tr>
+</tbody>
+</table>
+<p><strong>不建议做 <code>v1.2.3</code> 这种语义化版本。</strong> 量化策略的迭代往往是线性的、频繁的,主版本号一路递增反而清晰。真正重要的信息在<strong>日期和简述</strong>里,而不是版本号本身。</p>
+<p>如果确实需要区分"大版本"和"小版本",可以在简述中标注,比如:</p>
+<pre class="codehilite"><code>v12_20240201_重构数据层[breaking]
+v13_20240203_新增RSI因子
+</code></pre>
+
+<h2 id="changelog">四、CHANGELOG 规范</h2>
+<p><code>CHANGELOG.md</code> 是整个方案里最容易被忽视、但价值最高的部分。半年后回头看代码,你可能忘了为什么当初把止损从 2% 改成 1.5%,但 CHANGELOG 会告诉你。</p>
+<p>推荐格式:</p>
+<pre class="codehilite"><code class="language-markdown"># CHANGELOG
+
+## v8 - 2024-01-22 15:30
+
+- 修复移动止损在跳空行情下未触发的问题
+- 回测区间 2020-2023,最大回撤从 18% 降至 12%
+
+## v7 - 2024-01-18 10:12
+
+- 动量因子窗口从 20 日调整为 15 日
+- 夏普从 1.8 提升至 2.1
+
+## v6 - 2024-01-15 09:00
+
+- 初始版本,双均线 + 动量组合
+</code></pre>
+
+<p>写 CHANGELOG 的三个原则:</p>
+<ol>
+<li><strong>写"为什么",不只写"做了什么"</strong>。"调整参数"是废话,"调整参数以降低震荡市中的假信号"才有价值。</li>
+<li><strong>带上量化结果</strong>。回测指标、实盘表现,这些数字才是判断变更好坏的依据。</li>
+<li><strong>一条记录只描述一件事</strong>。如果一次改了三个地方,拆成三条。</li>
+</ol>
+<h2 id="_5">五、恢复流程</h2>
+<p>恢复比备份更需要谨慎,因为恢复操作往往是"救火"场景,容易出错。</p>
+<h3 id="51">5.1 查看可用版本</h3>
+<pre class="codehilite"><code class="language-python"># list_versions.py
+import re
+from pathlib import Path
+
+BACKUP_ROOT = Path(&quot;backups&quot;)
+pattern = re.compile(r&quot;^v(\d+)_(\d{8})_(.+)$&quot;)
+
+for d in sorted(BACKUP_ROOT.iterdir()):
+    if not d.is_dir():
+        continue
+    m = pattern.match(d.name)
+    if m:
+        v, date, desc = m.groups()
+        print(f&quot;v{v:&lt;4} {date}  {desc}&quot;)
+</code></pre>
+
+<p>输出:</p>
+<pre class="codehilite"><code>v1    20240115  初始版本
+v2    20240118  加入动量因子
+v3    20240122  修复止损逻辑
+</code></pre>
+
+<h3 id="52">5.2 安全恢复脚本</h3>
+<p>直接 <code>shutil.copytree</code> 覆盖现有代码风险很大。推荐先备份当前状态,再恢复目标版本:</p>
+<pre class="codehilite"><code class="language-python"># restore.py
+import shutil
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+PROJECT_ROOT = Path(__file__).parent.resolve()
+SOURCE_DIR = PROJECT_ROOT / &quot;strategy&quot;
+BACKUP_ROOT = PROJECT_ROOT / &quot;backups&quot;
+
+
+def restore(version: int):
+    # 1. 找到目标备份
+    candidates = [d for d in BACKUP_ROOT.iterdir()
+                  if d.is_dir() and d.name.startswith(f&quot;v{version}_&quot;)]
+    if not candidates:
+        raise FileNotFoundError(f&quot;未找到 v{version} 的备份&quot;)
+    target = candidates[0]
+
+    # 2. 先备份当前状态,防止误操作
+    ts = datetime.now().strftime(&quot;%Y%m%d_%H%M%S&quot;)
+    safety = BACKUP_ROOT / f&quot;_pre_restore_{ts}&quot;
+    shutil.copytree(SOURCE_DIR, safety)
+    print(f&quot;[SAFE] 当前状态已备份到: {safety}&quot;)
+
+    # 3. 清空并恢复
+    shutil.rmtree(SOURCE_DIR)
+    shutil.copytree(target / &quot;strategy&quot;, SOURCE_DIR)
+    print(f&quot;[OK] 已恢复到 v{version}: {target.name}&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(&quot;-v&quot;, &quot;--version&quot;, type=int, required=True)
+    args = parser.parse_args()
+    restore(args.version)
+</code></pre>
+
+<p>使用:</p>
+<pre class="codehilite"><code class="language-bash">python restore.py -v 7
+</code></pre>
+
+<p>这个脚本的关键是<strong>先备份再覆盖</strong>。哪怕恢复错了版本,还能从 <code>_pre_restore_*</code> 目录里找回来。</p>
+<h3 id="53">5.3 恢复后的验证</h3>
+<p>恢复完不要急着跑实盘,至少做三件事:</p>
+<ol>
+<li>对比 <code>strategy/</code> 和备份目录的文件哈希,确认复制完整</li>
+<li>跑一遍回测,确认指标符合 CHANGELOG 记录</li>
+<li>检查配置文件、依赖版本是否匹配</li>
+</ol>
+<pre class="codehilite"><code class="language-python"># verify.py
+import hashlib
+from pathlib import Path
+
+def dir_hash(path: Path) -&gt; str:
+    h = hashlib.md5()
+    for f in sorted(path.rglob(&quot;*&quot;)):
+        if f.is_file() and &quot;__pycache__&quot; not in str(f):
+            h.update(f.read_bytes())
+    return h.hexdigest()
+
+a = dir_hash(Path(&quot;strategy&quot;))
+b = dir_hash(Path(&quot;backups/v7_20240118_加入动量因子/strategy&quot;))
+print(&quot;一致&quot; if a == b else &quot;不一致,请检查&quot;)
+</code></pre>
+
+<h2 id="_6">六、自动化集成</h2>
+<p>手动跑 <code>backup.py</code> 容易忘。推荐两种自动化方式:</p>
+<p><strong>方式一:Git hook</strong></p>
+<p>在 <code>.git/hooks/post-commit</code> 里调用备份脚本,每次 commit 自动生成备份。适合用 Git 做主要版本管理的项目。</p>
+<p><strong>方式二:定时任务</strong></p>
+<p>用 <code>schedule</code> 库或系统 cron,每天收盘后自动备份一次:</p>
+<pre class="codehilite"><code class="language-python">import schedule
+import time
+from backup import backup
+
+schedule.every().day.at(&quot;15:30&quot;).do(
+    backup, desc=&quot;每日自动备份&quot;
+)
+
+while True:
+    schedule.run_pending()
+    time.sleep(60)
+</code></pre>
+
+<p><strong>方式三:文件监听</strong></p>
+<p>用 <code>watchdog</code> 监听 <code>strategy/</code> 目录,检测到 <code>.py</code> 文件保存后延迟 5 分钟自动备份,避免频繁触发。</p>
+<h2 id="_7">七、几个实践中的坑</h2>
+<p><strong>1. 备份目录别放在项目内</strong></p>
+<p>如果 <code>backups/</code> 在项目根目录,而项目本身又被 Git 管理,容易造成递归备份。建议在 <code>.gitignore</code> 里排除 <code>backups/</code>,或者干脆把备份目录放到项目外。</p>
+<p><strong>2. 大文件要排除</strong></p>
+<p>如果项目里有数据文件、模型文件(几百 MB 甚至 GB),一定要加进 <code>EXCLUDE</code>,否则备份会失控。</p>
+<p><strong>3. 定期清理旧版本</strong></p>
+<p>保留全部版本只适合早期。稳定运行后,建议保留最近 20 个版本 + 每个月的第一个版本:</p>
+<pre class="codehilite"><code class="language-python">def cleanup(keep_recent=20):
+    dirs = sorted(
+        [d for d in BACKUP_ROOT.iterdir() if d.is_dir()],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True
+    )
+    for d in dirs[keep_recent:]:
+        shutil.rmtree(d)
+        print(f&quot;[CLEAN] 删除: {d.name}&quot;)
+</code></pre>
+
+<p><strong>4. CHANGELOG 不要自动生成</strong></p>
+<p>脚本只负责插入模板,具体内容必须人工写。自动生成的 CHANGELOG 等于没有 CHANGELOG。</p>
+<h2 id="_8">八、方案总结</h2>
+<p>这套方案的核心不是技术复杂度,而是<strong>约束</strong>:</p>
+<ul>
+<li>强制每次变更都有简述</li>
+<li>强制每次变更都进 CHANGELOG</li>
+<li>强制恢复前先备份当前状态</li>
+</ul>
+<p>工具本身简单,难的是坚持。当你在半年后需要回滚一个策略、或者向别人解释某次改动的原因时,这套机制的价值就会体现出来。</p>
+<p>代码量不到 200 行,依赖只有标准库,可以直接嵌入任何 Python 项目。对于量化策略这种"改动频繁、后果严重、环境受限"的场景,比引入重型工具更实用。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">代码备份</span><span class="tag-badge">版本管理</span><span class="tag-badge">增量备份</span><span class="tag-badge">最佳实践</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
