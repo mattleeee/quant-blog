@@ -7,205 +7,145 @@
         <language>zh-CN</language>
         
         <item>
-            <title>市场情绪分析功能实现：综合分数+F&amp;G指标</title>
-            <link>https://www.hkcode.dpdns.org/posts/38.html</link>
-            <description>市场情绪分析功能实现：综合分数+F&amp;G指标
+            <title>增量代码备份方案设计：版本管理最佳实践</title>
+            <link>https://www.hkcode.dpdns.org/posts/39.html</link>
+            <description>增量代码备份方案设计：版本管理最佳实践
 
-情绪是市场的短期定价因子之一。价格可以被操纵,成交量可以被对倒,但情绪指标往往能提供另一维度的参考。这篇文章记录我在自己的量化系统里实现市场情绪分析模块的过程,包括 F&amp;G 指数获取、综合情绪分数计算、极端值信号,以及定时推送。...</description>
+在量化交易项目中,策略代码的迭代频率远高于普通业务系统。一个因子权重的微调、一段风控逻辑的修改,都可能直接影响实盘表现。如果没有可靠的备份机制,一次误操作就可能让数周的优化工作付诸东流。...</description>
+            <pubDate>2026-10-08</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
+            <title>市场情绪分析功能实现：综合分数+F&amp;amp;G指标</title>
+            <link>https://www.hkcode.dpdns.org/posts/38.html</link>
+            <description>情绪是市场的短期定价因子之一。价格可以被操纵,成交量可以被对倒,但情绪指标往往能提供另一维度的参考。这篇文章记录我在自己的量化系统里实现市场情绪分析模块的过程,包括 F&amp;amp;G 指数获取、综合情绪分数计算、极端值信号,以及定时推送。 一、为什么要做情绪分析 做趋势策略的时候,最难受的不是震荡,而是趋势末端的情绪亢奋...</description>
             <pubDate>2026-10-07</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>模拟盘数据统计与月度复盘方法</title>
             <link>https://www.hkcode.dpdns.org/posts/37.html</link>
-            <description>模拟盘数据统计与月度复盘方法
-
-模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。
-
-这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。...</description>
+            <description>模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。 这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。 一、数据准备 假设你的模拟盘交易记录已经导出为CSV,...</description>
             <pubDate>2026-10-06</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>策略组合管理：多策略并行运行的架构设计</title>
             <link>https://www.hkcode.dpdns.org/posts/36.html</link>
-            <description>策略组合管理：多策略并行运行的架构设计
-
-单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。...</description>
+            <description>单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。 整体架构 先看分层。整个系统分四层,自上而下: ┌───────────...</description>
             <pubDate>2026-10-05</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>回测数据清洗：如何处理缺失K线和异常数据</title>
             <link>https://www.hkcode.dpdns.org/posts/35.html</link>
-            <description>回测数据清洗：如何处理缺失K线和异常数据
-
-做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。
-
-这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。...</description>
+            <description>做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。 这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。全部用可运行的Python代码演示。 一、先搞清楚数据长什么样 拿到一份K...</description>
             <pubDate>2026-10-04</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>资金管理：仓位控制的核心原则</title>
             <link>https://www.hkcode.dpdns.org/posts/34.html</link>
-            <description>资金管理：仓位控制的核心原则
-
-做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。
-
-原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。...</description>
+            <description>做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。 原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。 一、为什么仓位控制比择时更重要 先看一个简单的数学事实。假设账户回撤 50%，需要...</description>
             <pubDate>2026-10-03</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>3连败熔断机制：保护资金的自动停损设计</title>
             <link>https://www.hkcode.dpdns.org/posts/33.html</link>
-            <description>3连败熔断机制：保护资金的自动停损设计
-
-策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。...</description>
+            <description>策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。这篇文章讲一个简单的工程手段：3连败熔断——当策略连续3次交易亏损时，自动暂停该策略，进入冷却期，避免情绪化或系统性失效下的持续失血。 为什么是&quot;连败&quot;而不是&quot;总亏损&quot; 单笔亏损是随机的，连...</description>
             <pubDate>2026-10-02</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>MACD背离策略回测分析：为什么最终被否决</title>
             <link>https://www.hkcode.dpdns.org/posts/32.html</link>
-            <description>MACD背离策略回测分析：为什么最终被否决
-
-MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。...</description>
+            <description>MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。 本文记录一个MACD背离策略从实现到否决的完整过程,包含三层验证:信号触发率稳定性、参数敏感性、以及在不同市场状态下的表现。结论是:这个策略被否决,不是因为亏钱,而是因为不...</description>
             <pubDate>2026-10-01</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑</title>
             <link>https://www.hkcode.dpdns.org/posts/31.html</link>
-            <description>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑
-
-做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。...</description>
+            <description>做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。 问题在于：这种弱信号到底值不值得执行？ 直接上实盘肯定不行，得先回测。但弱信号的回测和强信号不一样——强信号样本少但质量高，弱信...</description>
             <pubDate>2026-09-30</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>保底止损自适应阈值设计：不再硬编码百分比</title>
             <link>https://www.hkcode.dpdns.org/posts/30.html</link>
-            <description>保底止损自适应阈值设计：不再硬编码百分比
-
-问题的起点
-
-几乎所有策略回测代码里都有这么一行：
-
-
-
-写死一个百分比，简单、直观、能跑。但实盘跑一段时间就会发现两个问题：
-
-1. 低波动品种被频繁扫损。2% 对某些标的来说就是日常噪音，价格来回晃一圈，止损被打掉，然后行情按原方向走。...</description>
+            <description>问题的起点 几乎所有策略回测代码里都有这么一行： stop_loss_pct = 0.02 # 2%止损 写死一个百分比，简单、直观、能跑。但实盘跑一段时间就会发现两个问题： 低波动品种被频繁扫损。2% 对某些标的来说就是日常噪音，价格来回晃一圈，止损被打掉，然后行情按原方向走。 高波动品种止损形同虚设。同样是 2%，...</description>
             <pubDate>2026-09-29</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>RSI指标在风险控制中的实际应用</title>
             <link>https://www.hkcode.dpdns.org/posts/29.html</link>
-            <description>RSI指标在风险控制中的实际应用
-
-RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。...</description>
+            <description>RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。这篇文章讲清楚三件事：RSI的计算原理、如何用它过滤开仓、如何用它做动态止损，并给出可直接运行的Python代码。 RSI的计算原理 RSI由Wil...</description>
             <pubDate>2026-09-28</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑</title>
             <link>https://www.hkcode.dpdns.org/posts/28.html</link>
-            <description>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑
-
-为什么需要分批止盈
-
-一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。
-
-本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。...</description>
+            <description>为什么需要分批止盈 一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。 本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。这个规则简单、可量化、容易回测。 设计思路 核心状态机 每笔持仓需要维护几个状态： 状...</description>
             <pubDate>2026-09-27</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>止盈止损参数选择：RR盈亏比3:1背后的逻辑</title>
             <link>https://www.hkcode.dpdns.org/posts/27.html</link>
-            <description>止盈止损参数选择：RR盈亏比3:1背后的逻辑
-
-止盈止损参数不是拍脑袋定的。RR（RiskReward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。...</description>
+            <description>止盈止损参数不是拍脑袋定的。RR（Risk-Reward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。 一、RR 与胜率的数学关系 1.1 期望收益公式 任何一笔交易的期望收益可以写成： E...</description>
             <pubDate>2026-09-26</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>技术指标实战：均线系统的参数选择与信号逻辑</title>
             <link>https://www.hkcode.dpdns.org/posts/26.html</link>
-            <description>技术指标实战：均线系统的参数选择与信号逻辑
-
-均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。...</description>
+            <description>均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。 一、均线的数学本质与类型选择 均线的核心是对价格序列做低通滤波。不同的均线类型,本质是滤波器设计不同。 1.1...</description>
             <pubDate>2026-09-25</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>三层验证方法论：参数扫描+月度一致性+稳健性消融</title>
             <link>https://www.hkcode.dpdns.org/posts/25.html</link>
-            <description>三层验证方法论：参数扫描+月度一致性+稳健性消融
-
-一个策略回测出来夏普2.0，不代表它能用。可能只是参数恰好踩中了历史噪声，可能只是某一个月贡献了全部收益，也可能去掉某个核心逻辑后表现反而更好——说明那个逻辑本来就没用。
-
-单次回测的信息量极低。...</description>
+            <description>一个策略回测出来夏普2.0，不代表它能用。可能只是参数恰好踩中了历史噪声，可能只是某一个月贡献了全部收益，也可能去掉某个核心逻辑后表现反而更好——说明那个逻辑本来就没用。 单次回测的信息量极低。要判断一个策略是否值得进一步投入，我习惯用三层验证来过滤：参数扫描看稳定性，月度一致性看收益分布，稳健性消融看逻辑必要性。三层...</description>
             <pubDate>2026-09-24</pubDate>
             <category>量化策略</category>
         </item>
         <item>
             <title>系统巡检模块设计：自动检查交易系统健康状态</title>
             <link>https://www.hkcode.dpdns.org/posts/24.html</link>
-            <description>系统巡检模块设计：自动检查交易系统健康状态
-
-交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。
-
-解决办法是写一个系统巡检模块，定时检查各模块健康状态，异常时主动推送告警。...</description>
+            <description>交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。 解决办法是写一个系统巡检模块，定时检查各模块健康状态，异常时主动推送告警。这篇文章拆解一下我的实现方案。 一、巡检项设计 巡检不是越多越好，要覆盖...</description>
             <pubDate>2026-09-23</pubDate>
             <category>Python自动化</category>
         </item>
         <item>
             <title>Python请求频率控制：从sleep到令牌桶的演进</title>
             <link>https://www.hkcode.dpdns.org/posts/23.html</link>
-            <description>Python请求频率控制：从sleep到令牌桶的演进
-
-做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。...</description>
+            <description>做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。 这篇文章梳理三种频率控制方案：sleep延迟、基于时间窗口的计数器、令牌桶算法。从最简单的开始，逐步演进到生产级方案。 方案一：time.sle...</description>
             <pubDate>2026-09-22</pubDate>
             <category>Python自动化</category>
         </item>
         <item>
             <title>信号扫描模块设计与实现：多指标并行检测</title>
             <link>https://www.hkcode.dpdns.org/posts/22.html</link>
-            <description>信号扫描模块设计与实现：多指标并行检测
-
-做量化交易系统,信号扫描是最基础也最容易被低估的一环。很多人一开始写个 for 循环遍历标的、逐个算指标、再 if 判断,标的少的时候没问题,一旦标的数量上到几百上千,单线程扫描动辄几十秒,盘中根本来不及。...</description>
+            <description>做量化交易系统,信号扫描是最基础也最容易被低估的一环。很多人一开始写个 for 循环遍历标的、逐个算指标、再 if 判断,标的少的时候没问题,一旦标的数量上到几百上千,单线程扫描动辄几十秒,盘中根本来不及。 这篇文章讲清楚一件事:怎么设计一个结构清晰、可扩展、能并行跑的信号扫描模块。只讲技术实现,不涉及任何具体交易品种...</description>
             <pubDate>2026-09-21</pubDate>
             <category>Python自动化</category>
         </item>
         <item>
             <title>模拟交易系统架构设计：从信号扫描到自动执行</title>
             <link>https://www.hkcode.dpdns.org/posts/21.html</link>
-            <description>模拟交易系统架构设计：从信号扫描到自动执行
-
-做量化策略开发时，最头疼的问题不是策略本身，而是验证环节。回测跑得再好，实盘前总得有个过渡阶段——模拟交易。这篇文章拆解一套我实际在用的模拟交易系统架构，四个核心模块：信号扫描、市场分析、模拟交易引擎、推送通知。...</description>
-            <pubDate>2026-09-20</pubDate>
+            <description>## 模拟交易系统架构设计：从信号扫描到自动执行 实盘交易系统的核心难点不在策略，而在工程化。信号计算与自动执行之间的延迟、异常处理、状态一致性，每一项都可能让策略失效。本文分享一套完整的模拟交易系统架构，覆盖信号扫描、市场分析、模拟撮合与通知推送四大模块，代码可直接参考改造。 ### 一、系统整体架构 整个系统采用*...</description>
+            <pubDate>2026-08-26</pubDate>
             <category>Python自动化</category>
         </item>
         <item>
             <title>深信服安全软件拦截子进程的排查与解决方案</title>
             <link>https://www.hkcode.dpdns.org/posts/20.html</link>
-            <description>深信服安全软件拦截子进程的排查与解决方案
-
-最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。排查了一圈，最后定位到是深信服（Sangfor）安全软件在拦截子进程创建。...</description>
+            <description>## 深信服安全软件拦截子进程的排查与解决方案 最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。排查了一圈，最后定位到是深信服（Sangfor）安全软件在拦截子进程创建。 这篇文章记录完整排查过程和解决...</description>
             <pubDate>2026-08-22</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>交易所API对接实战：Python连接Gate.io</title>
-            <link>https://www.hkcode.dpdns.org/posts/19.html</link>
-            <description>交易所API对接实战：Python连接Gate.io
-
-做量化交易，第一步永远是搞定交易所API。今天直接上手Gate.io，重点说清楚三件事：怎么签名、怎么控频、怎么拿K线。...</description>
-            <pubDate>2026-08-20</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
