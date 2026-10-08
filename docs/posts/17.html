@@ -5,22 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>异常处理精确化：避免bare except的三个坑 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="异常处理精确化：避免bare except的三个坑
-
-写量化策略的时候，我见过太多这样的代码：
-
-
-
-跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...">
+        <meta name="description" content="## 异常处理精确化：避免bare except的三个坑 写量化策略的时候，我见过太多这样的代码： ```python try: result = get_price_data(symbol) except: result = None `">
     <meta name="keywords" content="异常处理,bare except,Python,最佳实践">
     <meta property="og:title" content="异常处理精确化：避免bare except的三个坑">
-    <meta property="og:description" content="异常处理精确化：避免bare except的三个坑
-
-写量化策略的时候，我见过太多这样的代码：
-
-
-
-跑回测的时候一切正常，实盘跑着跑着突然发现进程没了，或者Ctrl+C都杀不掉程序。这就是bare except埋的雷。...">
+    <meta property="og:description" content="## 异常处理精确化：避免bare except的三个坑 写量化策略的时候，我见过太多这样的代码： ```python try: result = get_price_data(symbol) except: result = None `">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/17.html">
