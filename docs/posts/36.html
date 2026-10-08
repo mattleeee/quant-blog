@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>策略组合管理：多策略并行运行的架构设计 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="策略组合管理：多策略并行运行的架构设计
-
-单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。...">
+        <meta name="description" content="单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突">
     <meta name="keywords" content="策略组合,多策略,架构设计,Python">
     <meta property="og:title" content="策略组合管理：多策略并行运行的架构设计">
-    <meta property="og:description" content="策略组合管理：多策略并行运行的架构设计
-
-单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。...">
+    <meta property="og:description" content="单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/36.html">
@@ -41,314 +37,619 @@
             </div>
             <div class="post-content">
 <p>单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。</p>
+
 <h2 id="_1">整体架构</h2>
+
 <p>先看分层。整个系统分四层,自上而下:</p>
+
 <pre class="codehilite"><code>┌─────────────────────────────────┐
+
 │      PortfolioManager           │  组合层:资金分配、总风控
+
 ├─────────────────────────────────┤
+
 │      SignalArbiter              │  仲裁层:信号优先级、冲突消解
+
 ├─────────────────────────────────┤
+
 │   StrategyA  StrategyB  ...     │  策略层:各自独立产生信号
+
 ├─────────────────────────────────┤
+
 │      ExecutionEngine            │  执行层:统一下单、持仓同步
+
 └─────────────────────────────────┘
+
 </code></pre>
 
 <p>关键原则:<strong>策略层只负责产生信号,不碰资金和下单</strong>。所有策略的输出都是一样的数据结构,组合层统一处理。这样策略可以热插拔,新增策略不影响已有逻辑。</p>
+
 <h2 id="_2">策略注册机制</h2>
+
 <p>每个策略继承同一个基类,实现 <code>on_bar</code> 方法,返回标准化的信号对象。</p>
+
 <pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+
 from enum import Enum
+
 from typing import Optional
+
 import datetime
 
+
+
 class SignalType(Enum):
+
     BUY = 1
+
     SELL = -1
+
     CLOSE = 0
 
+
+
 @dataclass
+
 class Signal:
+
     strategy_id: str
+
     symbol: str
+
     signal_type: SignalType
+
     strength: float          # 0~1,信号强度
+
     price: float
+
     timestamp: datetime.datetime
+
     priority: int = 5        # 数字越小优先级越高
 
+
+
 class BaseStrategy:
+
     def __init__(self, strategy_id: str, symbols: list[str]):
+
         self.strategy_id = strategy_id
+
         self.symbols = symbols
+
         self.positions = {}   # 策略视角的持仓(虚拟)
 
+
+
     def on_bar(self, bar: dict) -&gt; Optional[Signal]:
+
         raise NotImplementedError
 
+
+
     def on_fill(self, signal: Signal, filled_price: float):
+
         &quot;&quot;&quot;成交回报,更新策略内部状态&quot;&quot;&quot;
+
         pass
+
 </code></pre>
 
 <p>注册中心负责管理所有策略的生命周期:</p>
+
 <pre class="codehilite"><code class="language-python">class StrategyRegistry:
+
     def __init__(self):
+
         self._strategies: dict[str, BaseStrategy] = {}
+
         self._enabled: dict[str, bool] = {}
 
+
+
     def register(self, strategy: BaseStrategy):
+
         if strategy.strategy_id in self._strategies:
+
             raise ValueError(f&quot;策略 {strategy.strategy_id} 已注册&quot;)
+
         self._strategies[strategy.strategy_id] = strategy
+
         self._enabled[strategy.strategy_id] = True
 
+
+
     def unregister(self, strategy_id: str):
+
         self._strategies.pop(strategy_id, None)
+
         self._enabled.pop(strategy_id, None)
 
+
+
     def enable(self, strategy_id: str, flag: bool):
+
         self._enabled[strategy_id] = flag
 
+
+
     def active_strategies(self):
+
         return [s for sid, s in self._strategies.items() if self._enabled[sid]]
+
 </code></pre>
 
 <p>注意 <code>enable/disable</code> 的设计。实盘中经常需要临时停掉某个策略(比如连续回撤触发人工干预),但不想丢掉它的持仓状态,所以用开关而不是删除。</p>
+
 <h2 id="_3">信号优先级与冲突处理</h2>
+
 <p>同一根 bar 上,多个策略可能对同一个 symbol 发出方向相反的信号。这时候不能简单按时间先后处理,得有明确的仲裁规则。</p>
+
 <p>我用的规则是<strong>三层过滤</strong>:</p>
+
 <ol>
+
 <li><strong>优先级过滤</strong>:每个策略注册时指定 priority,数字小的先执行</li>
+
 <li><strong>净额合并</strong>:同方向信号合并加仓,反方向信号先平后开</li>
+
 <li><strong>强度加权</strong>:最终仓位大小 = 基础仓位 × 信号强度</li>
+
 </ol>
+
 <pre class="codehilite"><code class="language-python">from collections import defaultdict
 
+
+
 class SignalArbiter:
+
     def __init__(self, registry: StrategyRegistry):
+
         self.registry = registry
 
+
+
     def arbitrate(self, signals: list[Signal]) -&gt; list[Signal]:
+
         # 按 symbol 分组
+
         by_symbol = defaultdict(list)
+
         for sig in signals:
+
             by_symbol[sig.symbol].append(sig)
 
+
+
         result = []
+
         for symbol, sigs in by_symbol.items():
+
             # 按优先级排序
+
             sigs.sort(key=lambda s: s.priority)
+
             result.extend(self._resolve_symbol(symbol, sigs))
+
         return result
 
+
+
     def _resolve_symbol(self, symbol: str, sigs: list[Signal]) -&gt; list[Signal]:
+
         # 分离开平仓
+
         closes = [s for s in sigs if s.signal_type == SignalType.CLOSE]
+
         opens = [s for s in sigs if s.signal_type != SignalType.CLOSE]
 
+
+
         # 先处理平仓
+
         resolved = list(closes)
 
+
+
         # 净额合并开仓信号
+
         net = 0.0
+
         weighted_price = 0.0
+
         total_strength = 0.0
+
         for s in opens:
+
             direction = s.signal_type.value
+
             net += direction * s.strength
+
             weighted_price += s.price * s.strength
+
             total_strength += s.strength
 
+
+
         if abs(net) &lt; 1e-6:
+
             return resolved  # 多空抵消,不开仓
 
+
+
         if total_strength &gt; 0:
+
             avg_price = weighted_price / total_strength
+
         else:
+
             avg_price = opens[0].price
 
+
+
         final_type = SignalType.BUY if net &gt; 0 else SignalType.SELL
+
         resolved.append(Signal(
+
             strategy_id=&quot;ARBITER&quot;,
+
             symbol=symbol,
+
             signal_type=final_type,
+
             strength=min(abs(net), 1.0),
+
             price=avg_price,
+
             timestamp=opens[0].timestamp,
+
             priority=0,
+
         ))
+
         return resolved
+
 </code></pre>
 
 <p>这套逻辑的效果:策略 A 想买 0.6 强度,策略 B 想卖 0.4 强度,仲裁后变成买 0.2 强度。而不是先买后卖白白交两笔手续费。</p>
+
 <h2 id="_4">资金分配</h2>
+
 <p>资金分配是最容易出问题的地方。常见做法有三种:</p>
+
 <ul>
+
 <li><strong>等权分配</strong>:每个策略分 1/N 资金。简单,但忽略了策略质量差异</li>
+
 <li><strong>波动率倒数</strong>:按策略历史波动率的倒数分配。波动大的少给钱</li>
+
 <li><strong>风险平价</strong>:让每个策略对组合的风险贡献相等</li>
+
 </ul>
+
 <p>实盘我用的是<strong>波动率倒数 + 上限约束</strong>,够用且稳定:</p>
+
 <pre class="codehilite"><code class="language-python">import numpy as np
 
+
+
 class CapitalAllocator:
+
     def __init__(self, total_capital: float, max_per_strategy: float = 0.4):
+
         self.total_capital = total_capital
+
         self.max_per_strategy = max_per_strategy
 
+
+
     def allocate(self, strategy_returns: dict[str, np.ndarray]) -&gt; dict[str, float]:
+
         &quot;&quot;&quot;
+
         strategy_returns: {strategy_id: 近期日收益率序列}
+
         &quot;&quot;&quot;
+
         inv_vol = {}
+
         for sid, rets in strategy_returns.items():
+
             vol = np.std(rets)
+
             if vol &lt; 1e-8:
+
                 vol = 1e-8
+
             inv_vol[sid] = 1.0 / vol
 
+
+
         total_inv = sum(inv_vol.values())
+
         weights = {sid: v / total_inv for sid, v in inv_vol.items()}
 
+
+
         # 上限约束 + 迭代再分配
+
         weights = self._apply_cap(weights)
+
+
 
         return {sid: w * self.total_capital for sid, w in weights.items()}
 
+
+
     def _apply_cap(self, weights: dict[str, float]) -&gt; dict[str, float]:
+
         for _ in range(10):
+
             overflow = 0.0
+
             free = []
+
             for sid, w in weights.items():
+
                 if w &gt; self.max_per_strategy:
+
                     overflow += w - self.max_per_strategy
+
                     weights[sid] = self.max_per_strategy
+
                 else:
+
                     free.append(sid)
+
             if overflow &lt; 1e-6 or not free:
+
                 break
+
             per_free = overflow / len(free)
+
             for sid in free:
+
                 weights[sid] += per_free
+
         return weights
+
 </code></pre>
 
 <p><code>_apply_cap</code> 里的迭代是关键。如果简单截断,总权重会小于 1,资金用不满。迭代把超出的部分重新分配给未触顶的策略,直到收敛。</p>
+
 <h2 id="_5">组合层统一风控</h2>
+
 <p>策略各自的风控不够,必须有组合层的总风控。核心监控三个指标:</p>
+
 <pre class="codehilite"><code class="language-python">class PortfolioRiskManager:
+
     def __init__(self, max_drawdown: float = 0.15,
+
                  max_gross_exposure: float = 1.0,
+
                  max_symbol_concentration: float = 0.3):
+
         self.max_drawdown = max_drawdown
+
         self.max_gross_exposure = max_gross_exposure
+
         self.max_symbol_concentration = max_symbol_concentration
+
         self.peak_equity = 0.0
 
+
+
     def check(self, equity: float, positions: dict[str, float],
+
               total_capital: float) -&gt; list[str]:
+
         alerts = []
 
+
+
         # 1. 组合回撤
+
         self.peak_equity = max(self.peak_equity, equity)
+
         if self.peak_equity &gt; 0:
+
             dd = (self.peak_equity - equity) / self.peak_equity
+
             if dd &gt; self.max_drawdown:
+
                 alerts.append(f&quot;DRAWDOWN_BREACH:{dd:.2%}&quot;)
 
+
+
         # 2. 总敞口
+
         gross = sum(abs(v) for v in positions.values())
+
         exposure = gross / total_capital if total_capital &gt; 0 else 0
+
         if exposure &gt; self.max_gross_exposure:
+
             alerts.append(f&quot;EXPOSURE_BREACH:{exposure:.2%}&quot;)
 
+
+
         # 3. 单标的集中度
+
         for sym, pos in positions.items():
+
             conc = abs(pos) / total_capital if total_capital &gt; 0 else 0
+
             if conc &gt; self.max_symbol_concentration:
+
                 alerts.append(f&quot;CONCENTRATION_BREACH:{sym}:{conc:.2%}&quot;)
 
+
+
         return alerts
+
 </code></pre>
 
 <p>触发 <code>DRAWDOWN_BREACH</code> 时的处理策略:不是一刀切清仓,而是<strong>按比例缩减所有新开仓</strong>。比如回撤达到阈值,新信号强度统一乘以 0.5;达到 1.5 倍阈值,乘以 0。这样比直接停策略平滑,避免在底部割肉。</p>
+
 <h2 id="_6">主循环组装</h2>
+
 <p>把上面的模块串起来:</p>
+
 <pre class="codehilite"><code class="language-python">class PortfolioManager:
+
     def __init__(self, total_capital: float):
+
         self.registry = StrategyRegistry()
+
         self.arbiter = SignalArbiter(self.registry)
+
         self.allocator = CapitalAllocator(total_capital)
+
         self.risk = PortfolioRiskManager()
+
         self.total_capital = total_capital
+
         self.capital_map: dict[str, float] = {}
+
         self.positions: dict[str, float] = {}   # symbol -&gt; 数量
 
+
+
     def on_bar(self, bar: dict):
+
         # 1. 收集所有活跃策略的信号
+
         raw_signals = []
+
         for strat in self.registry.active_strategies():
+
             sig = strat.on_bar(bar)
+
             if sig is not None:
+
                 raw_signals.append(sig)
 
+
+
         if not raw_signals:
+
             return
+
+
 
         # 2. 仲裁
+
         final_signals = self.arbiter.arbitrate(raw_signals)
 
+
+
         # 3. 风控检查
+
         equity = self._calc_equity(bar)
+
         alerts = self.risk.check(equity, self.positions, self.total_capital)
+
         scale = self._risk_scale(alerts)
 
+
+
         # 4. 执行
+
         for sig in final_signals:
+
             self._execute(sig, bar, scale)
 
+
+
     def _risk_scale(self, alerts: list[str]) -&gt; float:
+
         for a in alerts:
+
             if a.startswith(&quot;DRAWDOWN_BREACH&quot;):
+
                 dd = float(a.split(&quot;:&quot;)[1].rstrip(&quot;%&quot;)) / 100
+
                 if dd &gt; self.risk.max_drawdown * 1.5:
+
                     return 0.0
+
                 return 0.5
+
         return 1.0
 
+
+
     def _calc_equity(self, bar: dict) -&gt; float:
+
         # 简化:现金 + 持仓市值
+
         pos_value = sum(
+
             qty * bar.get(sym, {}).get(&quot;close&quot;, 0)
+
             for sym, qty in self.positions.items()
+
         )
+
         return self.total_capital + pos_value
 
+
+
     def _execute(self, sig: Signal, bar: dict, scale: float):
+
         if scale &lt;= 0:
+
             return
+
         # 根据策略分配的资金计算下单量
+
         strat_capital = self.capital_map.get(sig.strategy_id, 0)
+
         if strat_capital &lt;= 0:
+
             return
+
         target_value = strat_capital * sig.strength * scale
+
         price = bar[sig.symbol][&quot;close&quot;]
+
         qty = int(target_value / price)
+
         # 这里对接实际的 ExecutionEngine
+
         print(f&quot;[EXEC] {sig.strategy_id} {sig.signal_type.name} &quot;
+
               f&quot;{sig.symbol} qty={qty} @ {price}&quot;)
+
 </code></pre>
 
 <h2 id="_7">几个实战坑</h2>
+
 <p><strong>坑一:策略持仓与组合持仓不一致。</strong> 策略内部维护虚拟持仓,组合层维护真实持仓。两者必须定期对账,否则会出现策略以为空仓、组合实际有仓的情况。建议每根 bar 结束时同步一次。</p>
+
 <p><strong>坑二:资金分配静态化。</strong> 一开始分好的资金比例不能一直用。策略表现会漂移,建议每周或每 20 个交易日重算一次权重,但要有换手约束(单次调整不超过 20%),避免频繁调仓。</p>
+
 <p><strong>坑三:优先级写死。</strong> 策略优先级不该是常量。我的做法是优先级 = 基础优先级 + 近期回撤惩罚。回撤大的策略优先级自动降低,让表现好的策略先执行。</p>
+
 <p><strong>坑四:信号时间戳不一致。</strong> 不同策略可能用不同频率的 bar,仲裁时要用统一的时间戳对齐。建议所有策略都订阅同一个时钟,<code>on_bar</code> 由主循环统一触发。</p>
+
 <h2 id="_8">小结</h2>
+
 <p>多策略架构的核心不是把策略堆在一起,而是<strong>把策略的决策和组合的管理彻底解耦</strong>。策略只管产生信号,组合层负责仲裁、分配、风控、执行。这样每个模块可以独立测试、独立替换,策略数量增长时系统复杂度是线性的,不是指数级的。</p>
+
 <p>代码里的数据结构设计比算法本身更重要。<code>Signal</code> 这个 dataclass 定义好了,后面所有模块的接口都自然清晰。如果一开始信号结构没设计好,后面每加一个策略就要改一堆代码。</p>
+
 <p>更多内容请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;策略组合&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;多策略&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;架构设计&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;Python&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">策略组合</span><span class="tag-badge">多策略</span><span class="tag-badge">架构设计</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
