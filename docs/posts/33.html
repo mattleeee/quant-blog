@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3连败熔断机制：保护资金的自动停损设计 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="3连败熔断机制：保护资金的自动停损设计
-
-策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。...">
+        <meta name="description" content="策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。这篇文章讲一个简单的工程手段：3连败熔断——当策略连续3次交易亏损时，自动暂停该策略，进入冷却期，避免情绪化或">
     <meta name="keywords" content="熔断,连败,资金保护,自动停损">
     <meta property="og:title" content="3连败熔断机制：保护资金的自动停损设计">
-    <meta property="og:description" content="3连败熔断机制：保护资金的自动停损设计
-
-策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。...">
+    <meta property="og:description" content="策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。这篇文章讲一个简单的工程手段：3连败熔断——当策略连续3次交易亏损时，自动暂停该策略，进入冷却期，避免情绪化或">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/33.html">
@@ -41,285 +37,563 @@
             </div>
             <div class="post-content">
 <p>策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择"再扛一扛"，结果小亏变大亏。这篇文章讲一个简单的工程手段：<strong>3连败熔断</strong>——当策略连续3次交易亏损时，自动暂停该策略，进入冷却期，避免情绪化或系统性失效下的持续失血。</p>
+
 <h2 id="_1">为什么是"连败"而不是"总亏损"</h2>
+
 <p>单笔亏损是随机的，连续亏损往往意味着两件事之一：</p>
+
 <ol>
+
 <li><strong>策略失效</strong>：市场结构变了，原来的edge不存在了；</li>
+
 <li><strong>运气不好</strong>：正常策略也会出现连败，但概率有限。</li>
+
 </ol>
+
 <p>假设一个策略胜率50%，连续3次亏损的概率是 0.5³ = 12.5%，不算罕见。但如果一个策略原本胜率60%，突然出现3连败，就值得警惕——可能是市场状态切换的信号。</p>
+
 <p>用连败作为触发条件，比用"总亏损金额"更敏感，因为它捕捉的是<strong>短期状态变化</strong>，而不是累计结果。总亏损10%可能花了一个月，但3连败可能只用了3天，后者更可能是策略失效的前兆。</p>
+
 <h2 id="_2">熔断机制的四个组成部分</h2>
+
 <p>一个完整的熔断机制包含：</p>
+
 <table>
+
 <thead>
+
 <tr>
+
 <th>组件</th>
+
 <th>作用</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td>触发条件</td>
+
 <td>什么情况下触发熔断</td>
+
 </tr>
+
 <tr>
+
 <td>状态管理</td>
+
 <td>记录当前连败次数、熔断状态</td>
+
 </tr>
+
 <tr>
+
 <td>冷却期</td>
+
 <td>熔断后多久自动恢复</td>
+
 </tr>
+
 <tr>
+
 <td>手动恢复</td>
+
 <td>人工干预解除熔断</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <p>下面逐个拆解并给出代码。</p>
+
 <h3 id="_3">触发条件</h3>
+
 <p>核心逻辑很简单：每笔交易结束后，如果亏损，<code>consecutive_losses += 1</code>；如果盈利，重置为0。当 <code>consecutive_losses &gt;= 3</code> 时，触发熔断。</p>
+
 <pre class="codehilite"><code class="language-python">def update_on_trade(self, pnl: float):
+
     if pnl &lt; 0:
+
         self.consecutive_losses += 1
+
     else:
+
         self.consecutive_losses = 0
 
+
+
     if self.consecutive_losses &gt;= self.max_consecutive_losses:
+
         self.trigger_circuit_breaker()
+
 </code></pre>
 
 <p>这里有个细节：<strong>盈亏为0怎么算</strong>？建议算作非亏损，重置连败。因为平局不构成"失败信号"。</p>
+
 <h3 id="_4">冷却期设计</h3>
+
 <p>熔断之后不能永久停摆，否则策略就废了。需要一个冷却期，到期后自动恢复。冷却期长度的选择：</p>
+
 <ul>
+
 <li><strong>太短</strong>：市场状态还没恢复，恢复交易后继续亏；</li>
+
 <li><strong>太长</strong>：错过策略恢复后的盈利机会。</li>
+
 </ul>
+
 <p>经验值：冷却期设为<strong>策略平均持仓周期的3-5倍</strong>。比如日内策略持仓平均1天，冷却期设3-5天；波段策略持仓平均5天，冷却期设15-25天。</p>
+
 <p>冷却期用<strong>时间戳</strong>而不是"交易次数"来计量，因为交易次数依赖信号触发，不可控。时间到了就恢复，简单可靠。</p>
+
 <pre class="codehilite"><code class="language-python">from datetime import datetime, timedelta
 
+
+
 def trigger_circuit_breaker(self):
+
     self.is_halted = True
+
     self.halt_until = datetime.now() + timedelta(days=self.cooldown_days)
+
     self.halt_reason = f&quot;连续{self.consecutive_losses}次亏损&quot;
+
     self._log_halt()
+
 </code></pre>
 
 <h3 id="_5">手动恢复流程</h3>
+
 <p>冷却期结束不代表自动恢复。更稳妥的做法是：<strong>冷却期结束后，进入"待确认"状态，需要人工确认才恢复交易</strong>。</p>
+
 <p>原因：冷却期只是防止短期连败，但如果是策略根本性失效，冷却期结束也不该恢复。人工确认这一步，是给策略一个"重新评估"的机会。</p>
+
 <p>流程：</p>
+
 <ol>
+
 <li>冷却期结束 → 状态变为 <code>PENDING_REVIEW</code></li>
+
 <li>人工检查：市场环境是否变化？策略参数是否需要调整？</li>
+
 <li>确认恢复 → 重置连败计数，状态变为 <code>ACTIVE</code></li>
+
 <li>或者：延长冷却期 / 永久停用</li>
+
 </ol>
+
 <pre class="codehilite"><code class="language-python">def review_and_resume(self, resume: bool):
+
     if not self.is_halted:
+
         return
+
     if datetime.now() &lt; self.halt_until:
+
         raise RuntimeError(&quot;冷却期未结束&quot;)
+
     if resume:
+
         self.is_halted = False
+
         self.consecutive_losses = 0
+
         self.halt_until = None
+
         self.state = &quot;ACTIVE&quot;
+
     else:
+
         self.halt_until = datetime.now() + timedelta(days=self.cooldown_days)
+
         self.state = &quot;PENDING_REVIEW&quot;
+
 </code></pre>
 
 <h2 id="_6">完整实现</h2>
+
 <p>把上面的逻辑整合成一个可复用的类：</p>
+
 <pre class="codehilite"><code class="language-python">import json
+
 import logging
+
 from datetime import datetime, timedelta
+
 from enum import Enum
+
 from pathlib import Path
 
+
+
 logging.basicConfig(level=logging.INFO, format=&quot;%(asctime)s [%(levelname)s] %(message)s&quot;)
+
 logger = logging.getLogger(__name__)
 
 
+
+
+
 class StrategyState(Enum):
+
     ACTIVE = &quot;ACTIVE&quot;
+
     HALTED = &quot;HALTED&quot;
+
     PENDING_REVIEW = &quot;PENDING_REVIEW&quot;
 
 
+
+
+
 class CircuitBreaker:
+
     &quot;&quot;&quot;
+
     连败熔断器：连续N次亏损后暂停策略，冷却期结束后需人工确认恢复。
+
     &quot;&quot;&quot;
+
+
 
     def __init__(
+
         self,
+
         strategy_name: str,
+
         max_consecutive_losses: int = 3,
+
         cooldown_days: int = 5,
+
         state_file: str = &quot;circuit_breaker_state.json&quot;,
+
     ):
+
         self.strategy_name = strategy_name
+
         self.max_consecutive_losses = max_consecutive_losses
+
         self.cooldown_days = cooldown_days
+
         self.state_file = Path(state_file)
 
+
+
         self.consecutive_losses = 0
+
         self.state = StrategyState.ACTIVE
+
         self.halt_until = None
+
         self.halt_reason = None
+
+
 
         self._load_state()
 
+
+
     # ---------- 核心接口 ----------
 
+
+
     def can_trade(self) -&gt; bool:
+
         &quot;&quot;&quot;策略是否允许开仓&quot;&quot;&quot;
+
         if self.state == StrategyState.ACTIVE:
+
             return True
+
         if self.state == StrategyState.HALTED and self.halt_until:
+
             if datetime.now() &gt;= self.halt_until:
+
                 self.state = StrategyState.PENDING_REVIEW
+
                 self._save_state()
+
                 logger.info(f&quot;[{self.strategy_name}] 冷却期结束，等待人工确认&quot;)
+
             return False
+
         return False
 
+
+
     def on_trade_closed(self, pnl: float):
+
         &quot;&quot;&quot;每笔交易平仓后调用&quot;&quot;&quot;
+
         if pnl &lt; 0:
+
             self.consecutive_losses += 1
+
             logger.info(
+
                 f&quot;[{self.strategy_name}] 亏损 {pnl:.2f}，连败 {self.consecutive_losses} 次&quot;
+
             )
+
         else:
+
             if self.consecutive_losses &gt; 0:
+
                 logger.info(f&quot;[{self.strategy_name}] 盈利，连败清零&quot;)
+
             self.consecutive_losses = 0
+
+
 
         if self.consecutive_losses &gt;= self.max_consecutive_losses:
+
             self._trigger_halt()
 
+
+
         self._save_state()
+
+
 
     def manual_resume(self, resume: bool):
+
         &quot;&quot;&quot;人工确认恢复或延长冷却&quot;&quot;&quot;
+
         if self.state != StrategyState.PENDING_REVIEW:
+
             raise RuntimeError(f&quot;当前状态 {self.state.value}，无法执行恢复操作&quot;)
 
+
+
         if resume:
+
             self.state = StrategyState.ACTIVE
+
             self.consecutive_losses = 0
+
             self.halt_until = None
+
             self.halt_reason = None
+
             logger.info(f&quot;[{self.strategy_name}] 人工确认恢复交易&quot;)
+
         else:
+
             self.halt_until = datetime.now() + timedelta(days=self.cooldown_days)
+
             self.state = StrategyState.HALTED
+
             logger.info(f&quot;[{self.strategy_name}] 延长冷却 {self.cooldown_days} 天&quot;)
+
+
 
         self._save_state()
 
+
+
     def status(self) -&gt; dict:
+
         return {
+
             &quot;strategy&quot;: self.strategy_name,
+
             &quot;state&quot;: self.state.value,
+
             &quot;consecutive_losses&quot;: self.consecutive_losses,
+
             &quot;halt_until&quot;: self.halt_until.isoformat() if self.halt_until else None,
+
             &quot;halt_reason&quot;: self.halt_reason,
+
         }
+
+
 
     # ---------- 内部方法 ----------
 
+
+
     def _trigger_halt(self):
+
         self.state = StrategyState.HALTED
+
         self.halt_until = datetime.now() + timedelta(days=self.cooldown_days)
+
         self.halt_reason = f&quot;连续{self.consecutive_losses}次亏损&quot;
+
         logger.warning(
+
             f&quot;[{self.strategy_name}] 触发熔断！{self.halt_reason}，&quot;
+
             f&quot;冷却至 {self.halt_until:%Y-%m-%d %H:%M}&quot;
+
         )
 
+
+
     def _save_state(self):
+
         data = {
+
             &quot;strategy_name&quot;: self.strategy_name,
+
             &quot;consecutive_losses&quot;: self.consecutive_losses,
+
             &quot;state&quot;: self.state.value,
+
             &quot;halt_until&quot;: self.halt_until.isoformat() if self.halt_until else None,
+
             &quot;halt_reason&quot;: self.halt_reason,
+
         }
+
         self.state_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
+
+
     def _load_state(self):
+
         if not self.state_file.exists():
+
             return
+
         try:
+
             data = json.loads(self.state_file.read_text())
+
             self.consecutive_losses = data.get(&quot;consecutive_losses&quot;, 0)
+
             self.state = StrategyState(data.get(&quot;state&quot;, &quot;ACTIVE&quot;))
+
             halt_until = data.get(&quot;halt_until&quot;)
+
             self.halt_until = datetime.fromisoformat(halt_until) if halt_until else None
+
             self.halt_reason = data.get(&quot;halt_reason&quot;)
+
             logger.info(f&quot;[{self.strategy_name}] 状态已加载: {self.status()}&quot;)
+
         except Exception as e:
+
             logger.error(f&quot;状态加载失败: {e}，使用默认值&quot;)
+
 </code></pre>
 
 <h3 id="_7">使用示例</h3>
+
 <pre class="codehilite"><code class="language-python">if __name__ == &quot;__main__&quot;:
+
     cb = CircuitBreaker(
+
         strategy_name=&quot;momentum_v1&quot;,
+
         max_consecutive_losses=3,
+
         cooldown_days=5,
+
     )
 
+
+
     # 模拟交易序列
+
     trades = [-100, -80, -120, 50, -60, -70, -90]
+
     for pnl in trades:
+
         if not cb.can_trade():
+
             print(f&quot;策略已熔断，跳过交易 pnl={pnl}&quot;)
+
             continue
+
         cb.on_trade_closed(pnl)
 
+
+
     print(&quot;当前状态:&quot;, cb.status())
+
 </code></pre>
 
 <p>输出大致如下：</p>
+
 <pre class="codehilite"><code>亏损 -100.00，连败 1 次
+
 亏损 -80.00，连败 2 次
+
 亏损 -120.00，连败 3 次
+
 触发熔断！连续3次亏损，冷却至 2025-01-20 10:30
+
 策略已熔断，跳过交易 pnl=50
+
 ...
+
 </code></pre>
 
 <h2 id="_8">几个工程细节</h2>
+
 <h3 id="1">1. 状态持久化</h3>
+
 <p>熔断状态必须落盘。程序重启后，如果不加载历史状态，连败计数会清零，熔断形同虚设。上面的代码用JSON文件存储，简单够用。如果多策略并行，建议用SQLite或者Redis。</p>
+
 <h3 id="2">2. 与仓位管理联动</h3>
+
 <p>熔断触发后，不只是"不开新仓"，还要考虑<strong>已有持仓怎么办</strong>。两种策略：</p>
+
 <ul>
+
 <li><strong>保守</strong>：立即平掉所有持仓；</li>
+
 <li><strong>激进</strong>：允许已有持仓按原计划离场，但不加仓。</li>
+
 </ul>
+
 <p>建议用保守方案。熔断本身说明策略可能失效，继续持有等于赌它没失效。</p>
+
 <h3 id="3">3. 多策略独立熔断</h3>
+
 <p>如果你跑多个策略，熔断器要按策略独立。不能因为策略A连败，把策略B也停了。每个策略有自己的 <code>CircuitBreaker</code> 实例，状态文件按策略名区分。</p>
+
 <h3 id="4">4. 熔断日志</h3>
+
 <p>每次触发熔断、恢复、延长冷却，都要打日志。事后复盘时，这些日志是判断"熔断阈值是否合理"的关键依据。如果发现某策略频繁触发熔断但恢复后表现良好，说明阈值太严；反之则太松。</p>
+
 <h2 id="_9">参数怎么定</h2>
+
 <p>三个参数：<code>max_consecutive_losses</code>、<code>cooldown_days</code>、以及是否自动恢复。</p>
+
 <p><strong>max_consecutive_losses</strong>：用历史回测数据统计"最大连败次数"的分布。如果历史最大连败是5次，那阈值设为6或7比较合理，设3会频繁误触发。一般建议：<strong>历史最大连败 + 1~2</strong>。</p>
+
 <p><strong>cooldown_days</strong>：参考策略的平均持仓周期。持仓越短，冷却期越短。日内策略3天，波段策略10-15天。</p>
+
 <p><strong>自动恢复 vs 人工确认</strong>：个人建议人工确认。自动化系统最怕"无人值守下的持续亏损"，人工确认这一步虽然麻烦，但能拦住大部分系统性风险。</p>
+
 <h2 id="_10">最后</h2>
+
 <p>熔断机制本质上是<strong>给策略加一个"止损开关"</strong>。它不提高策略的收益率，但能显著降低回撤尾部风险。对于实盘资金，这个机制值得加上。</p>
+
 <p>实现上不复杂，核心就是三件事：计数、状态机、持久化。上面的代码可以直接拿去用，按自己的策略参数调整即可。</p>
+
 <p>更多内容请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;熔断&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;连败&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;资金保护&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;自动停损&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">熔断</span><span class="tag-badge">连败</span><span class="tag-badge">资金保护</span><span class="tag-badge">自动停损</span></div>
             <div class="post-footer">
