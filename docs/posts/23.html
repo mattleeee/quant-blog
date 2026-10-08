@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Python请求频率控制：从sleep到令牌桶的演进 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="Python请求频率控制：从sleep到令牌桶的演进
-
-做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。...">
+        <meta name="description" content="做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。 这篇文章梳理三种频率控制方案：sleep延迟、基于时间窗口的计数">
     <meta name="keywords" content="频率控制,令牌桶,API限频,Python">
     <meta property="og:title" content="Python请求频率控制：从sleep到令牌桶的演进">
-    <meta property="og:description" content="Python请求频率控制：从sleep到令牌桶的演进
-
-做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。...">
+    <meta property="og:description" content="做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。 这篇文章梳理三种频率控制方案：sleep延迟、基于时间窗口的计数">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/23.html">
@@ -41,361 +37,711 @@
             </div>
             <div class="post-content">
 <p>做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。</p>
+
 <p>这篇文章梳理三种频率控制方案：<code>sleep</code>延迟、基于时间窗口的计数器、令牌桶算法。从最简单的开始，逐步演进到生产级方案。</p>
+
 <h2 id="timesleep">方案一：time.sleep——最原始的做法</h2>
+
 <p>最直觉的做法是在每次请求后加一个固定延迟：</p>
+
 <pre class="codehilite"><code class="language-python">import time
+
 import requests
 
+
+
 def fetch_data(url):
+
     resp = requests.get(url)
+
     time.sleep(0.5)  # 每次请求后等0.5秒
+
     return resp.json()
 
+
+
 # 循环调用
+
 for i in range(10):
+
     data = fetch_data(f&quot;https://api.example.com/ticker?page={i}&quot;)
+
     print(data)
+
 </code></pre>
 
 <p>这种方式简单粗暴，但问题很明显：</p>
+
 <ul>
+
 <li><strong>效率低</strong>：如果API允许每秒5次请求，sleep(0.5)意味着你每秒只用了2次配额，浪费了60%的吞吐量</li>
+
 <li><strong>不考虑实际耗时</strong>：如果请求本身耗时0.3秒，实际间隔是0.8秒，而不是0.5秒</li>
+
 <li><strong>无法应对突发</strong>：所有请求被均匀拉平，无法在需要时快速连续请求</li>
+
 </ul>
+
 <p><strong>适用场景</strong>：单次脚本、请求量极小（几十次以内）、对时间不敏感的场景。超过这个范围就不合适了。</p>
+
 <h2 id="_1">方案二：基于时间窗口的计数器</h2>
+
 <p>比<code>sleep</code>进一步，我们可以记录请求时间戳，动态计算需要等待多久：</p>
+
 <pre class="codehilite"><code class="language-python">import time
+
 import requests
+
 from collections import deque
 
+
+
 class RateLimiter:
+
     &quot;&quot;&quot;滑动窗口限流器：限制任意window秒内最多max_calls次请求&quot;&quot;&quot;
 
+
+
     def __init__(self, max_calls: int, window: float = 1.0):
+
         self.max_calls = max_calls
+
         self.window = window
+
         self.timestamps = deque()
 
+
+
     def acquire(self):
+
         now = time.monotonic()
 
+
+
         # 清除窗口外的记录
+
         while self.timestamps and now - self.timestamps[0] &gt;= self.window:
+
             self.timestamps.popleft()
 
+
+
         # 如果窗口内已满，等待到最早那次请求过期
+
         if len(self.timestamps) &gt;= self.max_calls:
+
             sleep_time = self.window - (now - self.timestamps[0])
+
             if sleep_time &gt; 0:
+
                 time.sleep(sleep_time)
+
             now = time.monotonic()
+
             # 再次清理
+
             while self.timestamps and now - self.timestamps[0] &gt;= self.window:
+
                 self.timestamps.popleft()
+
+
 
         self.timestamps.append(time.monotonic())
 
+
+
     def __enter__(self):
+
         self.acquire()
+
         return self
 
+
+
     def __exit__(self, *args):
+
         pass
+
+
+
 
 
 # 使用示例：限制每秒最多3次请求
+
 limiter = RateLimiter(max_calls=3, window=1.0)
 
+
+
 for i in range(10):
+
     with limiter:
+
         resp = requests.get(f&quot;https://api.example.com/data/{i}&quot;)
+
         print(f&quot;Request {i}: {resp.status_code}&quot;)
+
 </code></pre>
 
 <p>这个方案比<code>sleep</code>好在哪里：</p>
+
 <ol>
+
 <li><strong>充分利用配额</strong>：允许在1秒内快速发3次，然后等待窗口滑动</li>
+
 <li><strong>精确控制</strong>：基于实际时间戳，不受请求耗时影响</li>
+
 <li><strong>滑动窗口</strong>：不是固定窗口（如每整秒重置），而是任意1秒内不超过N次</li>
+
 </ol>
+
 <p><strong>但仍然有问题</strong>：</p>
+
 <ul>
+
 <li><strong>无法处理突发流量</strong>：如果业务需要短时间内发一批请求（比如批量下单），滑动窗口会强制排队</li>
+
 <li><strong>线程安全问题</strong>：多线程环境下<code>deque</code>的操作需要加锁</li>
+
 <li><strong>不够平滑</strong>：窗口边界处可能出现“前1秒末尾3次 + 后1秒开头3次 = 0.1秒内6次”的情况</li>
+
 </ul>
+
 <p><strong>适用场景</strong>：单线程脚本、对突发没有要求的定时任务、API限频规则是“N次/秒”的简单场景。</p>
+
 <h2 id="_2">方案三：令牌桶算法</h2>
+
 <p>令牌桶（Token Bucket）是业界最常用的限流算法，Nginx、Guava RateLimiter、各种API网关都在用。</p>
+
 <h3 id="_3">核心原理</h3>
+
 <p>想象一个桶，系统以固定速率往桶里放令牌（token）。每个请求需要从桶里取一个令牌才能执行。桶有容量上限，满了就丢弃新令牌。</p>
+
 <p>关键特性：</p>
+
 <ul>
+
 <li><strong>平均速率受控</strong>：令牌生成速率 = 长期平均请求速率</li>
+
 <li><strong>允许突发</strong>：桶里积累的令牌可以一次性消耗，支持短时突发流量</li>
+
 <li><strong>平滑限流</strong>：不会出现窗口算法的边界问题</li>
+
 </ul>
+
 <p>参数：
+
 - <code>rate</code>：每秒生成多少令牌（即长期QPS上限）
+
 - <code>capacity</code>：桶容量（即允许的最大突发量）</p>
+
 <h3 id="python">Python实现</h3>
+
 <pre class="codehilite"><code class="language-python">import time
+
 import threading
+
 import requests
 
 
+
+
+
 class TokenBucket:
+
     &quot;&quot;&quot;线程安全的令牌桶限流器&quot;&quot;&quot;
 
+
+
     def __init__(self, rate: float, capacity: int):
+
         &quot;&quot;&quot;
+
         :param rate: 每秒生成的令牌数（QPS）
+
         :param capacity: 桶容量，允许的最大突发请求数
+
         &quot;&quot;&quot;
+
         self.rate = rate
+
         self.capacity = capacity
+
         self.tokens = capacity  # 初始装满
+
         self.last_refill = time.monotonic()
+
         self._lock = threading.Lock()
 
+
+
     def _refill(self):
+
         &quot;&quot;&quot;补充令牌&quot;&quot;&quot;
+
         now = time.monotonic()
+
         elapsed = now - self.last_refill
+
         new_tokens = elapsed * self.rate
+
         if new_tokens &gt; 0:
+
             self.tokens = min(self.capacity, self.tokens + new_tokens)
+
             self.last_refill = now
 
+
+
     def acquire(self, tokens: int = 1, block: bool = True, timeout: float = None):
+
         &quot;&quot;&quot;
+
         获取令牌
+
         :param tokens: 需要的令牌数
+
         :param block: 是否阻塞等待
+
         :param timeout: 最大等待时间（秒）
+
         :return: 是否成功获取
+
         &quot;&quot;&quot;
+
         deadline = None if timeout is None else time.monotonic() + timeout
 
+
+
         while True:
+
             with self._lock:
+
                 self._refill()
+
                 if self.tokens &gt;= tokens:
+
                     self.tokens -= tokens
+
                     return True
 
+
+
                 if not block:
+
                     return False
+
+
 
                 # 计算需要等待的时间
+
                 deficit = tokens - self.tokens
+
                 wait_time = deficit / self.rate
 
+
+
             if deadline is not None:
+
                 remaining = deadline - time.monotonic()
+
                 if remaining &lt;= 0:
+
                     return False
+
                 wait_time = min(wait_time, remaining)
+
+
 
             time.sleep(wait_time)
 
+
+
     def __enter__(self):
+
         self.acquire()
+
         return self
 
+
+
     def __exit__(self, *args):
+
         pass
 
 
+
+
+
 # 使用示例
+
 bucket = TokenBucket(rate=5, capacity=10)  # 平均5 QPS，允许突发10次
 
+
+
 for i in range(20):
+
     with bucket:
+
         resp = requests.get(f&quot;https://api.example.com/order/{i}&quot;)
+
         print(f&quot;[{time.strftime('%H:%M:%S')}] Request {i}: {resp.status_code}&quot;)
+
 </code></pre>
 
 <h3 id="_4">实际效果</h3>
+
 <p>假设<code>rate=5, capacity=10</code>：</p>
+
 <ul>
+
 <li>空闲一段时间后，桶满（10个令牌），可以瞬间发10次请求</li>
+
 <li>之后令牌以每秒5个的速度补充，长期平均QPS稳定在5</li>
+
 <li>如果持续请求超过5 QPS，桶会逐渐见底，后续请求被限速</li>
+
 </ul>
+
 <p>这正是量化交易中需要的：<strong>平时低频轮询，行情突变时可以短时间高频拉取数据</strong>。</p>
+
 <h3 id="_5">支持不同权重的请求</h3>
+
 <p>有些API对不同接口有不同的频率权重（比如查询接口权重1，下单接口权重5）。令牌桶天然支持：</p>
+
 <pre class="codehilite"><code class="language-python">bucket = TokenBucket(rate=10, capacity=20)
 
+
+
 # 普通查询，消耗1个令牌
+
 bucket.acquire(tokens=1)
 
+
+
 # 下单操作，消耗5个令牌
+
 bucket.acquire(tokens=5)
+
 </code></pre>
 
 <h3 id="_6">非阻塞模式</h3>
+
 <p>在高频策略中，有时候宁可跳过也不等待：</p>
+
 <pre class="codehilite"><code class="language-python">bucket = TokenBucket(rate=3, capacity=5)
 
+
+
 def try_fetch(url):
+
     if bucket.acquire(block=False):
+
         return requests.get(url).json()
+
     else:
+
         # 限流了，走降级逻辑
+
         return None
+
 </code></pre>
 
 <h2 id="_7">三种方案对比</h2>
+
 <table>
+
 <thead>
+
 <tr>
+
 <th>维度</th>
+
 <th>sleep</th>
+
 <th>滑动窗口</th>
+
 <th>令牌桶</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td>实现复杂度</td>
+
 <td>极低</td>
+
 <td>中等</td>
+
 <td>中等</td>
+
 </tr>
+
 <tr>
+
 <td>配额利用率</td>
+
 <td>低</td>
+
 <td>高</td>
+
 <td>高</td>
+
 </tr>
+
 <tr>
+
 <td>支持突发</td>
+
 <td>否</td>
+
 <td>否</td>
+
 <td>是</td>
+
 </tr>
+
 <tr>
+
 <td>线程安全</td>
+
 <td>N/A</td>
+
 <td>需额外处理</td>
+
 <td>内置锁</td>
+
 </tr>
+
 <tr>
+
 <td>支持权重</td>
+
 <td>否</td>
+
 <td>否</td>
+
 <td>是</td>
+
 </tr>
+
 <tr>
+
 <td>边界问题</td>
+
 <td>无</td>
+
 <td>有</td>
+
 <td>无</td>
+
 </tr>
+
 <tr>
+
 <td>适用场景</td>
+
 <td>简单脚本</td>
+
 <td>单线程定时任务</td>
+
 <td>生产级系统</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <h2 id="_8">生产环境注意事项</h2>
+
 <h3 id="1-monotonic">1. 使用 monotonic 时钟</h3>
+
 <p><code>time.time()</code>受系统时间调整影响（NTP同步、手动改时间），<code>time.monotonic()</code>单调递增，更适合做限流。上面的代码已经用了<code>monotonic</code>。</p>
+
 <h3 id="2">2. 多进程场景</h3>
+
 <p>令牌桶在单进程内有效。如果开了多个进程/容器，需要把状态放到Redis：</p>
+
 <pre class="codehilite"><code class="language-python">import redis
+
 import time
 
+
+
 class RedisTokenBucket:
+
     &quot;&quot;&quot;基于Redis的分布式令牌桶，用Lua脚本保证原子性&quot;&quot;&quot;
 
+
+
     LUA_SCRIPT = &quot;&quot;&quot;
+
     local key = KEYS[1]
+
     local rate = tonumber(ARGV[1])
+
     local capacity = tonumber(ARGV[2])
+
     local now = tonumber(ARGV[3])
+
     local requested = tonumber(ARGV[4])
 
+
+
     local bucket = redis.call('hmget', key, 'tokens', 'last_refill')
+
     local tokens = tonumber(bucket[1]) or capacity
+
     local last_refill = tonumber(bucket[2]) or now
 
+
+
     local elapsed = now - last_refill
+
     tokens = math.min(capacity, tokens + elapsed * rate)
 
+
+
     local allowed = 0
+
     if tokens &gt;= requested then
+
         tokens = tokens - requested
+
         allowed = 1
+
     end
 
+
+
     redis.call('hmset', key, 'tokens', tokens, 'last_refill', now)
+
     redis.call('expire', key, math.ceil(capacity / rate) + 1)
 
+
+
     return allowed
+
     &quot;&quot;&quot;
 
+
+
     def __init__(self, redis_client, key, rate, capacity):
+
         self.redis = redis_client
+
         self.key = key
+
         self.rate = rate
+
         self.capacity = capacity
+
         self.script = self.redis.register_script(self.LUA_SCRIPT)
 
+
+
     def acquire(self, tokens=1):
+
         now = time.time()
+
         result = self.script(
+
             keys=[self.key],
+
             args=[self.rate, self.capacity, now, tokens]
+
         )
+
         return bool(result)
+
 </code></pre>
 
 <h3 id="3">3. 结合重试机制</h3>
+
 <p>限流器只负责控制发送速率，网络异常和API返回的错误码还需要重试逻辑配合：</p>
+
 <pre class="codehilite"><code class="language-python">import requests
+
 from requests.adapters import HTTPAdapter
+
 from urllib3.util.retry import Retry
 
+
+
 def create_session():
+
     session = requests.Session()
+
     retry = Retry(
+
         total=3,
+
         backoff_factor=0.5,
+
         status_forcelist=[429, 500, 502, 503],
+
         respect_retry_after_header=True,  # 尊重服务端的Retry-After
+
     )
+
     adapter = HTTPAdapter(max_retries=retry)
+
     session.mount(&quot;https://&quot;, adapter)
+
     return session
+
 </code></pre>
 
 <p>注意<code>respect_retry_after_header=True</code>，很多API在返回429时会带上<code>Retry-After</code>头告诉你等多久，这个信息比你自己猜要准确。</p>
+
 <h3 id="4">4. 动态调整速率</h3>
+
 <p>交易所的限频规则可能变化，或者你的账户VIP等级提升后配额增加。令牌桶的<code>rate</code>和<code>capacity</code>应该支持运行时调整：</p>
+
 <pre class="codehilite"><code class="language-python">class AdaptiveTokenBucket(TokenBucket):
+
     def update_rate(self, new_rate: float):
+
         with self._lock:
+
             self._refill()  # 先按旧速率结算
+
             self.rate = new_rate
+
 </code></pre>
 
 <h2 id="_9">选型建议</h2>
+
 <ul>
+
 <li><strong>写个一次性脚本抓几十条数据</strong>：<code>time.sleep</code>够了，别过度设计</li>
+
 <li><strong>单线程定时任务，每分钟拉一次行情</strong>：滑动窗口计数器，简单可靠</li>
+
 <li><strong>量化交易系统、多线程爬虫、需要处理突发的场景</strong>：令牌桶，这是标准答案</li>
+
 <li><strong>分布式系统</strong>：Redis + Lua的令牌桶</li>
+
 </ul>
+
 <p>令牌桶不是银弹，但它是目前工程实践中平衡了简单性、正确性和灵活性的最优解。理解它的原理，能帮你在面对具体限频需求时做出合理的参数选择。</p>
+
 <p>更多Python自动化与量化实战内容，请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;频率控制&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;令牌桶&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;API限频&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;Python&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">频率控制</span><span class="tag-badge">令牌桶</span><span class="tag-badge">API限频</span><span class="tag-badge">Python</span></div>
             <div class="post-footer">
