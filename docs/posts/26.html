@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>技术指标实战：均线系统的参数选择与信号逻辑 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="技术指标实战：均线系统的参数选择与信号逻辑
-
-均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。...">
+        <meta name="description" content="均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。 一、均线的数学本质与类型选择 ">
     <meta name="keywords" content="均线系统,技术指标,参数选择,信号">
     <meta property="og:title" content="技术指标实战：均线系统的参数选择与信号逻辑">
-    <meta property="og:description" content="技术指标实战：均线系统的参数选择与信号逻辑
-
-均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。...">
+    <meta property="og:description" content="均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。 一、均线的数学本质与类型选择 ">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/26.html">
@@ -41,236 +37,455 @@
             </div>
             <div class="post-content">
 <p>均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在"金叉买入、死叉卖出"的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。</p>
+
 <h2 id="_1">一、均线的数学本质与类型选择</h2>
+
 <p>均线的核心是对价格序列做低通滤波。不同的均线类型,本质是滤波器设计不同。</p>
+
 <h3 id="11">1.1 常见均线类型</h3>
+
 <ul>
+
 <li><strong>SMA(Simple Moving Average)</strong>:等权滑动平均,滞后最大,但对趋势的平滑最稳定。</li>
+
 <li><strong>EMA(Exponential Moving Average)</strong>:指数加权,近期价格权重高,响应快,但更容易被噪音触发。</li>
+
 <li><strong>WMA(Weighted Moving Average)</strong>:线性加权,介于两者之间。</li>
+
 <li><strong>HMA(Hull Moving Average)</strong>:通过加权组合降低滞后,适合短周期。</li>
+
 </ul>
+
 <p>选择原则很简单:<strong>周期越短,越应该用EMA或HMA;周期越长,SMA和EMA差别不大。</strong></p>
+
 <h3 id="12-pandas">1.2 用pandas快速实现</h3>
+
 <pre class="codehilite"><code class="language-python">import pandas as pd
+
 import numpy as np
 
+
+
 def sma(series: pd.Series, window: int) -&gt; pd.Series:
+
     return series.rolling(window=window, min_periods=window).mean()
 
+
+
 def ema(series: pd.Series, window: int) -&gt; pd.Series:
+
     return series.ewm(span=window, adjust=False).mean()
 
+
+
 def wma(series: pd.Series, window: int) -&gt; pd.Series:
+
     weights = np.arange(1, window + 1)
+
     return series.rolling(window).apply(
+
         lambda x: np.dot(x, weights) / weights.sum(), raw=True
+
     )
 
+
+
 def hma(series: pd.Series, window: int) -&gt; pd.Series:
+
     half = int(window / 2)
+
     sqrt_w = int(np.sqrt(window))
+
     wma_half = wma(series, half)
+
     wma_full = wma(series, window)
+
     return wma(2 * wma_half - wma_full, sqrt_w)
+
 </code></pre>
 
 <p><code>ewm(adjust=False)</code> 是量化场景的标准做法,避免递归计算时首值被反复修正。</p>
+
 <h2 id="_2">二、周期选择:不是拍脑袋定的</h2>
+
 <h3 id="21">2.1 周期与市场周期的匹配</h3>
+
 <p>均线周期应该匹配你要捕捉的趋势尺度。经验法则:</p>
+
 <table>
+
 <thead>
+
 <tr>
+
 <th>交易尺度</th>
+
 <th>常用周期</th>
+
 </tr>
+
 </thead>
+
 <tbody>
+
 <tr>
+
 <td>日内短线</td>
+
 <td>5 / 10 / 20</td>
+
 </tr>
+
 <tr>
+
 <td>波段</td>
+
 <td>20 / 60</td>
+
 </tr>
+
 <tr>
+
 <td>中长线</td>
+
 <td>60 / 120 / 250</td>
+
 </tr>
+
 </tbody>
+
 </table>
+
 <p>但这不是教条。真正要问的是:<strong>你的持仓周期是多少根K线?</strong> 如果平均持仓20根,均线周期就应该在10~30之间,而不是120。</p>
+
 <h3 id="22">2.2 用自相关确定有效周期</h3>
+
 <p>一个数据驱动的方法:计算收益率序列的自相关函数(ACF),找到显著不为零的滞后阶数,作为均线周期的候选。</p>
+
 <pre class="codehilite"><code class="language-python">from statsmodels.tsa.stattools import acf
 
+
+
 def suggest_periods(close: pd.Series, nlags: int = 60, top_k: int = 5):
+
     returns = close.pct_change().dropna()
+
     ac = acf(returns, nlags=nlags, fft=True)
+
     # 取绝对值最大的若干个滞后(排除0)
+
     idx = np.argsort(-np.abs(ac[1:]))[:top_k] + 1
+
     return sorted(idx.tolist())
 
+
+
 # 用法
+
 # periods = suggest_periods(df['close'])
+
 </code></pre>
 
 <p>这个方法的逻辑是:自相关显著的滞后,意味着价格在该尺度上存在可被均线捕捉的结构。</p>
+
 <h2 id="_3">三、金叉死叉:信号逻辑的细节</h2>
+
 <h3 id="31">3.1 朴素金叉的问题</h3>
+
 <p>最基础的金叉定义是短均线上穿长均线:</p>
+
 <pre class="codehilite"><code class="language-python">def crossover(fast: pd.Series, slow: pd.Series) -&gt; pd.Series:
+
     diff = fast - slow
+
     signal = (diff &gt; 0) &amp; (diff.shift(1) &lt;= 0)
+
     return signal.astype(int)
+
 </code></pre>
 
 <p>问题在于:震荡行情中会频繁触发,单边行情中又严重滞后。要解决这两个问题,需要引入<strong>过滤条件</strong>。</p>
+
 <h3 id="32">3.2 三种实用的过滤方式</h3>
+
 <p><strong>过滤一:斜率过滤</strong>——要求长均线本身有方向。</p>
+
 <pre class="codehilite"><code class="language-python">def slope(series: pd.Series, n: int = 5) -&gt; pd.Series:
+
     return (series - series.shift(n)) / n
 
+
+
 def crossover_filtered(fast, slow, slope_n=5, slope_threshold=0.0):
+
     cross = crossover(fast, slow)
+
     slow_slope = slope(slow, slope_n)
+
     valid = cross &amp; (slow_slope &gt; slope_threshold)
+
     return valid.astype(int)
+
 </code></pre>
 
 <p><strong>过滤二:距离过滤</strong>——要求快慢均线间距达到一定阈值,避免"贴线金叉"。</p>
+
 <pre class="codehilite"><code class="language-python">def crossover_distance(fast, slow, min_gap_pct=0.002):
+
     diff = (fast - slow) / slow
+
     signal = (diff &gt; min_gap_pct) &amp; (diff.shift(1) &lt;= min_gap_pct)
+
     return signal.astype(int)
+
 </code></pre>
 
 <p><strong>过滤三:波动率过滤</strong>——用ATR或标准差剔除低波动区间。</p>
+
 <pre class="codehilite"><code class="language-python">def atr(high, low, close, window=14):
+
     tr = pd.concat([
+
         high - low,
+
         (high - close.shift()).abs(),
+
         (low - close.shift()).abs()
+
     ], axis=1).max(axis=1)
+
     return tr.rolling(window).mean()
 
+
+
 def crossover_vol_filtered(fast, slow, atr_series, atr_threshold):
+
     cross = crossover(fast, slow)
+
     return (cross &amp; (atr_series &gt; atr_threshold)).astype(int)
+
 </code></pre>
 
 <p>三种过滤可以叠加,但每加一层就会减少信号数量。建议先单独测试,再组合。</p>
+
 <h2 id="2n">四、多均线组合:从2条到N条</h2>
+
 <h3 id="41">4.1 双均线:最简单也最脆弱</h3>
+
 <p>双均线只有两个参数,容易过拟合。它的价值在于作为基线。</p>
+
 <h3 id="42">4.2 三均线:趋势确认</h3>
+
 <p>典型结构:快线(10)、中线(20)、慢线(60)。信号条件:</p>
+
 <ul>
+
 <li>多头排列:fast &gt; mid &gt; slow</li>
+
 <li>金叉触发:fast 上穿 mid,且 mid &gt; slow</li>
+
 </ul>
+
 <pre class="codehilite"><code class="language-python">def triple_ma_signal(close, fast_w=10, mid_w=20, slow_w=60):
+
     fast = ema(close, fast_w)
+
     mid = ema(close, mid_w)
+
     slow = ema(close, slow_w)
 
+
+
     bull = (fast &gt; mid) &amp; (mid &gt; slow)
+
     cross = (fast &gt; mid) &amp; (fast.shift(1) &lt;= mid.shift(1))
+
     long_signal = (bull &amp; cross).astype(int)
 
+
+
     bear = (fast &lt; mid) &amp; (mid &lt; slow)
+
     cross_down = (fast &lt; mid) &amp; (fast.shift(1) &gt;= mid.shift(1))
+
     exit_signal = (bear &amp; cross_down).astype(int)
+
     return long_signal, exit_signal
+
 </code></pre>
 
 <p>三均线的优势是:<strong>用慢线方向过滤掉了大部分逆势信号</strong>。</p>
+
 <h3 id="43-ma-ribbon">4.3 均线带(MA Ribbon)</h3>
+
 <p>用5~8条不同周期的均线,观察它们的发散/收敛程度。带宽收窄意味着趋势酝酿,发散意味着趋势展开。</p>
+
 <pre class="codehilite"><code class="language-python">def ma_ribbon(close, windows=(5, 10, 15, 20, 30, 40, 50, 60)):
+
     mas = pd.DataFrame({w: ema(close, w) for w in windows})
+
     ribbon_width = (mas.max(axis=1) - mas.min(axis=1)) / mas.mean(axis=1)
+
     ribbon_align = (mas.diff(axis=1).iloc[:, 1:] &gt; 0).all(axis=1)
+
     return ribbon_width, ribbon_align
+
 </code></pre>
 
 <p><code>ribbon_align</code> 为 True 时,所有短周期均线都在长周期均线之上,是强多头排列。</p>
+
 <h2 id="_4">五、参数优化:避免过拟合的工程方法</h2>
+
 <h3 id="51">5.1 网格搜索的陷阱</h3>
+
 <p>直接对历史数据网格搜索最优参数,几乎必然过拟合。正确做法是<strong>样本外验证 + 参数稳定性检验</strong>。</p>
+
 <pre class="codehilite"><code class="language-python">def backtest_ma(close, fast_w, slow_w, cost=0.0005):
+
     fast = ema(close, fast_w)
+
     slow = ema(close, slow_w)
+
     pos = (fast &gt; slow).astype(int).shift(1).fillna(0)
+
     ret = close.pct_change().fillna(0)
+
     turnover = pos.diff().abs().fillna(0)
+
     strategy_ret = pos * ret - turnover * cost
+
     return strategy_ret
+
 </code></pre>
 
 <h3 id="52">5.2 参数平原而非参数尖峰</h3>
+
 <p>好的参数应该在邻域内表现稳定。绘制参数热力图,寻找"平原"而不是"尖峰"。</p>
+
 <pre class="codehilite"><code class="language-python">def param_grid(close, fast_range, slow_range, cost=0.0005):
+
     results = []
+
     for f in fast_range:
+
         for s in slow_range:
+
             if f &gt;= s:
+
                 continue
+
             r = backtest_ma(close, f, s, cost)
+
             if len(r) == 0 or r.std() == 0:
+
                 continue
+
             sharpe = r.mean() / r.std() * np.sqrt(252)
+
             results.append({'fast': f, 'slow': s, 'sharpe': sharpe})
+
     return pd.DataFrame(results)
 
+
+
 # 使用
+
 # grid = param_grid(df['close'], range(5, 30, 2), range(30, 120, 5))
+
 # pivot = grid.pivot(index='fast', columns='slow', values='sharpe')
+
 </code></pre>
 
 <p>看 <code>pivot</code> 热力图,如果某个 (fast, slow) 附近一片区域都表现不错,说明参数稳健;如果只有一个点突出,基本可以放弃。</p>
+
 <h3 id="53-walk-forward">5.3 Walk-Forward 验证</h3>
+
 <p>把数据切成多段,前段优化、后段验证,滚动前进。</p>
+
 <pre class="codehilite"><code class="language-python">def walk_forward(close, fast_range, slow_range, n_splits=5, cost=0.0005):
+
     n = len(close)
+
     fold = n // (n_splits + 1)
+
     oos_returns = []
+
     for i in range(n_splits):
+
         train = close.iloc[i*fold:(i+1)*fold]
+
         test = close.iloc[(i+1)*fold:(i+2)*fold]
+
         grid = param_grid(train, fast_range, slow_range, cost)
+
         if grid.empty:
+
             continue
+
         best = grid.loc[grid['sharpe'].idxmax()]
+
         r = backtest_ma(test, int(best['fast']), int(best['slow']), cost)
+
         oos_returns.append(r)
+
     return pd.concat(oos_returns) if oos_returns else pd.Series(dtype=float)
+
 </code></pre>
 
 <p>样本外收益才是真实水平的估计。样本内夏普2.0、样本外0.3,是均线策略的常态。</p>
+
 <h2 id="_5">六、几个工程上的实操建议</h2>
+
 <ol>
+
 <li>
+
 <p><strong>不要用未来数据</strong>。均线计算用 <code>rolling</code> 或 <code>ewm</code>,信号用 <code>shift(1)</code> 再执行,这是底线。</p>
+
 </li>
+
 <li>
+
 <p><strong>手续费必须建模</strong>。均线策略换手率高,忽略成本的回测毫无意义。</p>
+
 </li>
+
 <li>
+
 <p><strong>参数少即是多</strong>。双均线+一个过滤条件,通常比四均线+三过滤更稳。参数越多,过拟合空间越大。</p>
+
 </li>
+
 <li>
+
 <p><strong>跨品种验证</strong>。同一组参数在多个流动性好的品种上都能盈利,才是真的有效,而不是拟合了某个品种的特定走势。</p>
+
 </li>
+
 <li>
+
 <p><strong>关注参数的时间稳定性</strong>。把最优参数按季度画出来,如果参数在剧烈漂移,说明市场结构变了,策略需要重新评估。</p>
+
 </li>
+
 </ol>
+
 <p>均线系统的价值不在于"预测",而在于<strong>用低成本的方式把趋势结构显性化</strong>。参数选择是艺术与工程的结合,信号逻辑是纪律的体现,而参数优化是防止自我欺骗的最后一道防线。把这三件事做扎实,均线系统依然是一个可靠的策略骨架。</p>
+
 <hr />
+
 <p>更多内容请关注本站。</p>
+
+<pre class="codehilite"><code>        &lt;/div&gt;
+
+        &lt;div class=&quot;post-tags&quot;&gt;&lt;span class=&quot;tag-badge&quot;&gt;均线系统&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;技术指标&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;参数选择&lt;/span&gt;&lt;span class=&quot;tag-badge&quot;&gt;信号&lt;/span&gt;&lt;/div&gt;
+
+        &lt;div class=&quot;post-footer&quot;&gt;
+
+            &lt;span&gt;作者: mattleeee&lt;/span&gt;
+
+            &lt;span&gt;&lt;a href=&quot;https://github.com/mattleeee&quot;&gt;GitHub&lt;/a&gt;&lt;/span&gt;
+</code></pre>
             </div>
             <div class="post-tags"><span class="tag-badge">均线系统</span><span class="tag-badge">技术指标</span><span class="tag-badge">参数选择</span><span class="tag-badge">信号</span></div>
             <div class="post-footer">
