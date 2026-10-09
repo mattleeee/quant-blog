@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHANGELOG.md规范化管理：让每次变更都有迹可循 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="CHANGELOG.md规范化管理：让每次变更都有迹可循
+
+项目迭代到第三个月，你还能准确说出 v1.2.0 和 v1.2.1 之间到底改了什么吗？靠翻 Git log？几百条 commit 里混着 fix bug、update、临时提交，...">
+    <meta name="keywords" content="CHANGELOG,变更记录,版本管理,规范">
+    <meta property="og:title" content="CHANGELOG.md规范化管理：让每次变更都有迹可循">
+    <meta property="og:description" content="CHANGELOG.md规范化管理：让每次变更都有迹可循
+
+项目迭代到第三个月，你还能准确说出 v1.2.0 和 v1.2.1 之间到底改了什么吗？靠翻 Git log？几百条 commit 里混着 fix bug、update、临时提交，...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/40.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>CHANGELOG.md规范化管理：让每次变更都有迹可循</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-09</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>项目迭代到第三个月，你还能准确说出 <code>v1.2.0</code> 和 <code>v1.2.1</code> 之间到底改了什么吗？靠翻 Git log？几百条 commit 里混着 <code>fix bug</code>、<code>update</code>、<code>临时提交</code>，找起来比考古还累。</p>
+<p>CHANGELOG.md 解决的正是这个问题。它不是给机器看的，是给人看的——给三个月后的你、给接手项目的同事、给需要评估升级风险的运维。</p>
+<h2 id="git-log">一、为什么 Git log 不够用</h2>
+<p>Git log 记录的是<strong>开发过程</strong>，CHANGELOG 记录的是<strong>用户可见的变化</strong>。两者的受众完全不同。</p>
+<p>一个典型的 commit 历史长这样：</p>
+<pre class="codehilite"><code>a3f2c1d 修复了策略回测中日期越界的问题
+8b4e2a1 调试用的print没删
+c9d1f3e 重构数据加载模块
+7a2b5c8 改了个变量名
+...
+</code></pre>
+
+<p>而用户关心的是：升级到新版本后，我的回测结果会不会变？API 有没有破坏性改动？有没有新增功能？</p>
+<p>CHANGELOG 就是把这些信息从噪声中提炼出来。</p>
+<h2 id="keep-a-changelog">二、Keep a Changelog 格式规范</h2>
+<p>目前社区最广泛采用的规范是 <a href="https://keepachangelog.com/">Keep a Changelog</a>。核心约定如下：</p>
+<h3 id="21">2.1 变更分类</h3>
+<p>每个版本下，变更按以下类别组织：</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Added</strong></td>
+<td>新增功能</td>
+</tr>
+<tr>
+<td><strong>Changed</strong></td>
+<td>对现有功能的变更</td>
+</tr>
+<tr>
+<td><strong>Deprecated</strong></td>
+<td>即将移除的功能</td>
+</tr>
+<tr>
+<td><strong>Removed</strong></td>
+<td>已移除的功能</td>
+</tr>
+<tr>
+<td><strong>Fixed</strong></td>
+<td>Bug 修复</td>
+</tr>
+<tr>
+<td><strong>Security</strong></td>
+<td>安全相关修复</td>
+</tr>
+</tbody>
+</table>
+<p>分类的意义在于：使用者可以快速定位自己关心的部分。比如运维只关心 Security 和 Fixed，开发者关心 Added 和 Changed。</p>
+<h3 id="22">2.2 基本结构</h3>
+<pre class="codehilite"><code class="language-markdown"># Changelog
+
+本项目所有值得注意的变更都会记录在此文件中。
+
+格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
+版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
+
+## [Unreleased]
+
+### Added
+- 计划中的新功能
+
+## [1.2.0] - 2024-01-15
+
+### Added
+- 新增数据源适配器接口 `DataSourceAdapter`
+- 支持从 CSV 批量导入历史行情
+
+### Changed
+- 回测引擎默认使用向量化计算，速度提升约 3 倍
+
+### Fixed
+- 修复时区转换在跨日边界时的偏移问题 (#142)
+
+### Removed
+- 移除已废弃的 `legacy_backtest()` 函数
+
+## [1.1.0] - 2023-12-01
+...
+</code></pre>
+
+<p>几个容易忽略的细节：</p>
+<ol>
+<li><strong><code>[Unreleased]</code> 段永远保留在顶部</strong>，用于记录已合并但未发版的变更</li>
+<li><strong>版本号用方括号包裹</strong>，后面跟发布日期</li>
+<li><strong>每条记录尽量附上 issue/PR 编号</strong>，方便追溯</li>
+<li><strong>倒序排列</strong>，最新版本在最上面</li>
+</ol>
+<h2 id="semver">三、语义化版本号（SemVer）</h2>
+<p>版本号不是随便递增的数字。SemVer 规定格式为 <code>MAJOR.MINOR.PATCH</code>：</p>
+<ul>
+<li><strong>MAJOR</strong>：不兼容的 API 变更（破坏性更新）</li>
+<li><strong>MINOR</strong>：向后兼容的功能新增</li>
+<li><strong>PATCH</strong>：向后兼容的 Bug 修复</li>
+</ul>
+<p>对应到 CHANGELOG 的分类：</p>
+<table>
+<thead>
+<tr>
+<th>版本号变动</th>
+<th>对应的 CHANGELOG 类别</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAJOR +1</td>
+<td>Removed / Changed（破坏性）</td>
+</tr>
+<tr>
+<td>MINOR +1</td>
+<td>Added</td>
+</tr>
+<tr>
+<td>PATCH +1</td>
+<td>Fixed / Security</td>
+</tr>
+</tbody>
+</table>
+<p>实际项目中最容易犯的错误是：<strong>改了 API 签名但只升了 PATCH 号</strong>。这会让依赖你项目的下游代码在 <code>pip install --upgrade</code> 后直接崩溃。</p>
+<p>一个判断标准：如果你的变更会导致用户的现有代码报错或行为改变，那就是 MAJOR。</p>
+<h2 id="changelog">四、自动化生成 CHANGELOG</h2>
+<p>手动维护 CHANGELOG 最大的问题是容易忘。解决方案是：<strong>用 commit message 规范驱动自动生成</strong>。</p>
+<h3 id="41-conventional-commits">4.1 Conventional Commits 规范</h3>
+<p>在提交时遵循以下格式：</p>
+<pre class="codehilite"><code>&lt;type&gt;(&lt;scope&gt;): &lt;description&gt;
+
+[optional body]
+
+[optional footer]
+</code></pre>
+
+<p>type 的取值映射到 CHANGELOG 分类：</p>
+<ul>
+<li><code>feat</code> → Added</li>
+<li><code>fix</code> → Fixed</li>
+<li><code>refactor</code> / <code>perf</code> → Changed</li>
+<li><code>docs</code> / <code>style</code> / <code>test</code> / <code>chore</code> → 通常不记录</li>
+<li><code>BREAKING CHANGE</code> → 触发 MAJOR 版本</li>
+</ul>
+<p>示例：</p>
+<pre class="codehilite"><code>feat(data): 新增 Tushare 数据源适配器
+fix(engine): 修复回测引擎在空数据时的除零错误
+refactor(core): 重构订单撮合逻辑
+
+BREAKING CHANGE: `Order.match()` 返回值从 bool 改为 MatchResult
+</code></pre>
+
+<h3 id="42-python">4.2 用 Python 脚本自动生成</h3>
+<p>下面是一个可直接使用的脚本，从 Git 历史中提取 commit 并生成 CHANGELOG：</p>
+<pre class="codehilite"><code class="language-python">#!/usr/bin/env python3
+&quot;&quot;&quot;从 git log 自动生成 CHANGELOG 片段&quot;&quot;&quot;
+
+import re
+import subprocess
+from collections import defaultdict
+from datetime import date
+
+# commit type 到 CHANGELOG 分类的映射
+TYPE_MAP = {
+    &quot;feat&quot;: &quot;Added&quot;,
+    &quot;fix&quot;: &quot;Fixed&quot;,
+    &quot;perf&quot;: &quot;Changed&quot;,
+    &quot;refactor&quot;: &quot;Changed&quot;,
+    &quot;revert&quot;: &quot;Removed&quot;,
+}
+
+# 匹配 conventional commit 格式
+PATTERN = re.compile(
+    r&quot;^(?P&lt;type&gt;\w+)(?:\((?P&lt;scope&gt;[^)]+)\))?!?:\s*(?P&lt;desc&gt;.+)$&quot;
+)
+
+
+def get_commits(since_tag: str | None = None) -&gt; list[str]:
+    &quot;&quot;&quot;获取指定 tag 之后的 commit message&quot;&quot;&quot;
+    cmd = [&quot;git&quot;, &quot;log&quot;, &quot;--pretty=format:%s&quot;]
+    if since_tag:
+        cmd.append(f&quot;{since_tag}..HEAD&quot;)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return [line for line in result.stdout.strip().split(&quot;\n&quot;) if line]
+
+
+def parse_commits(messages: list[str]) -&gt; dict[str, list[str]]:
+    &quot;&quot;&quot;按分类聚合 commit&quot;&quot;&quot;
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for msg in messages:
+        match = PATTERN.match(msg)
+        if not match:
+            continue
+        ctype = match.group(&quot;type&quot;)
+        category = TYPE_MAP.get(ctype)
+        if not category:
+            continue
+        scope = match.group(&quot;scope&quot;)
+        desc = match.group(&quot;desc&quot;)
+        entry = f&quot;- **{scope}**: {desc}&quot; if scope else f&quot;- {desc}&quot;
+        grouped[category].append(entry)
+    return dict(grouped)
+
+
+def render(version: str, grouped: dict[str, list[str]]) -&gt; str:
+    &quot;&quot;&quot;渲染为 Markdown 格式&quot;&quot;&quot;
+    lines = [f&quot;## [{version}] - {date.today().isoformat()}&quot;, &quot;&quot;]
+    # 按固定顺序输出
+    for category in [&quot;Added&quot;, &quot;Changed&quot;, &quot;Fixed&quot;, &quot;Removed&quot;]:
+        if category in grouped:
+            lines.append(f&quot;### {category}&quot;)
+            lines.extend(grouped[category])
+            lines.append(&quot;&quot;)
+    return &quot;\n&quot;.join(lines)
+
+
+if __name__ == &quot;__main__&quot;:
+    import sys
+
+    version = sys.argv[1] if len(sys.argv) &gt; 1 else &quot;Unreleased&quot;
+    since = sys.argv[2] if len(sys.argv) &gt; 2 else None
+
+    commits = get_commits(since)
+    grouped = parse_commits(commits)
+    print(render(version, grouped))
+</code></pre>
+
+<p>使用方式：</p>
+<pre class="codehilite"><code class="language-bash"># 生成 v1.1.0 之后到当前的所有变更
+python changelog_gen.py v1.2.0 v1.1.0
+</code></pre>
+
+<p>输出示例：</p>
+<pre class="codehilite"><code class="language-markdown">## [v1.2.0] - 2024-01-15
+
+### Added
+- **data**: 新增 Tushare 数据源适配器
+- **engine**: 支持多标的并行回测
+
+### Fixed
+- **engine**: 修复空数据时的除零错误
+</code></pre>
+
+<h3 id="43-cicd">4.3 集成到 CI/CD</h3>
+<p>在 GitHub Actions 中，可以在发布 tag 时自动更新 CHANGELOG：</p>
+<pre class="codehilite"><code class="language-yaml">name: Generate Changelog
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整历史
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Generate changelog entry
+        run: |
+          python changelog_gen.py ${{ github.ref_name }} \
+            $(git describe --tags --abbrev=0 HEAD^) \
+            &gt;&gt; CHANGELOG.md
+      - name: Commit
+        run: |
+          git config user.name &quot;github-actions&quot;
+          git config user.email &quot;actions@github.com&quot;
+          git add CHANGELOG.md
+          git commit -m &quot;docs: update CHANGELOG for ${{ github.ref_name }}&quot;
+          git push
+</code></pre>
+
+<h2 id="_1">五、实际项目中的经验</h2>
+<h3 id="51-commit">5.1 不要记录所有 commit</h3>
+<p><code>docs: 修正错别字</code>、<code>chore: 升级依赖</code> 这类变更对使用者没有意义。CHANGELOG 的价值在于<strong>筛选</strong>，而不是<strong>完整</strong>。脚本里通过 TYPE_MAP 过滤掉这些类型，正是这个目的。</p>
+<h3 id="52-unreleased">5.2 Unreleased 段是核心</h3>
+<p>很多团队只在发版时才写 CHANGELOG，结果就是发版前要回忆过去一个月的所有变更。正确做法是：<strong>合并 PR 时就往 <code>[Unreleased]</code> 里加一条</strong>。发版时只需把 <code>[Unreleased]</code> 改名为版本号，再开一个新的空段。</p>
+<h3 id="53">5.3 破坏性变更单独标注</h3>
+<p>对于 MAJOR 版本，建议在 CHANGELOG 顶部加一段迁移指南：</p>
+<pre class="codehilite"><code class="language-markdown">## [2.0.0] - 2024-02-01
+
+### ⚠️ Breaking Changes
+
+- `Engine.run()` 的参数从位置参数改为关键字参数
+- 配置文件格式从 INI 迁移到 TOML，旧格式不再兼容
+
+**迁移方式**：将 `config.ini` 转换为 `config.toml`，
+可参考 `examples/migrate_config.py`。
+
+### Changed
+- ...
+</code></pre>
+
+<h3 id="54">5.4 版本对比链接</h3>
+<p>在文件末尾维护版本对比链接，方便直接跳转到 diff：</p>
+<pre class="codehilite"><code class="language-markdown">[Unreleased]: https://github.com/user/repo/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/user/repo/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/user/repo/compare/v1.0.0...v1.1.0
+</code></pre>
+
+<h3 id="55-release-notes">5.5 和 release notes 的关系</h3>
+<p>CHANGELOG 是累积的、按时间倒序的完整记录；release notes 是单次发布的摘要。可以理解为：release notes 是 CHANGELOG 中某个版本段的子集或改写版。维护好 CHANGELOG，release notes 基本可以直接摘取。</p>
+<h2 id="_2">六、一个完整的模板</h2>
+<p>把上面的实践整合成一个可复用的模板：</p>
+<pre class="codehilite"><code class="language-markdown"># Changelog
+
+格式基于 [Keep a Changelog](https://keepachangelog.com/)，
+版本号遵循 [Semantic Versioning](https://semver.org/)。
+
+## [Unreleased]
+
+### Added
+### Changed
+### Fixed
+### Removed
+
+## [1.0.0] - 2024-01-01
+
+### Added
+- 初始版本发布
+</code></pre>
+
+<p>每次合并功能分支时，往 <code>[Unreleased]</code> 下对应的分类里加一行。发版时：</p>
+<ol>
+<li>把 <code>[Unreleased]</code> 改为 <code>[x.y.z] - 日期</code></li>
+<li>在顶部新增空的 <code>[Unreleased]</code> 段</li>
+<li>打 tag，推送</li>
+</ol>
+<p>这套流程跑顺之后，CHANGELOG 几乎不需要额外维护成本，却能在排查问题和评估升级风险时省下大量时间。</p>
+<hr />
+<p><em>更多 Python 量化与自动化实战内容，请关注本站。</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">CHANGELOG</span><span class="tag-badge">变更记录</span><span class="tag-badge">版本管理</span><span class="tag-badge">规范</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
