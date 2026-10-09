@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firewall Forensics: PAT Sessions, NAT44 Hit Counters and the Missing UDP Rule - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A GB28181 camera was sending heartbeats. The SIP server saw them....">
+    <meta name="keywords" content="PAT,NAT44,session table,UDP 7100,firewall policy">
+    <meta property="og:title" content="Firewall Forensics: PAT Sessions, NAT44 Hit Counters and the Missing UDP Rule">
+    <meta property="og:description" content="A GB28181 camera was sending heartbeats. The SIP server saw them....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/12.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Firewall Forensics: PAT Sessions, NAT44 Hit Counters and the Missing UDP Rule</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-09</span>
+                <span class="category"><span class="tag-badge">Network &amp; Security</span></span>
+            </div>
+            <div class="post-content">
+<p>A GB28181 camera was sending heartbeats. The SIP server saw them. The firewall session table confirmed the outbound translation. And yet inbound INVITEs never arrived — the NAT44 hit counter for UDP 7100 sat at exactly 0 while TCP 7100 on the same port showed 13 hits. That asymmetry is the whole story, and it's the kind of clue that gets buried under "the network is broken" tickets.</p>
+<p>Here's how to read that evidence, why it matters, and how to turn a vague complaint into a reproducible pass/fail list.</p>
+<h2 id="the-setup">The setup</h2>
+<p>GB28181 is a Chinese video surveillance standard built on SIP. Devices register to a platform, then receive INVITEs to start streaming. The signaling runs over UDP 7100 in this deployment. A camera at <code>10.0.13.200</code> sits behind a firewall doing PAT (Port Address Translation, the overloaded form of NAT44). The platform sits somewhere upstream, reachable only through a public IP.</p>
+<p>The complaint: "the camera registers but we can't pull streams." Classic. Registration is outbound, streaming setup is inbound, and everything in between is where the bodies are buried.</p>
+<h2 id="reading-the-session-table">Reading the session table</h2>
+<p>The first useful artifact is the firewall's session table. On most enterprise firewalls it looks something like this:</p>
+<pre class="codehilite"><code>Protocol  Src              Sport  Dst              Dport  TransSrc         TransSport  State
+UDP       10.0.13.200      7100   203.0.113.40     7100   198.51.100.77    20250       ACTIVE
+TCP       10.0.13.200      7100   203.0.113.40     7100   198.51.100.77    20251       ESTABLISHED
+</code></pre>
+
+<p>Two things to notice.</p>
+<p>First, the outbound heartbeat from <code>10.0.13.200:7100</code> was translated to <code>198.51.100.77:20250</code>. That's PAT doing its job. The source port changed from 7100 to 20250 — the public side sees a different port entirely. This is normal and expected; the camera has no idea its port was rewritten.</p>
+<p>Second, the session is <code>ACTIVE</code>, which means the firewall has state for it. Heartbeats keep it alive. So the NAT rule matched, the translation happened, and the packet left the building.</p>
+<p>Now the counter that actually matters:</p>
+<pre class="codehilite"><code>NAT44 policy hit counters:
+  UDP 7100: 0
+  TCP 7100: 13
+</code></pre>
+
+<p>Zero. On UDP. Thirteen on TCP.</p>
+<p>This is the moment where a lot of troubleshooting goes wrong. People see "0 hits" and assume the NAT rule is broken. It isn't. The rule matched — we just watched it translate a packet. The counter is telling us something narrower and more useful: <strong>inbound</strong> packets on UDP 7100 never reached the NAT policy at all.</p>
+<h2 id="nat-and-security-policy-are-different-layers">NAT and security policy are different layers</h2>
+<p>This trips up experienced engineers, so it's worth being explicit.</p>
+<p>A firewall evaluates packets in order:</p>
+<ol>
+<li><strong>Ingress interface / zone assignment</strong></li>
+<li><strong>Security policy</strong> (allow/deny between zones, possibly with application inspection)</li>
+<li><strong>NAT policy</strong> (translation, including destination NAT for inbound)</li>
+<li><strong>Session creation and forwarding</strong></li>
+</ol>
+<p>Inbound packets hit the security policy first, then NAT. If a packet is dropped by the security policy, or by an upstream filter that runs before the firewall even sees it, the NAT policy never increments its counter. The counter isn't a measure of "did the rule work" — it's a measure of "did any packet reach this rule."</p>
+<p>So <code>UDP 7100 hits = 0</code> means one of:</p>
+<ul>
+<li>The packet never arrived at the firewall.</li>
+<li>The packet arrived but was dropped by security policy, ASPF, or a DDoS/blacklist mechanism before NAT.</li>
+<li>The packet arrived on a different interface or zone than expected.</li>
+</ul>
+<p>In this case, the outbound session proves the NAT rule is correct and functional. The zero counter on inbound proves the problem is <strong>upstream of the NAT decision</strong>. The two most likely culprits:</p>
+<ul>
+<li><strong>The ISP modem has no UDP mapping.</strong> If the modem is doing its own NAT (double NAT), it needs a port-forward for UDP 7100 to reach the firewall. Many consumer and SMB modems handle TCP port forwards fine but silently drop UDP, or the forward was never created for UDP.</li>
+<li><strong>ASPF or a DDoS blacklist is eating it.</strong> Application-layer gateways that inspect SIP sometimes drop packets that don't fit expected patterns. DDoS protection lists can flag UDP 7100 as suspicious traffic, especially from an unrecognized source.</li>
+</ul>
+<p>Both failure modes produce the same signature: the packet dies before NAT, so the counter stays at zero.</p>
+<h2 id="why-telnet-works-proves-nothing">Why "telnet works" proves nothing</h2>
+<p>Every ticket has a version of this line: "But I can telnet to port 7100 from outside, so the port is open."</p>
+<p>No. Telnet is TCP. TCP 7100 has 13 hits — of course it works. The camera doesn't speak TCP on 7100; it speaks UDP. A TCP success tells you the ISP modem forwards TCP, the firewall allows TCP, and the NAT policy for TCP is intact. It tells you nothing about UDP.</p>
+<p>This is the single most common false positive in network troubleshooting. TCP and UDP are separate protocols with separate connection tracking, separate NAT mappings, and separate policy rules. A port is not "open" or "closed" — a (protocol, port) pair is.</p>
+<p>The fix is to stop testing with telnet and start testing with a probe that actually speaks the protocol in question.</p>
+<h2 id="a-tcp-udp-port-probe">A TCP + UDP port probe</h2>
+<p>Here's a script that turns "the port is broken" into a pass/fail matrix. It runs from outside the firewall and tests both TCP and UDP on the same port, then reports which combinations succeed.</p>
+<pre class="codehilite"><code class="language-python">#!/usr/bin/env python3
+&quot;&quot;&quot;Probe TCP and UDP reachability on a target port.
+
+Reports a pass/fail matrix so a vague complaint becomes a
+reproducible result. Run from a host outside the firewall.
+&quot;&quot;&quot;
+
+import socket
+import argparse
+import time
+
+
+def probe_tcp(host: str, port: int, timeout: float = 3.0) -&gt; bool:
+    &quot;&quot;&quot;Return True if a TCP connection completes.&quot;&quot;&quot;
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+
+
+def probe_udp(host: str, port: int, timeout: float = 3.0,
+              payload: bytes = b&quot;\r\n\r\n&quot;) -&gt; str:
+    &quot;&quot;&quot;Send a UDP datagram and classify the response.
+
+    Returns one of: 'reply', 'icmp-unreachable', 'timeout'.
+    A timeout is ambiguous: the packet may have been dropped, or
+    the service may simply not reply to this payload. An ICMP
+    port-unreachable means the packet reached a host and was
+    rejected at the transport layer.
+    &quot;&quot;&quot;
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(payload, (host, port))
+        try:
+            data, _ = sock.recvfrom(4096)
+            return &quot;reply&quot; if data else &quot;reply&quot;
+        except socket.timeout:
+            return &quot;timeout&quot;
+        except ConnectionRefusedError:
+            return &quot;icmp-unreachable&quot;
+    finally:
+        sock.close()
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser(description=&quot;TCP/UDP port probe&quot;)
+    ap.add_argument(&quot;host&quot;)
+    ap.add_argument(&quot;port&quot;, type=int)
+    ap.add_argument(&quot;--timeout&quot;, type=float, default=3.0)
+    args = ap.parse_args()
+
+    tcp_ok = probe_tcp(args.host, args.port, args.timeout)
+    udp_result = probe_udp(args.host, args.port, args.timeout)
+
+    print(f&quot;Target: {args.host}:{args.port}&quot;)
+    print(f&quot;  TCP: {'PASS' if tcp_ok else 'FAIL'}&quot;)
+    print(f&quot;  UDP: {udp_result.upper()}&quot;)
+
+    if tcp_ok and udp_result == &quot;timeout&quot;:
+        print(&quot;\nDiagnosis: TCP reaches the target, UDP does not.&quot;)
+        print(&quot;Check the ISP modem for a UDP port forward, and&quot;)
+        print(&quot;inspect ASPF / DDoS policy on the firewall.&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+
+<p>Run it against the public IP:</p>
+<pre class="codehilite"><code>$ python3 probe.py 198.51.100.77 7100
+Target: 198.51.100.77:7100
+  TCP: PASS
+  UDP: TIMEOUT
+
+Diagnosis: TCP reaches the target, UDP does not.
+Check the ISP modem for a UDP port forward, and
+inspect ASPF / DDoS policy on the firewall.
+</code></pre>
+
+<p>That output is a ticket-closer. It's specific, reproducible, and it points at the right layer.</p>
+<p>One caveat on UDP probing: a timeout is ambiguous. The packet may have been dropped, or the service may simply not reply to an arbitrary payload. If you can, send a payload the service actually understands — a real SIP OPTIONS request for GB28181, for example — so a reply confirms reachability rather than just absence of an error.</p>
+<h2 id="a-sip-aware-variant">A SIP-aware variant</h2>
+<p>For GB28181 specifically, a bare UDP probe may not get a reply even when the path is open. Send a real SIP OPTIONS and watch for a response:</p>
+<pre class="codehilite"><code class="language-python">import socket
+
+def sip_options_probe(host: str, port: int, timeout: float = 5.0) -&gt; bool:
+    &quot;&quot;&quot;Send a SIP OPTIONS request and wait for any response.&quot;&quot;&quot;
+    msg = (
+        f&quot;OPTIONS sip:{host} SIP/2.0\r\n&quot;
+        f&quot;Via: SIP/2.0/UDP 0.0.0.0:{port};branch=z9hG4bK-probe\r\n&quot;
+        f&quot;From: &lt;sip:probe@localhost&gt;;tag=probe\r\n&quot;
+        f&quot;To: &lt;sip:{host}&gt;\r\n&quot;
+        f&quot;Call-ID: probe-{int(time.time())}\r\n&quot;
+        f&quot;CSeq: 1 OPTIONS\r\n&quot;
+        f&quot;Max-Forwards: 70\r\n&quot;
+        f&quot;Content-Length: 0\r\n\r\n&quot;
+    ).encode()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(msg, (host, port))
+        data, _ = sock.recvfrom(4096)
+        return b&quot;SIP/2.0&quot; in data
+    except socket.timeout:
+        return False
+    finally:
+        sock.close()
+</code></pre>
+
+<p>If this returns <code>False</code> while TCP 7100 is open, you've confirmed the UDP path is broken before it reaches the firewall. If it returns <code>True</code>, the path is fine and the problem is elsewhere — the platform's INVITE routing, the camera's registration binding, or the firewall's SIP ALG mangling headers.</p>
+<h2 id="reading-the-counters-correctly">Reading the counters correctly</h2>
+<p>The general lesson: <strong>a zero hit counter on a NAT rule doesn't mean the rule is wrong — it means no packet reached it.</strong> Compare the counter against the session table. If sessions exist but the counter is zero, the traffic that created those sessions never traversed the rule in the direction you're checking.</p>
+<p>Build a habit of asking three questions for any "port is broken" report:</p>
+<ol>
+<li><strong>What does the session table show?</strong> Is there an active session? What's the translation?</li>
+<li><strong>What do the policy hit counters show, per protocol?</strong> A TCP hit count next to a zero UDP hit count is a specific diagnosis, not a coincidence.</li>
+<li><strong>What does a protocol-aware probe show from outside?</strong> Telnet is not a UDP test. Ever.</li>
+</ol>
+<p>The GB28181 case resolved when the ISP modem's UDP 7100 forward was added. The firewall was never the problem — the NAT rule had been translating heartbeats correctly the whole time. The counter was telling the truth; it just took a while to read it.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-09 08:46:31</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>COOL</td>
+<td>短平快做空</td>
+<td>$0.0015</td>
+<td>$0.0014</td>
+<td>$0.0015</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">PAT</span><span class="tag-badge">NAT44</span><span class="tag-badge">session table</span><span class="tag-badge">UDP 7100</span><span class="tag-badge">firewall policy</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
