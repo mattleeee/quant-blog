@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>CHANGELOG.md规范化管理：让每次变更都有迹可循</title>
+            <link>https://www.hkcode.dpdns.org/posts/40.html</link>
+            <description>CHANGELOG.md规范化管理：让每次变更都有迹可循
+
+项目迭代到第三个月，你还能准确说出 v1.2.0 和 v1.2.1 之间到底改了什么吗？靠翻 Git log？几百条 commit 里混着 fix bug、update、临时提交，找起来比考古还累。...</description>
+            <pubDate>2026-10-09</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>增量代码备份方案设计：版本管理最佳实践</title>
             <link>https://www.hkcode.dpdns.org/posts/39.html</link>
             <description>增量代码备份方案设计：版本管理最佳实践
@@ -139,13 +148,6 @@
             <link>https://www.hkcode.dpdns.org/posts/21.html</link>
             <description>## 模拟交易系统架构设计：从信号扫描到自动执行 实盘交易系统的核心难点不在策略，而在工程化。信号计算与自动执行之间的延迟、异常处理、状态一致性，每一项都可能让策略失效。本文分享一套完整的模拟交易系统架构，覆盖信号扫描、市场分析、模拟撮合与通知推送四大模块，代码可直接参考改造。 ### 一、系统整体架构 整个系统采用*...</description>
             <pubDate>2026-08-26</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>深信服安全软件拦截子进程的排查与解决方案</title>
-            <link>https://www.hkcode.dpdns.org/posts/20.html</link>
-            <description>## 深信服安全软件拦截子进程的排查与解决方案 最近在跑量化回测脚本时，遇到一个诡异问题：Python脚本执行到subprocess调用时直接卡死，PowerShell窗口无响应，任务管理器里能看到进程但无法结束。排查了一圈，最后定位到是深信服（Sangfor）安全软件在拦截子进程创建。 这篇文章记录完整排查过程和解决...</description>
-            <pubDate>2026-08-22</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
