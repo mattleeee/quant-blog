@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wiring WeChat Push into Python Automation with PushPlus - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="PushPlus is the shortest path from a Python script to your phone....">
+    <meta name="keywords" content="PushPlus,WeChat,notifications,Python,token">
+    <meta property="og:title" content="Wiring WeChat Push into Python Automation with PushPlus">
+    <meta property="og:description" content="PushPlus is the shortest path from a Python script to your phone....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/13.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Wiring WeChat Push into Python Automation with PushPlus</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-10</span>
+                <span class="category"><span class="tag-badge">Notifications</span></span>
+            </div>
+            <div class="post-content">
+<p>PushPlus is the shortest path from a Python script to your phone. One HTTP POST with a token, a title, and a markdown body, and the message lands in WeChat. No app to build, no bot framework, no SMTP relay that gets flagged as spam. For unattended jobs — data collection, model retraining, portfolio snapshots — that single channel is usually enough.</p>
+<p>This post covers the setup end to end: getting the token, a send function that survives network hiccups, naming conventions that keep dozens of scripts distinguishable, and the templates I reuse for daily reports versus alerts.</p>
+<h2 id="getting-the-token">Getting the token</h2>
+<p>Register at <code>pushplus.plus</code> (or the Chinese mirror, <code>pushplus.plus</code> routes there too) with WeChat scan login. The account is bound to your WeChat, which is what makes the push arrive as a service message.</p>
+<p>After login, open <strong>Send Message</strong> → <strong>One-on-One Message</strong>. The page shows a 32-character token. Treat it like a password: it authorizes anyone who holds it to send messages to your WeChat. Store it in an environment variable, not in source code.</p>
+<pre class="codehilite"><code class="language-bash"># .env or your shell profile
+export PUSHPLUS_TOKEN=&quot;a1b2c3d4e5f6...&quot;
+</code></pre>
+
+<pre class="codehilite"><code class="language-python">import os
+
+TOKEN = os.environ[&quot;PUSHPLUS_TOKEN&quot;]
+</code></pre>
+
+<p>A free account allows a limited number of pushes per day. For a handful of jobs that run a few times daily, that ceiling is never a problem. If you push per-row records or log every heartbeat, you will hit it — batch instead.</p>
+<h2 id="a-send-function-that-does-not-lie-to-you">A send function that does not lie to you</h2>
+<p>The naive version is <code>requests.post(url, json=payload)</code> and done. That fails in three ways that matter for unattended jobs:</p>
+<ol>
+<li>No timeout. A hung connection blocks the job forever.</li>
+<li>No status check. PushPlus returns HTTP 200 even when the token is invalid; the error is in the JSON body.</li>
+<li>No retry. A transient DNS failure kills the notification for the one run that needed it.</li>
+</ol>
+<p>Here is the version I actually use:</p>
+<pre class="codehilite"><code class="language-python">import logging
+import time
+
+import requests
+
+PUSHPLUS_URL = &quot;https://www.pushplus.plus/send&quot;
+TOKEN = os.environ[&quot;PUSHPLUS_TOKEN&quot;]
+
+logger = logging.getLogger(__name__)
+
+
+def push(
+    title: str,
+    content: str,
+    *,
+    template: str = &quot;markdown&quot;,
+    token: str = TOKEN,
+    timeout: float = 10.0,
+    retries: int = 2,
+) -&gt; bool:
+    &quot;&quot;&quot;Send a WeChat push via PushPlus. Returns True on confirmed delivery.&quot;&quot;&quot;
+    payload = {
+        &quot;token&quot;: token,
+        &quot;title&quot;: title,
+        &quot;content&quot;: content,
+        &quot;template&quot;: template,
+    }
+
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(PUSHPLUS_URL, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            body = resp.json()
+        except requests.RequestException as exc:
+            logger.warning(&quot;push attempt %d failed: %s&quot;, attempt + 1, exc)
+            if attempt &lt; retries:
+                time.sleep(2 ** attempt)
+                continue
+            return False
+
+        if body.get(&quot;code&quot;) == 200:
+            return True
+
+        # Business-level error: bad token, quota exceeded, etc.
+        logger.error(&quot;push rejected: %s&quot;, body.get(&quot;msg&quot;))
+        return False
+
+    return False
+</code></pre>
+
+<p>Three details worth calling out.</p>
+<p><strong>Check <code>code</code>, not just the HTTP status.</strong> PushPlus wraps everything in <code>{"code": 200, "msg": "请求成功", "data": "..."}</code>. An expired token returns HTTP 200 with <code>code: 401</code>. If you only check <code>raise_for_status()</code>, you will believe a dead token is working.</p>
+<p><strong>Exponential backoff on network errors only.</strong> Retrying a business error (bad token, quota) just burns quota. Retrying a socket timeout is worth it. The code above separates the two paths.</p>
+<p><strong>Return a boolean.</strong> Callers need to know whether the push succeeded. A job that cannot report its own failure should at least be able to log that the reporting failed.</p>
+<h2 id="title-conventions-prefix-everything">Title conventions: prefix everything</h2>
+<p>Once you have five or six scripts pushing to the same WeChat thread, the notification list becomes a wall of text. The fix is a fixed prefix per system, so a glance at the lock screen tells you what fired and whether it matters.</p>
+<pre class="codehilite"><code>[QUANT] Daily NAV — 2024-06-14
+[SCRAPE] Job failed — 3 retries exhausted
+[CLEAN] Weekly dedup done — 12,340 rows
+[MONITOR] Disk usage 91% on host-02
+</code></pre>
+
+<p>The pattern is <code>[SYSTEM] Short description — key metric or timestamp</code>. The bracket tag is scannable; the em dash separates the event from its payload. Keep the tag under eight characters and uppercase it.</p>
+<p>I centralize this in a tiny wrapper so no script invents its own format:</p>
+<pre class="codehilite"><code class="language-python">def notify(system: str, subject: str, body: str) -&gt; bool:
+    title = f&quot;[{system.upper()}] {subject}&quot;
+    return push(title, body)
+</code></pre>
+
+<p>Call sites stay clean:</p>
+<pre class="codehilite"><code class="language-python">notify(&quot;quant&quot;, &quot;Daily NAV — 2024-06-14&quot;, report_md)
+notify(&quot;scrape&quot;, &quot;Job failed — 3 retries exhausted&quot;, traceback_md)
+</code></pre>
+
+<p>Two rules keep this useful. First, never put the variable part of the message in the prefix — the prefix is for filtering, the suffix is for reading. Second, keep the tag vocabulary small. If you have fifteen systems, group them into four or five tags (<code>QUANT</code>, <code>DATA</code>, <code>OPS</code>, <code>ALERT</code>) and put the specific name in the subject.</p>
+<h2 id="markdown-templates-reports-versus-alerts">Markdown templates: reports versus alerts</h2>
+<p>PushPlus renders <code>template: "markdown"</code> natively in WeChat. That means headers, bold, tables, and code blocks all render. Use it — a wall of plain text is harder to parse on a phone than a structured card.</p>
+<p>The mistake is using one template for everything. A daily report and a failure alert have opposite reading patterns. The report is scanned for the numbers; the alert is scanned for the cause and the action.</p>
+<h3 id="daily-report-template">Daily report template</h3>
+<p>Reports are read on a schedule, often half-awake. Front-load the numbers, push detail below.</p>
+<pre class="codehilite"><code class="language-python">def daily_report(date: str, metrics: dict, notes: str = &quot;&quot;) -&gt; str:
+    rows = &quot;\n&quot;.join(
+        f&quot;| {k} | {v} |&quot; for k, v in metrics.items()
+    )
+    return f&quot;&quot;&quot;## Daily Report — {date}
+
+| Metric | Value |
+| --- | --- |
+{rows}
+
+**Notes**
+
+{notes or &quot;_none_&quot;}
+&quot;&quot;&quot;
+</code></pre>
+
+<p>The <code>##</code> header renders as a section title in WeChat. The table aligns values. The notes section is where you put a one-liner about anything unusual — an empty notes field is a signal in itself.</p>
+<h3 id="alert-template">Alert template</h3>
+<p>Alerts are read under stress. The first line must answer "what broke," the second "why," the third "what I should do." No preamble.</p>
+<pre class="codehilite"><code class="language-python">def alert_body(
+    what: str,
+    detail: str,
+    action: str,
+    traceback_text: str | None = None,
+) -&gt; str:
+    body = f&quot;&quot;&quot;**What:** {what}
+
+**Detail:** {detail}
+
+**Action:** {action}
+&quot;&quot;&quot;
+    if traceback_text:
+        body += f&quot;\n```\n{traceback_text[-1500:]}\n```\n&quot;
+    return body
+</code></pre>
+
+<p>The traceback is truncated to the last 1500 characters. The tail is where the actual exception lives; the head is usually framework noise. Truncating keeps the push readable and avoids hitting message size limits.</p>
+<p>Use alerts sparingly. If every alert fires daily, none of them are alerts. Reserve the alert template for conditions that require a human decision — a failed job that will not self-heal, a threshold breach, a resource exhaustion.</p>
+<h2 id="every-unattended-job-ends-with-a-push">Every unattended job ends with a push</h2>
+<p>This is the rule that matters most. <strong>Silence is not success.</strong></p>
+<p>A cron job that runs, does nothing visible, and exits is indistinguishable from a cron job that never started, crashed before logging, or was silently disabled by the scheduler. The only way to know is to make the job announce itself — every run, both outcomes.</p>
+<pre class="codehilite"><code class="language-python">import sys
+import traceback
+
+
+def main() -&gt; None:
+    try:
+        result = run_pipeline()
+    except Exception:
+        notify(
+            &quot;quant&quot;,
+            &quot;Pipeline failed&quot;,
+            alert_body(
+                what=&quot;run_pipeline raised&quot;,
+                detail=&quot;unhandled exception&quot;,
+                action=&quot;check logs on host-02&quot;,
+                traceback_text=traceback.format_exc(),
+            ),
+        )
+        sys.exit(1)
+    else:
+        notify(
+            &quot;quant&quot;,
+            f&quot;Pipeline done — {result['rows']} rows&quot;,
+            daily_report(result[&quot;date&quot;], result[&quot;metrics&quot;], result[&quot;notes&quot;]),
+        )
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+
+<p>The <code>try/except/else</code> structure guarantees exactly one push per run. Success and failure both produce a message. If the process is killed by the OOM killer or the machine reboots, you get nothing — and that absence is itself the signal. A missing daily report at 09:00 is a problem worth investigating.</p>
+<p>Two refinements on top of this:</p>
+<p><strong>Heartbeat for critical jobs.</strong> If a job must run daily and its absence is not obvious, add a separate dead-man's-switch. A tiny script that checks whether today's success push was recorded, and alerts if not. This catches the case where the job host is down entirely.</p>
+<p><strong>Deduplicate repeated failures.</strong> A job that fails every five minutes will send 288 alerts a day. Add a simple state file: if the same failure signature fired in the last hour, suppress the push and log instead.</p>
+<pre class="codehilite"><code class="language-python">import hashlib
+import json
+from pathlib import Path
+
+STATE = Path(&quot;/var/lib/jobs/last_alert.json&quot;)
+
+
+def should_alert(signature: str, cooldown_s: int = 3600) -&gt; bool:
+    now = time.time()
+    try:
+        state = json.loads(STATE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+
+    key = hashlib.sha1(signature.encode()).hexdigest()
+    last = state.get(key, 0)
+    if now - last &lt; cooldown_s:
+        return False
+
+    state[key] = now
+    STATE.write_text(json.dumps(state))
+    return True
+</code></pre>
+
+<p>Call <code>should_alert</code> before the failure push. The signature can be the exception type plus the failing function name — enough to group identical failures without collapsing distinct ones.</p>
+<h2 id="operational-notes">Operational notes</h2>
+<p>A few things I learned the hard way:</p>
+<ul>
+<li><strong>Token rotation.</strong> If a token leaks, anyone can push to your WeChat. Rotate it from the console and update the environment variable. Because the token lives in an env var, rotation is a one-line change and a restart, not a code edit.</li>
+<li><strong>Timezone.</strong> PushPlus timestamps use the server's timezone. If your job runs in UTC and you read the push in local time, put the local date in the title explicitly, as the templates above do.</li>
+<li><strong>Message size.</strong> Very large markdown bodies get truncated or rejected. Cap content at a few thousand characters and link to a full report if you need more.</li>
+<li><strong>Quota awareness.</strong> Log the <code>data</code> field from successful responses — it contains the message ID, useful for debugging delivery. If you approach the daily quota, batch multiple metrics into one push rather than sending several.</li>
+</ul>
+<p>The whole integration is maybe sixty lines of Python: a token in the environment, a send function with timeout and retry, a naming convention, two templates, and a hard rule that every job reports its own outcome. That is enough to make an unattended pipeline observable from your pocket.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-10 08:46:32</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NEAR</td>
+<td>高质量标的做多</td>
+<td>$4.9102</td>
+<td>$5.0821</td>
+<td>$4.812</td>
+<td>1:1.8</td>
+</tr>
+</tbody>
+</table>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAGIC</td>
+<td>热点跟涨</td>
+<td>$0.1247</td>
+<td>$0.1155</td>
+<td>$0.1291</td>
+<td>1:2.1</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">PushPlus</span><span class="tag-badge">WeChat</span><span class="tag-badge">notifications</span><span class="tag-badge">Python</span><span class="tag-badge">token</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
