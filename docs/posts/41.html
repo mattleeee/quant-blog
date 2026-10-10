@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python项目网络环境应对：被墙API的替代方案与配置 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Python项目网络环境应对：被墙API的替代方案与配置
+
+做量化交易的朋友大概率遇到过这种情况：同一个脚本,访问某些交易所API一切正常,换一个就超时。...">
+    <meta name="keywords" content="网络配置,API,替代方案,Python">
+    <meta property="og:title" content="Python项目网络环境应对：被墙API的替代方案与配置">
+    <meta property="og:description" content="Python项目网络环境应对：被墙API的替代方案与配置
+
+做量化交易的朋友大概率遇到过这种情况：同一个脚本,访问某些交易所API一切正常,换一个就超时。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/41.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Python项目网络环境应对：被墙API的替代方案与配置</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-10</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>做量化交易的朋友大概率遇到过这种情况：同一个脚本,访问某些交易所API一切正常,换一个就超时。最近我在一个多交易所套利项目里就碰到了——Gate.io直连毫无问题,但Binance和OKX的REST接口全部超时,WebSocket也连不上。</p>
+<p>这篇文章记录一下完整的排查和应对过程,包括连通性检测、替代方案选型、直连配置和长期稳定性监控。代码都是实际项目里跑过的,可以直接拿去改。</p>
+<h2 id="_1">一、先做网络连通性检测</h2>
+<p>遇到API超时,第一步不是急着挂代理,而是确认到底是DNS问题、TCP不通还是TLS握手失败。不同层的故障对应不同的解决方案。</p>
+<h3 id="11">1.1 分层检测脚本</h3>
+<pre class="codehilite"><code class="language-python">import socket
+import ssl
+import time
+import requests
+from urllib.parse import urlparse
+
+def check_dns(host: str) -&gt; dict:
+    &quot;&quot;&quot;检测DNS解析&quot;&quot;&quot;
+    try:
+        start = time.time()
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        ips = list({info[4][0] for info in infos})
+        return {
+            &quot;ok&quot;: True,
+            &quot;ips&quot;: ips,
+            &quot;elapsed_ms&quot;: round((time.time() - start) * 1000, 2)
+        }
+    except Exception as e:
+        return {&quot;ok&quot;: False, &quot;error&quot;: str(e)}
+
+
+def check_tcp(host: str, port: int = 443, timeout: float = 5.0) -&gt; dict:
+    &quot;&quot;&quot;检测TCP连接&quot;&quot;&quot;
+    try:
+        start = time.time()
+        with socket.create_connection((host, port), timeout=timeout):
+            return {
+                &quot;ok&quot;: True,
+                &quot;elapsed_ms&quot;: round((time.time() - start) * 1000, 2)
+            }
+    except Exception as e:
+        return {&quot;ok&quot;: False, &quot;error&quot;: str(e)}
+
+
+def check_tls(host: str, port: int = 443, timeout: float = 5.0) -&gt; dict:
+    &quot;&quot;&quot;检测TLS握手&quot;&quot;&quot;
+    ctx = ssl.create_default_context()
+    try:
+        start = time.time()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                return {
+                    &quot;ok&quot;: True,
+                    &quot;tls_version&quot;: ssock.version(),
+                    &quot;elapsed_ms&quot;: round((time.time() - start) * 1000, 2)
+                }
+    except Exception as e:
+        return {&quot;ok&quot;: False, &quot;error&quot;: str(e)}
+
+
+def check_http(url: str, timeout: float = 8.0) -&gt; dict:
+    &quot;&quot;&quot;检测完整HTTP请求&quot;&quot;&quot;
+    try:
+        start = time.time()
+        r = requests.get(url, timeout=timeout)
+        return {
+            &quot;ok&quot;: True,
+            &quot;status&quot;: r.status_code,
+            &quot;elapsed_ms&quot;: round((time.time() - start) * 1000, 2)
+        }
+    except Exception as e:
+        return {&quot;ok&quot;: False, &quot;error&quot;: str(e)}
+
+
+if __name__ == &quot;__main__&quot;:
+    targets = {
+        &quot;Gate.io&quot;:  &quot;https://api.gateio.ws/api/v4/spot/time&quot;,
+        &quot;Binance&quot;:  &quot;https://api.binance.com/api/v3/time&quot;,
+        &quot;OKX&quot;:      &quot;https://www.okx.com/api/v5/public/time&quot;,
+    }
+    for name, url in targets.items():
+        host = urlparse(url).hostname
+        print(f&quot;\n=== {name} ({host}) ===&quot;)
+        print(&quot;DNS :&quot;, check_dns(host))
+        print(&quot;TCP :&quot;, check_tcp(host))
+        print(&quot;TLS :&quot;, check_tls(host))
+        print(&quot;HTTP:&quot;, check_http(url))
+</code></pre>
+
+<p>跑一遍就能定位问题层级。我本地实测的结果:</p>
+<table>
+<thead>
+<tr>
+<th>交易所</th>
+<th>DNS</th>
+<th>TCP</th>
+<th>TLS</th>
+<th>HTTP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gate.io</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅ 200</td>
+</tr>
+<tr>
+<td>Binance</td>
+<td>✅</td>
+<td>❌ timeout</td>
+<td>-</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>OKX</td>
+<td>✅</td>
+<td>❌ timeout</td>
+<td>-</td>
+<td>❌</td>
+</tr>
+</tbody>
+</table>
+<p>DNS能解析出IP,但TCP连不上,这是典型的<strong>IP层被阻断</strong>。这种情况下改hosts、换DNS都没用,必须走代理或者找替代域名。</p>
+<h3 id="12">1.2 判断是否被墙的辅助信号</h3>
+<ul>
+<li>DNS返回的是真实IP(不是0.0.0.0或污染IP),但TCP握手超时 → 大概率IP封锁</li>
+<li>TCP通但TLS握手被重置(ConnectionResetError) → SNI阻断</li>
+<li>只有HTTP层超时 → 可能是WAF或接口本身限流</li>
+</ul>
+<h2 id="api">二、API替代方案选择</h2>
+<p>确认被墙之后,有几条路可以走,按成本和稳定性排序:</p>
+<h3 id="21">2.1 方案对比</h3>
+<table>
+<thead>
+<tr>
+<th>方案</th>
+<th>成本</th>
+<th>稳定性</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>交易所备用域名</td>
+<td>免费</td>
+<td>中</td>
+<td>临时应急</td>
+</tr>
+<tr>
+<td>自建代理(VPS)</td>
+<td>低</td>
+<td>高</td>
+<td>长期项目</td>
+</tr>
+<tr>
+<td>商业代理服务</td>
+<td>中</td>
+<td>高</td>
+<td>多地区需求</td>
+</tr>
+<tr>
+<td>第三方数据聚合API</td>
+<td>中高</td>
+<td>中</td>
+<td>只读行情</td>
+</tr>
+<tr>
+<td>切换到直连可用的交易所</td>
+<td>免费</td>
+<td>高</td>
+<td>策略允许时</td>
+</tr>
+</tbody>
+</table>
+<h3 id="22">2.2 备用域名</h3>
+<p>Binance和OKX都有一些面向不同地区的域名,比如 <code>api1.binance.com</code>、<code>api-gcp.binance.com</code>,OKX的 <code>aws.okx.com</code>。这些域名走的IP池不同,有时能绕过部分封锁,但<strong>不稳定</strong>,不能作为长期方案。</p>
+<pre class="codehilite"><code class="language-python">BINANCE_ENDPOINTS = [
+    &quot;https://api.binance.com&quot;,
+    &quot;https://api1.binance.com&quot;,
+    &quot;https://api2.binance.com&quot;,
+    &quot;https://api3.binance.com&quot;,
+    &quot;https://api-gcp.binance.com&quot;,
+]
+
+def pick_alive_endpoint(endpoints, path=&quot;/api/v3/time&quot;, timeout=3.0):
+    for base in endpoints:
+        try:
+            r = requests.get(base + path, timeout=timeout)
+            if r.status_code == 200:
+                return base
+        except Exception:
+            continue
+    return None
+</code></pre>
+
+<h3 id="23">2.3 自建代理(推荐)</h3>
+<p>长期跑的策略,最省心的还是自建。一台海外VPS + 一个轻量HTTP/SOCKS5代理,成本每月几美元,稳定性远超公共代理。</p>
+<p>如果只是HTTP API,直接在requests里指定代理即可:</p>
+<pre class="codehilite"><code class="language-python">PROXIES = {
+    &quot;http&quot;:  &quot;http://user:pass@your-vps-ip:port&quot;,
+    &quot;https&quot;: &quot;http://user:pass@your-vps-ip:port&quot;,
+}
+
+r = requests.get(&quot;https://api.binance.com/api/v3/time&quot;,
+                 proxies=PROXIES, timeout=5)
+</code></pre>
+
+<p>WebSocket的话,<code>websockets</code> 库从8.0开始支持通过环境变量走代理:</p>
+<pre class="codehilite"><code class="language-bash">export HTTPS_PROXY=http://user:pass@your-vps-ip:port
+export HTTP_PROXY=http://user:pass@your-vps-ip:port
+</code></pre>
+
+<p>或者用 <code>python-socks</code> 显式配置:</p>
+<pre class="codehilite"><code class="language-python">import asyncio
+import websockets
+from python_socks.async_.asyncio import Proxy
+
+async def connect_ws(url: str, proxy_url: str):
+    proxy = Proxy.from_url(proxy_url)
+    sock = await proxy.connect(dest_host=&quot;stream.binance.com&quot;, dest_port=443)
+    return await websockets.connect(url, sock=sock)
+
+async def main():
+    ws = await connect_ws(
+        &quot;wss://stream.binance.com:9443/ws/btcusdt@trade&quot;,
+        &quot;socks5://user:pass@your-vps-ip:port&quot;
+    )
+    async for msg in ws:
+        print(msg[:100])
+
+asyncio.run(main())
+</code></pre>
+
+<h3 id="24">2.4 切换到直连可用的交易所</h3>
+<p>如果策略本身不依赖特定交易所,最干净的做法是直接用直连可用的。比如Gate.io在国内大部分网络环境下可以直连,这时候可以把行情源和下单通道都切过去,代理只作为灾备。</p>
+<h2 id="_2">三、直连配置方法</h2>
+<p>即使主链路走代理,也建议保留一条直连通道作为fallback。下面是一个<strong>多通道自动切换</strong>的配置方案。</p>
+<h3 id="31">3.1 统一客户端封装</h3>
+<pre class="codehilite"><code class="language-python">import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+class ExchangeClient:
+    def __init__(self, name, base_urls, proxies=None, timeout=5.0):
+        self.name = name
+        self.base_urls = base_urls          # 多个候选域名
+        self.proxies = proxies              # 可为None
+        self.timeout = timeout
+        self.active_base = None
+        self.session = self._build_session()
+
+    def _build_session(self):
+        s = requests.Session()
+        retry = Retry(
+            total=2, backoff_factor=0.3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=[&quot;GET&quot;, &quot;POST&quot;],
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
+        s.mount(&quot;https://&quot;, adapter)
+        s.mount(&quot;http://&quot;, adapter)
+        return s
+
+    def _try_request(self, base, path, method=&quot;GET&quot;, **kwargs):
+        url = base + path
+        kwargs.setdefault(&quot;timeout&quot;, self.timeout)
+        if self.proxies:
+            kwargs[&quot;proxies&quot;] = self.proxies
+        return self.session.request(method, url, **kwargs)
+
+    def request(self, path, method=&quot;GET&quot;, **kwargs):
+        # 优先用上次成功的base
+        candidates = []
+        if self.active_base:
+            candidates.append(self.active_base)
+        candidates += [b for b in self.base_urls if b != self.active_base]
+
+        last_err = None
+        for base in candidates:
+            try:
+                r = self._try_request(base, path, method, **kwargs)
+                if r.status_code &lt; 500:
+                    self.active_base = base
+                    return r
+            except Exception as e:
+                last_err = e
+                continue
+        raise RuntimeError(f&quot;{self.name} all endpoints failed: {last_err}&quot;)
+</code></pre>
+
+<h3 id="32">3.2 使用示例</h3>
+<pre class="codehilite"><code class="language-python">gate = ExchangeClient(
+    &quot;Gate.io&quot;,
+    base_urls=[&quot;https://api.gateio.ws&quot;],
+    proxies=None,  # 直连
+)
+
+binance = ExchangeClient(
+    &quot;Binance&quot;,
+    base_urls=[
+        &quot;https://api.binance.com&quot;,
+        &quot;https://api1.binance.com&quot;,
+        &quot;https://api-gcp.binance.com&quot;,
+    ],
+    proxies={&quot;https&quot;: &quot;http://user:pass@vps:port&quot;},
+)
+
+r = gate.request(&quot;/api/v4/spot/time&quot;)
+print(&quot;Gate:&quot;, r.json())
+
+r = binance.request(&quot;/api/v3/time&quot;)
+print(&quot;Binance:&quot;, r.json())
+</code></pre>
+
+<p>这个封装的核心思路是:<strong>每个交易所维护一组候选域名 + 一个可选代理,请求时按顺序尝试,成功后记住活跃域名</strong>。这样即便某条线路临时挂掉,也能自动漂移到可用的通道。</p>
+<h3 id="33">3.3 环境变量集中管理</h3>
+<p>不要把代理地址硬编码在代码里,用环境变量或配置文件:</p>
+<pre class="codehilite"><code class="language-python">import os
+
+PROXY = os.getenv(&quot;EXCHANGE_PROXY&quot;)  # http://user:pass@host:port
+PROXIES = {&quot;http&quot;: PROXY, &quot;https&quot;: PROXY} if PROXY else None
+</code></pre>
+
+<p>配合 <code>.env</code> 文件:</p>
+<pre class="codehilite"><code>EXCHANGE_PROXY=http://user:pass@your-vps:port
+</code></pre>
+
+<h2 id="_3">四、稳定性监控</h2>
+<p>代理链路和直连链路都需要持续监控,不然某天半夜断了,策略直接停摆。</p>
+<h3 id="41">4.1 周期性探测</h3>
+<pre class="codehilite"><code class="language-python">import time
+import logging
+from datetime import datetime
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=&quot;%(asctime)s [%(levelname)s] %(message)s&quot;
+)
+
+def probe(client: ExchangeClient, path: str, interval: int = 30):
+    while True:
+        start = time.time()
+        try:
+            r = client.request(path)
+            latency = round((time.time() - start) * 1000, 2)
+            logging.info(
+                f&quot;{client.name} OK | base={client.active_base} &quot;
+                f&quot;| status={r.status_code} | {latency}ms&quot;
+            )
+        except Exception as e:
+            logging.error(f&quot;{client.name} FAIL | {e}&quot;)
+        time.sleep(interval)
+</code></pre>
+
+<h3 id="42">4.2 失败率统计与告警</h3>
+<p>光打日志不够,得量化。用一个滑动窗口统计最近N次请求的成功率,低于阈值就告警:</p>
+<pre class="codehilite"><code class="language-python">from collections import deque
+
+class HealthTracker:
+    def __init__(self, window=20, fail_threshold=0.3):
+        self.window = deque(maxlen=window)
+        self.fail_threshold = fail_threshold
+
+    def record(self, ok: bool):
+        self.window.append(1 if ok else 0)
+
+    @property
+    def fail_rate(self) -&gt; float:
+        if not self.window:
+            return 0.0
+        return 1 - sum(self.window) / len(self.window)
+
+    def should_alert(self) -&gt; bool:
+        return len(self.window) == self.window.maxlen and \
+               self.fail_rate &gt;= self.fail_threshold
+</code></pre>
+
+<p>配合告警通道(企业微信/Telegram/邮件)接入即可。我一般用Telegram Bot,几行代码搞定:</p>
+<pre class="codehilite"><code class="language-python">def send_alert(token, chat_id, text):
+    url = f&quot;https://api.telegram.org/bot{token}/sendMessage&quot;
+    requests.post(url, json={&quot;chat_id&quot;: chat_id, &quot;text&quot;: text}, timeout=5)
+</code></pre>
+
+<h3 id="43">4.3 探测与业务分离</h3>
+<p>监控线程和交易主逻辑要分开跑,避免探测阻塞下单。用 <code>threading</code> 或 <code>asyncio</code> 都可以:</p>
+<pre class="codehilite"><code class="language-python">import threading
+
+def start_monitor(clients):
+    for name, (client, path) in clients.items():
+        t = threading.Thread(
+            target=probe, args=(client, path),
+            daemon=True, name=f&quot;probe-{name}&quot;
+        )
+        t.start()
+</code></pre>
+
+<p>守护线程随主进程退出,不会影响正常关闭。</p>
+<h2 id="_4">五、几个实践中的坑</h2>
+<ol>
+<li>
+<p><strong>代理超时设置要短</strong>。代理本身挂了的话,默认超时会拖很久,建议 <code>timeout=(3, 5)</code> 分别控制连接和读取超时。</p>
+</li>
+<li>
+<p><strong>WebSocket重连要带退避</strong>。被墙环境下WS断线频繁,指数退避(1s、2s、4s、8s,上限60s)比固定间隔靠谱。</p>
+</li>
+<li>
+<p><strong>不要在请求里混用代理和直连</strong>。有些库会读环境变量 <code>HTTP_PROXY</code>,导致你代码里传了 <code>proxies=None</code> 也没用。必要时用 <code>session.trust_env = False</code> 关掉。</p>
+</li>
+<li>
+<p><strong>时钟同步</strong>。走代理后延迟增加,签名接口对时间戳敏感,记得定期NTP同步,或者用服务器返回的时间校正本地时间偏移。</p>
+</li>
+<li>
+<p><strong>备用域名定期更新</strong>。交易所域名策略会变,把候选列表做成可配置项,别写死。</p>
+</li>
+</ol>
+<h2 id="_5">小结</h2>
+<p>应对被墙API的核心思路是:<strong>分层检测定位问题 → 多通道冗余 → 自动切换 → 持续监控</strong>。代码层面,一个统一的客户端封装 + 健康追踪器就能覆盖大部分场景。不要指望单一方案永远有效,把切换逻辑做进代码里,才是长期稳定的关键。</p>
+<p>更多Python量化实战与自动化技巧,欢迎关注本站后续更新。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">网络配置</span><span class="tag-badge">API</span><span class="tag-badge">替代方案</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
