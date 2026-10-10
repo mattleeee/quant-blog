@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Python项目网络环境应对：被墙API的替代方案与配置</title>
+            <link>https://www.hkcode.dpdns.org/posts/41.html</link>
+            <description>Python项目网络环境应对：被墙API的替代方案与配置
+
+做量化交易的朋友大概率遇到过这种情况：同一个脚本,访问某些交易所API一切正常,换一个就超时。最近我在一个多交易所套利项目里就碰到了——Gate.io直连毫无问题,但Binance和OKX的REST接口全部超时,WebSocket也连不上。...</description>
+            <pubDate>2026-10-10</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>CHANGELOG.md规范化管理：让每次变更都有迹可循</title>
             <link>https://www.hkcode.dpdns.org/posts/40.html</link>
             <description>CHANGELOG.md规范化管理：让每次变更都有迹可循
@@ -141,13 +150,6 @@
             <link>https://www.hkcode.dpdns.org/posts/22.html</link>
             <description>做量化交易系统,信号扫描是最基础也最容易被低估的一环。很多人一开始写个 for 循环遍历标的、逐个算指标、再 if 判断,标的少的时候没问题,一旦标的数量上到几百上千,单线程扫描动辄几十秒,盘中根本来不及。 这篇文章讲清楚一件事:怎么设计一个结构清晰、可扩展、能并行跑的信号扫描模块。只讲技术实现,不涉及任何具体交易品种...</description>
             <pubDate>2026-09-21</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>模拟交易系统架构设计：从信号扫描到自动执行</title>
-            <link>https://www.hkcode.dpdns.org/posts/21.html</link>
-            <description>## 模拟交易系统架构设计：从信号扫描到自动执行 实盘交易系统的核心难点不在策略，而在工程化。信号计算与自动执行之间的延迟、异常处理、状态一致性，每一项都可能让策略失效。本文分享一套完整的模拟交易系统架构，覆盖信号扫描、市场分析、模拟撮合与通知推送四大模块，代码可直接参考改造。 ### 一、系统整体架构 整个系统采用*...</description>
-            <pubDate>2026-08-26</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
