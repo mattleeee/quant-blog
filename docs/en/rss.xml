@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Wiring WeChat Push into Python Automation with PushPlus</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/13.html</link>
+            <description>PushPlus is the shortest path from a Python script to your phone. One HTTP POST with a token, a title, and a markdown body, and the message lands in WeChat....</description>
+            <pubDate>2026-10-10</pubDate>
+            <category>Notifications</category>
+        </item>
+        <item>
             <title>Firewall Forensics: PAT Sessions, NAT44 Hit Counters and the Missing UDP Rule</title>
             <link>https://www.hkcode.dpdns.org/en/posts/12.html</link>
             <description>A GB28181 camera was sending heartbeats. The SIP server saw them. The firewall session table confirmed the outbound translation....</description>
