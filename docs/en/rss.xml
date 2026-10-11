@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Notification Deduplication: A Five-Minute Title Window</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/14.html</link>
+            <description>Alerts that fire twice for the same event are worse than alerts that never fire at all....</description>
+            <pubDate>2026-10-11</pubDate>
+            <category>Notifications</category>
+        </item>
+        <item>
             <title>Wiring WeChat Push into Python Automation with PushPlus</title>
             <link>https://www.hkcode.dpdns.org/en/posts/13.html</link>
             <description>PushPlus is the shortest path from a Python script to your phone. One HTTP POST with a token, a title, and a markdown body, and the message lands in WeChat....</description>
