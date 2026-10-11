@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微信推送绑定失败排查：SQLite数据库清理方案 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="微信推送绑定失败排查：SQLite数据库清理方案
+
+问题现象
+
+上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。...">
+    <meta name="keywords" content="微信推送,SQLite,绑定失败,排查">
+    <meta property="og:title" content="微信推送绑定失败排查：SQLite数据库清理方案">
+    <meta property="og:description" content="微信推送绑定失败排查：SQLite数据库清理方案
+
+问题现象
+
+上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/42.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>微信推送绑定失败排查：SQLite数据库清理方案</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-11</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<h2 id="_1">问题现象</h2>
+<p>上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。方案用的是企业微信应用消息 + 自建绑定服务，整体架构不复杂：</p>
+<ul>
+<li><code>im-service</code>：负责微信扫码绑定、token 管理、消息转发</li>
+<li><code>push-worker</code>：从 Redis 队列消费消息，调用 im-service 的 HTTP 接口</li>
+<li>SQLite：存储绑定关系、access_token、扫码会话状态</li>
+</ul>
+<p>上线跑了几天都正常，直到某天早上收到告警：微信推送全部失败。登录服务器手动测试，发现扫码绑定时页面直接提示“连接失败，请稍后重试”。</p>
+<p>这个报错很模糊，既不是“token 失效”，也不是“用户未绑定”，说明问题出在绑定流程本身，而不是消息通道。</p>
+<h2 id="_2">排查过程</h2>
+<h3 id="_3">第一步：确认服务存活</h3>
+<p>先看进程和端口：</p>
+<pre class="codehilite"><code class="language-bash">ps aux | grep im-service
+ss -lntp | grep 8300
+</code></pre>
+
+<p>进程在，端口也监听正常。<code>curl</code> 本地健康检查接口返回 200：</p>
+<pre class="codehilite"><code class="language-bash">curl -s http://127.0.0.1:8300/healthz
+# {&quot;status&quot;:&quot;ok&quot;}
+</code></pre>
+
+<p>服务没挂，问题在业务逻辑层。</p>
+<h3 id="_4">第二步：看日志定位失败点</h3>
+<p>im-service 用的是 loguru，日志按天切割。直接 grep 关键字：</p>
+<pre class="codehilite"><code class="language-bash">grep -i &quot;bind&quot; /var/log/im-service/app.log | tail -50
+</code></pre>
+
+<p>关键几行：</p>
+<pre class="codehilite"><code>ERROR  bind_session_create failed: database is locked
+ERROR  qrcode generate error: sqlite3.OperationalError: database is locked
+</code></pre>
+
+<p><code>database is locked</code>——SQLite 的经典问题。说明有连接没有释放，或者有长事务卡住了写锁。</p>
+<h3 id="sqlite">第三步：检查 SQLite 状态</h3>
+<p>先看数据库文件：</p>
+<pre class="codehilite"><code class="language-bash">ls -lh /data/im-service/*.db*
+</code></pre>
+
+<p>输出：</p>
+<pre class="codehilite"><code>-rw-r--r-- 1 root root 1.2G  im-service.db
+-rw-r--r-- 1 root root  32K  im-service.db-shm
+-rw-r--r-- 1 root root 4.1M  im-service.db-wal
+</code></pre>
+
+<p><code>im-service.db</code> 已经 1.2G，而正常情况这个库应该只有几 MB。<code>-wal</code> 文件也有 4MB 没 checkpoint。基本可以确认：数据库被写爆了。</p>
+<p>再看表大小：</p>
+<pre class="codehilite"><code class="language-bash">sqlite3 /data/im-service/im-service.db &quot;SELECT name, SUM(pgsize)/1024/1024 AS mb FROM dbstat GROUP BY name ORDER BY mb DESC LIMIT 10;&quot;
+</code></pre>
+
+<p>结果：</p>
+<pre class="codehilite"><code>bind_session|1080
+access_token|45
+bind_relation|3
+...
+</code></pre>
+
+<p><code>bind_session</code> 表占了 1GB。这张表本应只存临时的扫码会话，正常情况几秒到几分钟就过期删除。现在明显是清理逻辑失效了。</p>
+<h3 id="_5">第四步：确认根因</h3>
+<p>查一下这张表的记录数和最早时间：</p>
+<pre class="codehilite"><code class="language-bash">sqlite3 /data/im-service/im-service.db \
+&quot;SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM bind_session;&quot;
+</code></pre>
+
+<pre class="codehilite"><code>1284733|2024-11-03 09:12:33|2025-01-15 08:41:02
+</code></pre>
+
+<p>120 万条记录，从去年 11 月堆到现在。翻了代码，清理逻辑是这样的：</p>
+<pre class="codehilite"><code class="language-python"># 旧代码，有问题
+def cleanup_expired_sessions():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        &quot;DELETE FROM bind_session WHERE expire_at &lt; datetime('now')&quot;
+    )
+    conn.commit()
+    # 忘了 conn.close()
+</code></pre>
+
+<p>两个问题叠加：</p>
+<ol>
+<li><strong>连接未关闭</strong>：每次调用都泄漏一个连接，累积到一定数量后 SQLite 拿不到写锁</li>
+<li><strong>删除没有分批</strong>：120 万行一次性 DELETE，事务巨大，WAL 文件暴涨，进一步加剧锁竞争</li>
+</ol>
+<p>扫码时创建新 session 需要写锁，拿不到就抛 <code>database is locked</code>，前端看到的就是“连接失败”。</p>
+<h2 id="_6">解决方案</h2>
+<h3 id="_7">立即恢复：清理数据库文件</h3>
+<p>最直接的办法是把这几个文件移走，让服务重启后自动重建：</p>
+<pre class="codehilite"><code class="language-bash"># 先停服务
+systemctl stop im-service
+
+# 备份而不是直接删，方便后续分析
+mkdir -p /data/backup/$(date +%F)
+mv /data/im-service/im-service.db     /data/backup/$(date +%F)/
+mv /data/im-service/im-service.db-shm /data/backup/$(date +%F)/
+mv /data/im-service/im-service.db-wal /data/backup/$(date +%F)/
+
+# 重启，服务会自动建表
+systemctl start im-service
+</code></pre>
+
+<p>注意：<code>im-service.db</code> 里除了 <code>bind_session</code>，还有 <code>bind_relation</code>（用户绑定关系）和 <code>access_token</code>。如果直接删，绑定关系会丢，所有用户需要重新扫码。</p>
+<p>生产环境更稳妥的做法是只清 <code>bind_session</code>，保留另外两张表：</p>
+<pre class="codehilite"><code class="language-bash">systemctl stop im-service
+
+sqlite3 /data/im-service/im-service.db &lt;&lt;'SQL'
+PRAGMA journal_mode=WAL;
+DELETE FROM bind_session;
+VACUUM;
+SQL
+
+systemctl start im-service
+</code></pre>
+
+<p><code>VACUUM</code> 会重建整个数据库文件，把碎片空间真正释放回磁盘。1GB 的库执行完会缩回几 MB。执行期间会短暂锁库，所以必须先停服务。</p>
+<h3 id="_8">修复清理逻辑</h3>
+<p>数据库清空只是止血，代码不改下次还会复发。重写清理函数：</p>
+<pre class="codehilite"><code class="language-python">import sqlite3
+import logging
+from contextlib import contextmanager
+
+DB_PATH = &quot;/data/im-service/im-service.db&quot;
+BATCH_SIZE = 5000
+
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def get_conn():
+    &quot;&quot;&quot;每次用完确保关闭，避免连接泄漏&quot;&quot;&quot;
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute(&quot;PRAGMA journal_mode=WAL&quot;)
+    conn.execute(&quot;PRAGMA busy_timeout=5000&quot;)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def cleanup_expired_sessions() -&gt; int:
+    &quot;&quot;&quot;分批删除过期 session，避免长事务&quot;&quot;&quot;
+    total = 0
+    while True:
+        with get_conn() as conn:
+            cur = conn.execute(
+                &quot;&quot;&quot;
+                DELETE FROM bind_session
+                WHERE rowid IN (
+                    SELECT rowid FROM bind_session
+                    WHERE expire_at &lt; datetime('now', '-1 hour')
+                    LIMIT ?
+                )
+                &quot;&quot;&quot;,
+                (BATCH_SIZE,),
+            )
+            conn.commit()
+            deleted = cur.rowcount
+
+        total += deleted
+        if deleted &lt; BATCH_SIZE:
+            break
+
+    logger.info(&quot;cleanup_expired_sessions done, deleted=%d&quot;, total)
+    return total
+</code></pre>
+
+<p>关键改动：</p>
+<ul>
+<li><code>contextmanager</code> 保证连接一定关闭</li>
+<li><code>busy_timeout</code> 让写锁等待而不是立刻报错</li>
+<li>分批删除，每批 5000 行，事务短，WAL 不会暴涨</li>
+<li>保留 1 小时缓冲，避免边界情况误删正在使用的 session</li>
+</ul>
+<h3 id="_9">加上定时任务</h3>
+<p>清理函数挂到 APScheduler 上，每 10 分钟跑一次：</p>
+<pre class="codehilite"><code class="language-python">from apscheduler.schedulers.background import BackgroundScheduler
+
+scheduler = BackgroundScheduler(timezone=&quot;Asia/Shanghai&quot;)
+scheduler.add_job(
+    cleanup_expired_sessions,
+    &quot;interval&quot;,
+    minutes=10,
+    id=&quot;cleanup_bind_session&quot;,
+    max_instances=1,      # 防止上一次没跑完又启动
+    coalesce=True,        # 错过的任务合并成一次
+)
+scheduler.start()
+</code></pre>
+
+<p><code>max_instances=1</code> 很重要。如果某次清理因为数据量大跑得慢，不加这个参数会并发启动多个清理任务，反而把锁搞死。</p>
+<h3 id="_10">加监控</h3>
+<p>光靠日志不够，加两个 Prometheus 指标：</p>
+<pre class="codehilite"><code class="language-python">from prometheus_client import Gauge
+
+db_size_mb = Gauge(&quot;im_db_size_mb&quot;, &quot;SQLite file size in MB&quot;)
+bind_session_rows = Gauge(&quot;im_bind_session_rows&quot;, &quot;Rows in bind_session&quot;)
+
+
+def report_metrics():
+    import os
+    size = os.path.getsize(DB_PATH) / 1024 / 1024
+    db_size_mb.set(size)
+
+    with get_conn() as conn:
+        n = conn.execute(&quot;SELECT COUNT(*) FROM bind_session&quot;).fetchone()[0]
+    bind_session_rows.set(n)
+</code></pre>
+
+<p>配上告警规则：<code>im_db_size_mb &gt; 200</code> 或 <code>im_bind_session_rows &gt; 100000</code> 就报警。这样在问题爆发前就能收到通知，而不是等用户反馈“连接失败”。</p>
+<h2 id="_11">预防措施</h2>
+<p>这次踩的坑不复杂，但几个点值得记下来：</p>
+<p><strong>1. SQLite 适合小数据量，但要管好连接生命周期。</strong> 用 <code>contextmanager</code> 或连接池，绝不裸写 <code>sqlite3.connect</code> 然后忘记关闭。Python 的 <code>sqlite3</code> 不会自动回收连接，泄漏是静默的。</p>
+<p><strong>2. 所有 DELETE 都要考虑分批。</strong> 单表超过 10 万行就别一次性删了。<code>LIMIT + 循环</code> 是标准写法，代码多几行，稳定性差很多。</p>
+<p><strong>3. WAL 模式要配 <code>busy_timeout</code>。</strong> 默认 <code>busy_timeout=0</code>，拿不到锁立即报错。设成 5000ms 能让大部分瞬时竞争自动化解。</p>
+<p><strong>4. 临时表要有 TTL 机制。</strong> <code>bind_session</code> 这种本质是缓存，写的时候就要想好怎么删。要么定时任务，要么写入时顺带清理，别指望“以后再说”。</p>
+<p><strong>5. 数据库文件大小纳入监控。</strong> 磁盘、连接数、QPS 都监控了，唯独忘了文件大小。对于 SQLite 这种单文件数据库，文件体积是最直观的健康指标。</p>
+<p><strong>6. 清理逻辑上线前先在生产数据上 dry-run。</strong> 用 <code>SELECT COUNT(*)</code> 跑一遍条件，看看会删多少行。这次如果提前跑一下，会发现 120 万行的删除量，自然会想到要分批。</p>
+<p>修完之后跑了半个月，<code>im-service.db</code> 稳定在 5MB 左右，<code>bind_session</code> 表常年维持在几百行。扫码绑定再没出过问题。</p>
+<hr />
+<p>更多 Python 量化交易与自动化实战内容，欢迎关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">微信推送</span><span class="tag-badge">SQLite</span><span class="tag-badge">绑定失败</span><span class="tag-badge">排查</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
