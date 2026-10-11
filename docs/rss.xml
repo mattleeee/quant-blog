@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>微信推送绑定失败排查：SQLite数据库清理方案</title>
+            <link>https://www.hkcode.dpdns.org/posts/42.html</link>
+            <description>微信推送绑定失败排查：SQLite数据库清理方案
+
+问题现象
+
+上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。...</description>
+            <pubDate>2026-10-11</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>Python项目网络环境应对：被墙API的替代方案与配置</title>
             <link>https://www.hkcode.dpdns.org/posts/41.html</link>
             <description>Python项目网络环境应对：被墙API的替代方案与配置
@@ -143,13 +154,6 @@
             <link>https://www.hkcode.dpdns.org/posts/23.html</link>
             <description>做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。 这篇文章梳理三种频率控制方案：sleep延迟、基于时间窗口的计数器、令牌桶算法。从最简单的开始，逐步演进到生产级方案。 方案一：time.sle...</description>
             <pubDate>2026-09-22</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>信号扫描模块设计与实现：多指标并行检测</title>
-            <link>https://www.hkcode.dpdns.org/posts/22.html</link>
-            <description>做量化交易系统,信号扫描是最基础也最容易被低估的一环。很多人一开始写个 for 循环遍历标的、逐个算指标、再 if 判断,标的少的时候没问题,一旦标的数量上到几百上千,单线程扫描动辄几十秒,盘中根本来不及。 这篇文章讲清楚一件事:怎么设计一个结构清晰、可扩展、能并行跑的信号扫描模块。只讲技术实现,不涉及任何具体交易品种...</description>
-            <pubDate>2026-09-21</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
