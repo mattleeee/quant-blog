@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notification Deduplication: A Five-Minute Title Window - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Alerts that fire twice for the same event are worse than alerts that never fire at all....">
+    <meta name="keywords" content="deduplication,idempotency,notifications,time window">
+    <meta property="og:title" content="Notification Deduplication: A Five-Minute Title Window">
+    <meta property="og:description" content="Alerts that fire twice for the same event are worse than alerts that never fire at all....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/14.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Notification Deduplication: A Five-Minute Title Window</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-11</span>
+                <span class="category"><span class="tag-badge">Notifications</span></span>
+            </div>
+            <div class="post-content">
+<p>Alerts that fire twice for the same event are worse than alerts that never fire at all. The first duplicate teaches you the system is noisy; the tenth teaches you to swipe notifications away without reading them. Once that habit forms, a real alert gets the same treatment.</p>
+<p>The usual cause is not a broken alert rule. It is retries and overlapping schedulers. A cron job restarts mid-run, the previous process is still alive, both evaluate the same condition, both push. Or a task queue retries after a timeout while the original request actually succeeded. Or you run the same check from two machines during a deploy. Each path is individually correct, and together they produce two notifications for one event.</p>
+<p>Deduplication belongs at the push boundary, not in the detection logic. Detection rules are where you want redundancy; the notification layer is where you want exactly-once behavior. This post covers a small, dependency-free dedup cache that enforces a five-minute window keyed on the notification title, with an explicit bypass for signals that must never be suppressed.</p>
+<h2 id="the-dedup-contract">The dedup contract</h2>
+<p>Keep the rule short enough to state in one sentence:</p>
+<blockquote>
+<p>Before pushing a notification, look up its normalized title in a JSON cache. If the same title was pushed within the last five minutes, skip the push and log the suppression. Otherwise, push and record the timestamp.</p>
+</blockquote>
+<p>Two properties matter:</p>
+<ul>
+<li><strong>Idempotency by title.</strong> Two calls with the same title inside the window produce one push.</li>
+<li><strong>Fail-open.</strong> If the cache is unreadable or corrupt, push anyway. A duplicate is annoying; a swallowed alert is a bug you find out about too late.</li>
+</ul>
+<p>The cache is deliberately tiny — one file, one dict, no database. This is not an event log. It is a short-lived suppression table, and anything older than the window is garbage.</p>
+<h2 id="cache-file-layout">Cache file layout</h2>
+<p>The file is a flat JSON object mapping normalized titles to Unix timestamps:</p>
+<pre class="codehilite"><code class="language-json">{
+  &quot;disk_usage_high:/var&quot;: 1730541123.44,
+  &quot;feed_stale:BTC-USD&quot;: 1730541401.02,
+  &quot;worker_queue_backlog&quot;: 1730539807.91
+}
+</code></pre>
+
+<p>A few decisions worth being explicit about:</p>
+<ul>
+<li><strong>Title as key, timestamp as value.</strong> No arrays, no per-key history. You only ever need the most recent push time to answer "was this within the window?"</li>
+<li><strong>Unix epoch floats.</strong> Timezone-free, trivially comparable, and easy to prune. If you store ISO strings you have to parse them back, and parsing is where bugs live.</li>
+<li><strong>One file, not one file per title.</strong> A per-title layout turns a read into a directory scan and makes atomic updates harder. With a few hundred keys, a single file is microseconds.</li>
+<li><strong>Prune on write.</strong> Entries older than the window are dropped when the file is rewritten. The file stays bounded by the number of distinct titles active in the last five minutes, which is small.</li>
+</ul>
+<p>If you want a durable audit trail of what was suppressed, write that to your normal log sink. Do not grow the cache into a database — the moment it becomes stateful infrastructure, it becomes a thing that can fail and block pushes.</p>
+<h2 id="atomic-writes-with-tempfile-and-osreplace">Atomic writes with tempfile and os.replace</h2>
+<p>The cache is read and written by processes that may run concurrently. A naive <code>open(path, "w")</code> truncates the file before writing, so a reader that lands in that gap sees an empty file. Worse, a crash mid-write leaves a half-written JSON document that fails to parse on the next run.</p>
+<p>The fix is the standard write-to-temp-then-rename pattern:</p>
+<pre class="codehilite"><code class="language-python">import json
+import os
+import tempfile
+
+def _write_cache(path: str, data: dict) -&gt; None:
+    directory = os.path.dirname(path) or &quot;.&quot;
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=&quot;.dedup-&quot;, suffix=&quot;.tmp&quot;)
+    try:
+        with os.fdopen(fd, &quot;w&quot;, encoding=&quot;utf-8&quot;) as fh:
+            json.dump(data, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        # Clean up the temp file if anything went wrong before the rename.
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+</code></pre>
+
+<p>Why this works:</p>
+<ul>
+<li><code>tempfile.mkstemp</code> creates the temp file in the <strong>same directory</strong> as the target. <code>os.replace</code> is atomic only within a filesystem, so a temp file in <code>/tmp</code> renamed onto a path in <code>/var/lib</code> can degrade to a copy — or fail outright with <code>EXDEV</code>.</li>
+<li><code>flush</code> plus <code>os.fsync</code> pushes bytes to disk before the rename. Without the fsync, a crash can leave you with a renamed file whose contents were never durable.</li>
+<li><code>os.replace</code> is atomic on POSIX and on Windows. Readers see either the old file or the new one, never a truncated intermediate.</li>
+<li>On any exception before the rename, the temp file is removed so you do not accumulate <code>.dedup-*.tmp</code> litter.</li>
+</ul>
+<p>This pattern costs one extra file creation per write. For a cache that is written at most a few times per minute, that is irrelevant.</p>
+<h2 id="the-dedup-check">The dedup check</h2>
+<p>Putting it together: read, decide, push, record. The read path must tolerate a missing or corrupt file by returning an empty dict.</p>
+<pre class="codehilite"><code class="language-python">import json
+import logging
+import os
+import time
+
+log = logging.getLogger(__name__)
+
+WINDOW_SECONDS = 300.0
+CACHE_PATH = &quot;/var/lib/alerts/dedup.json&quot;
+
+def _load_cache(path: str) -&gt; dict:
+    try:
+        with open(path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        # Fail open: a broken cache must not block notifications.
+        log.warning(&quot;dedup cache unreadable (%s); treating as empty&quot;, exc)
+        return {}
+    if not isinstance(data, dict):
+        log.warning(&quot;dedup cache has unexpected shape; treating as empty&quot;)
+        return {}
+    return data
+
+def _prune(data: dict, now: float) -&gt; dict:
+    cutoff = now - WINDOW_SECONDS
+    return {k: v for k, v in data.items()
+            if isinstance(v, (int, float)) and v &gt;= cutoff}
+
+def should_push(title: str, *, urgent: bool = False,
+                cache_path: str = CACHE_PATH,
+                window: float = WINDOW_SECONDS) -&gt; bool:
+    &quot;&quot;&quot;Return True if the notification should be pushed.&quot;&quot;&quot;
+    if urgent:
+        log.info(&quot;dedup bypass (urgent): %s&quot;, title)
+        return True
+
+    now = time.time()
+    data = _load_cache(cache_path)
+    last = data.get(title)
+
+    if isinstance(last, (int, float)) and (now - last) &lt; window:
+        log.info(&quot;dedup suppressed: %s (last push %.1fs ago)&quot;, title, now - last)
+        return False
+
+    data = _prune(data, now)
+    data[title] = now
+    _write_cache(cache_path, data)
+    return True
+</code></pre>
+
+<p>Call it right before the transport:</p>
+<pre class="codehilite"><code class="language-python">def push(title: str, body: str, *, urgent: bool = False) -&gt; None:
+    if not should_push(title, urgent=urgent):
+        return
+    send_to_device(title, body)
+</code></pre>
+
+<p>The suppression is logged with the age of the last push, which is what you want when someone asks why they did not get an alert. "Suppressed 42 seconds after the previous push of the same title" is a complete answer.</p>
+<h3 id="a-note-on-the-check-then-write-race">A note on the check-then-write race</h3>
+<p>Two processes can both read the cache, both see no recent entry, and both push. The window narrows the race but does not eliminate it. If you need strict exactly-once across processes, put an advisory lock around the read-modify-write:</p>
+<pre class="codehilite"><code class="language-python">import fcntl
+
+def with_lock(path: str):
+    lock_path = path + &quot;.lock&quot;
+    fh = open(lock_path, &quot;w&quot;)
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh  # caller closes to release
+</code></pre>
+
+<p>On Windows, use <code>msvcrt.locking</code> or a named mutex. In practice, most alerting pipelines are single-process or serialize pushes through a queue, and the window alone is enough. Add the lock only when you have measured the duplicate rate.</p>
+<h2 id="why-the-window-keys-on-the-normalized-title">Why the window keys on the normalized title</h2>
+<p>The single most important design choice is what you hash on. Keying on the full notification body is tempting — it is the thing you actually send — but it breaks dedup in exactly the cases you care about.</p>
+<p>Consider a price or metric alert. The body almost always contains the current value:</p>
+<pre class="codehilite"><code>Title: Disk usage high: /var
+Body:  /var is at 91.4% (threshold 90%)
+</code></pre>
+
+<p>The next check two minutes later produces <code>91.7%</code>. Different body, same condition, second notification. The user sees two alerts for one ongoing problem. Keying on the body means dedup only catches byte-identical retries, which are the easy case you could handle with a request ID anyway.</p>
+<p>The title, by contrast, is the <em>identity of the condition</em>. Normalize it and use that:</p>
+<pre class="codehilite"><code class="language-python">import re
+
+def normalize_title(title: str) -&gt; str:
+    t = title.strip().lower()
+    t = re.sub(r&quot;\s+&quot;, &quot; &quot;, t)
+    return t
+</code></pre>
+
+<p>Normalization matters because titles are often assembled from templates and may differ in case or whitespace between code paths. <code>"Disk usage high: /var"</code> and <code>"disk usage high:  /var"</code> are the same condition and must collapse to one key.</p>
+<p>The rule that follows: <strong>put the stable identity in the title and the volatile detail in the body.</strong> If a title embeds a timestamp, a hostname that changes per replica, or a fluctuating value, dedup will not work — and the fix is to change the title, not to loosen the window.</p>
+<p>If you genuinely need sub-condition granularity, make the condition part of the title deliberately: <code>disk_usage_high:/var</code> and <code>disk_usage_high:/home</code> are separate keys, which is correct. The key should be exactly as specific as the thing a human would consider "the same alert."</p>
+<h2 id="bypassing-the-window-for-urgent-signals">Bypassing the window for urgent signals</h2>
+<p>A five-minute window is right for most alerts and wrong for a few. If a process is crash-looping, or a safety condition trips, you do not want the second occurrence suppressed because the first happened ninety seconds ago.</p>
+<p>The <code>urgent</code> flag above is the escape hatch. Two rules keep it from eroding the whole design:</p>
+<ol>
+<li><strong>Urgency is a property of the alert rule, not of the caller's mood.</strong> Decide at definition time which titles are urgent, and keep that list short. If everything is urgent, nothing is deduplicated.</li>
+<li><strong>Urgent pushes still update the cache.</strong> An urgent push writes its timestamp like any other, so a subsequent non-urgent push of the same title inside the window is still suppressed. You get the urgent signal immediately, and you do not get a redundant routine one a minute later.</li>
+</ol>
+<p>A common refinement is a <em>shorter</em> window for urgent titles rather than a full bypass — say thirty seconds instead of five minutes — so that a crash loop produces at most two notifications per minute instead of one per restart. The implementation is the same; you just look up the window per title:</p>
+<pre class="codehilite"><code class="language-python">URGENT_WINDOW_SECONDS = 30.0
+
+def window_for(title: str, urgent: bool) -&gt; float:
+    return URGENT_WINDOW_SECONDS if urgent else WINDOW_SECONDS
+</code></pre>
+
+<p>Pass that value into <code>should_push</code> instead of the fixed <code>window</code> default.</p>
+<h2 id="operating-notes">Operating notes</h2>
+<ul>
+<li><strong>Where to put the file.</strong> A local path with a stable directory, e.g. <code>/var/lib/alerts/dedup.json</code>. If you run multiple hosts that each push independently, each needs its own cache, or you need a shared store. A local file per host is usually correct: duplicate suppression across hosts is a different problem, solved by routing pushes through one service.</li>
+<li><strong>Permissions.</strong> The file contains alert titles, which may leak hostnames or symbols. Restrict it to the service user.</li>
+<li><strong>Monitoring the cache.</strong> Log the suppression count. A sudden jump in suppressions means either a retry storm or a window that is too wide. Both are worth knowing.</li>
+<li><strong>Testing.</strong> Inject <code>now</code> instead of calling <code>time.time()</code> inside the function so you can test window boundaries deterministically. The version above takes <code>time.time()</code> inline for brevity; in production, pass a clock.</li>
+</ul>
+<p>The whole mechanism is under sixty lines, has no dependencies, and removes the most common source of alert fatigue. The window is a blunt instrument, but blunt and predictable beats clever and occasionally silent.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">deduplication</span><span class="tag-badge">idempotency</span><span class="tag-badge">notifications</span><span class="tag-badge">time window</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
