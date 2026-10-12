@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Silent Alert Bug: When Your Instant Push Exists but Never Fires - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Your alert formatter is probably fine. The problem is that nobody calls it....">
+    <meta name="keywords" content="dead code,code path audit,alerts,grep,testing">
+    <meta property="og:title" content="The Silent Alert Bug: When Your Instant Push Exists but Never Fires">
+    <meta property="og:description" content="Your alert formatter is probably fine. The problem is that nobody calls it....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/15.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>The Silent Alert Bug: When Your Instant Push Exists but Never Fires</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-12</span>
+                <span class="category"><span class="tag-badge">Notifications</span></span>
+            </div>
+            <div class="post-content">
+<p>Your alert formatter is probably fine. The problem is that nobody calls it.</p>
+<h2 id="the-symptom">The Symptom</h2>
+<p>A user reports that instant push notifications stopped working. The daily report arrives on schedule. The formatting looks correct in the report. But the moment a position opens, nothing hits their phone.</p>
+<p>The first instinct is to blame the transport layer: the push service, the API key, the network. You check credentials. You send a test push manually. It lands. So the pipeline is alive — which means the problem is upstream, in the code that's supposed to <em>invoke</em> the push.</p>
+<p>You open the file. There's a function:</p>
+<pre class="codehilite"><code class="language-python">def format_instant_alert(position: dict) -&gt; str:
+    &quot;&quot;&quot;Build a single-line push message for a newly opened position.&quot;&quot;&quot;
+    side = position[&quot;side&quot;].upper()
+    symbol = position[&quot;symbol&quot;]
+    entry = position[&quot;entry_price&quot;]
+    qty = position[&quot;qty&quot;]
+    return f&quot;[{side}] {symbol} @ {entry} x{qty}&quot;
+</code></pre>
+
+<p>It's clean, tested, and correct. It has been correct for months. Now grep for its call sites:</p>
+<pre class="codehilite"><code class="language-bash">grep -rn &quot;format_instant_alert&quot; --include=&quot;*.py&quot; .
+</code></pre>
+
+<p>One hit: the definition itself. Zero call sites.</p>
+<p>The function is dead code. The push never fires because nothing ever asks it to. The user's mental model — "pushes are broken" — is wrong. The pushes were never wired in. They exist as a well-formed corpse.</p>
+<h2 id="four-paths-four-comments-zero-calls">Four Paths, Four Comments, Zero Calls</h2>
+<p>The real scenario was worse than a single missing call. The system had four separate code paths for opening a position:</p>
+<ol>
+<li>Manual entry from the CLI.</li>
+<li>Scheduled strategy execution.</li>
+<li>Signal-driven entry from a webhook.</li>
+<li>Recovery/reconciliation after a restart.</li>
+</ol>
+<p>Each path had its own block of open-position logic — copy-pasted, then diverged. And each block carried a comment like this:</p>
+<pre class="codehilite"><code class="language-python"># open the position, update state, push is integrated into the daily report
+</code></pre>
+
+<p>Four copies of the same sentence. Four copies of the same false assumption. The author of the original block believed the push was handled during daily report generation, so they didn't call the alert formatter. Every subsequent copy inherited the comment and the omission.</p>
+<p>This is how "handled elsewhere" comments rot. The comment is a claim about code that lives somewhere else. It has no enforcement mechanism. When the "elsewhere" changes — or when it never actually handled the case — the comment stays, confidently lying. And because it's copy-pasted into four places, the lie propagates.</p>
+<p>The daily report did not include instant alerts. It never had. The comment was aspirational, or it referred to a design that was abandoned. Nobody re-checked it, because comments are cheap and reading them feels like understanding.</p>
+<h2 id="audit-for-call-sites-not-definitions">Audit for Call Sites, Not Definitions</h2>
+<p>The core discipline is simple: <strong>to find dead code, search for how a function is used, not where it's defined.</strong></p>
+<p>A definition search tells you the function exists. A call-site search tells you whether it matters. These are different questions, and conflating them is why dead code survives audits.</p>
+<h3 id="step-1-enumerate-the-suspects">Step 1: Enumerate the suspects</h3>
+<p>Start with the functions that <em>should</em> be firing but aren't. In an alerting system, that's typically the formatters and senders:</p>
+<pre class="codehilite"><code class="language-python"># alerting.py
+def format_instant_alert(position: dict) -&gt; str: ...
+def format_daily_report(positions: list) -&gt; str: ...
+def send_push(message: str) -&gt; bool: ...
+def send_email(subject: str, body: str) -&gt; bool: ...
+</code></pre>
+
+<h3 id="step-2-count-call-sites-with-a-script">Step 2: Count call sites with a script</h3>
+<p>Manual grep works for one function. For a whole module, automate it. This script counts references to each public function and flags the ones that only appear at their definition:</p>
+<pre class="codehilite"><code class="language-python">import ast
+import subprocess
+from pathlib import Path
+
+def defined_functions(path: str) -&gt; list[str]:
+    tree = ast.parse(Path(path).read_text(encoding=&quot;utf-8&quot;))
+    return [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith(&quot;_&quot;)
+    ]
+
+def count_call_sites(name: str, root: str = &quot;.&quot;) -&gt; int:
+    &quot;&quot;&quot;Count lines mentioning `name` across the repo, excluding the definition.&quot;&quot;&quot;
+    result = subprocess.run(
+        [&quot;grep&quot;, &quot;-rn&quot;, &quot;--include=*.py&quot;, name, root],
+        capture_output=True,
+        text=True,
+    )
+    hits = [line for line in result.stdout.splitlines() if line.strip()]
+    # A call site is any hit that is not a `def name(` line.
+    calls = [h for h in hits if f&quot;def {name}(&quot; not in h]
+    return len(calls)
+
+for fn in defined_functions(&quot;alerting.py&quot;):
+    calls = count_call_sites(fn)
+    status = &quot;DEAD&quot; if calls == 0 else &quot;ok&quot;
+    print(f&quot;{status:5} {fn:30} call_sites={calls}&quot;)
+</code></pre>
+
+<p>Run it and you get something like:</p>
+<pre class="codehilite"><code>DEAD  format_instant_alert           call_sites=0
+ok    format_daily_report            call_sites=2
+ok    send_push                      call_sites=3
+ok    send_email                     call_sites=1
+</code></pre>
+
+<p><code>format_instant_alert</code> is the smoking gun. It's defined, it's importable, and nothing reaches it.</p>
+<p>The grep-based approach is deliberately crude — it will count mentions in comments and strings, and it can't distinguish a real call from a reference. That's fine for a first pass. The goal is triage: find the functions with <em>zero</em> non-definition mentions. Those are unambiguously dead. For anything with a nonzero count, you verify by hand.</p>
+<h3 id="step-3-verify-the-call-actually-executes">Step 3: Verify the call actually executes</h3>
+<p>Zero call sites is a clean verdict. A nonzero count is a lead, not a conclusion. A function can be "called" in a branch that never runs:</p>
+<pre class="codehilite"><code class="language-python">def open_position(order):
+    # ... state updates ...
+    if order.source == &quot;manual&quot;:
+        send_push(format_instant_alert(order))  # only fires for manual entries
+</code></pre>
+
+<p>Here <code>format_instant_alert</code> has a call site, so the script marks it <code>ok</code>. But scheduled and webhook entries — the majority of real activity — never hit that branch. The function is reachable in theory and dead in practice.</p>
+<p>To catch this, you need to know which <em>paths</em> call it, not just that a call exists. Trace each of the four open-position paths and confirm the push call is inside the code that actually runs for that path. If the call is guarded by a condition that your production traffic never satisfies, treat it as dead.</p>
+<h2 id="the-fix-discipline">The Fix Discipline</h2>
+<p>The tempting fix is to add the missing call to the one path the user complained about. Don't. That leaves three paths still silent, and you'll be back here in a week when a webhook entry fails to notify.</p>
+<h3 id="patch-every-occurrence-in-one-pass">Patch every occurrence in one pass</h3>
+<p>Find every block that contains the same logic and fix all of them together. In this codebase, that meant four separate open-position blocks. The comment was the tell:</p>
+<pre class="codehilite"><code class="language-bash">grep -rn &quot;push is integrated into the daily report&quot; --include=&quot;*.py&quot; .
+</code></pre>
+
+<p>Four hits. Four blocks to patch. Each gets the same real call:</p>
+<pre class="codehilite"><code class="language-python">def open_position(order, state):
+    # ... state updates, persistence ...
+    state.add_position(order)
+
+    # Instant alert fires here, on every path, right after state is committed.
+    message = format_instant_alert(order)
+    ok = send_push(message)
+    if not ok:
+        log.warning(&quot;instant push failed for %s&quot;, order[&quot;symbol&quot;])
+</code></pre>
+
+<p>Remove the stale comment while you're there. A comment that claims work happens elsewhere is worse than no comment — it actively suppresses the reader's suspicion.</p>
+<h3 id="refactor-to-one-path-if-you-can">Refactor to one path if you can</h3>
+<p>Four copies of open-position logic is the root cause. The comment rot was just a symptom. If the paths can share a single function, do it:</p>
+<pre class="codehilite"><code class="language-python">def open_position(order, state, *, notify: bool = True):
+    validate(order)
+    state.add_position(order)
+    persist(state)
+    if notify:
+        send_push(format_instant_alert(order))
+</code></pre>
+
+<p>Now there is exactly one place where the push fires, and one place to audit. The next person who adds a fifth entry path calls this function and gets the alert for free.</p>
+<h3 id="verify-each-call-site-executes">Verify each call site executes</h3>
+<p>After patching, re-run the audit script. <code>format_instant_alert</code> should show four call sites (or one, if you refactored). Then go further: prove each path actually reaches the call at runtime.</p>
+<p>The cheapest proof is a log line at the call site and a test per path:</p>
+<pre class="codehilite"><code class="language-python">import logging
+
+log = logging.getLogger(__name__)
+
+def open_position(order, state, *, notify: bool = True):
+    validate(order)
+    state.add_position(order)
+    persist(state)
+    if notify:
+        log.info(&quot;dispatching instant alert for %s&quot;, order[&quot;symbol&quot;])
+        send_push(format_instant_alert(order))
+</code></pre>
+
+<p>Then exercise all four paths in tests and assert the push was dispatched:</p>
+<pre class="codehilite"><code class="language-python">from unittest.mock import patch
+
+def test_all_entry_paths_dispatch_alert():
+    paths = [
+        {&quot;source&quot;: &quot;manual&quot;,   &quot;symbol&quot;: &quot;AAA&quot;, &quot;side&quot;: &quot;long&quot;, &quot;entry_price&quot;: 10, &quot;qty&quot;: 1},
+        {&quot;source&quot;: &quot;schedule&quot;, &quot;symbol&quot;: &quot;BBB&quot;, &quot;side&quot;: &quot;long&quot;, &quot;entry_price&quot;: 20, &quot;qty&quot;: 1},
+        {&quot;source&quot;: &quot;webhook&quot;,  &quot;symbol&quot;: &quot;CCC&quot;, &quot;side&quot;: &quot;short&quot;, &quot;entry_price&quot;: 30, &quot;qty&quot;: 1},
+        {&quot;source&quot;: &quot;recovery&quot;, &quot;symbol&quot;: &quot;DDD&quot;, &quot;side&quot;: &quot;long&quot;, &quot;entry_price&quot;: 40, &quot;qty&quot;: 1},
+    ]
+    for order in paths:
+        with patch(&quot;alerting.send_push&quot;) as mock_push:
+            open_position(order, state=StubState())
+            assert mock_push.called, f&quot;no push for {order['source']}&quot;
+</code></pre>
+
+<p>This test would have failed on all four paths before the fix. It fails loudly if someone later reintroduces a branch that skips the alert.</p>
+<h2 id="the-general-pattern">The General Pattern</h2>
+<p>Dead alert code is not a push problem. It's a code-path audit problem, and it shows up anywhere a side effect is assumed to be handled by someone else:</p>
+<ul>
+<li>Alert formatters that are never invoked.</li>
+<li>Cleanup routines that only run on one error branch.</li>
+<li>Metrics that are defined but never incremented.</li>
+<li>Retry handlers attached to a client that isn't the one in use.</li>
+</ul>
+<p>The audit recipe is the same every time:</p>
+<ol>
+<li><strong>List the functions that should fire.</strong> Search for call sites, not definitions.</li>
+<li><strong>Treat zero call sites as dead.</strong> No exceptions, no "it's probably called dynamically."</li>
+<li><strong>Treat guarded calls as suspicious.</strong> Confirm the guard is satisfiable by real traffic.</li>
+<li><strong>Fix every copy in one pass.</strong> If the same logic is duplicated, the bug is duplicated.</li>
+<li><strong>Prove execution.</strong> A log line plus a per-path test beats reading the code and nodding.</li>
+</ol>
+<p>The expensive part was never writing the formatter. It was the four comments that said the work was already done. Comments don't run. Call sites do.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">dead code</span><span class="tag-badge">code path audit</span><span class="tag-badge">alerts</span><span class="tag-badge">grep</span><span class="tag-badge">testing</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
