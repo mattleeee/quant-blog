@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>系统重装后的完整恢复流程：从备份到上线</title>
+            <link>https://www.hkcode.dpdns.org/posts/43.html</link>
+            <description>系统重装后的完整恢复流程：从备份到上线
+
+系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。整套流程用 Python 脚本半自动化完成，避免手动操作遗漏。...</description>
+            <pubDate>2026-10-12</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>微信推送绑定失败排查：SQLite数据库清理方案</title>
             <link>https://www.hkcode.dpdns.org/posts/42.html</link>
             <description>微信推送绑定失败排查：SQLite数据库清理方案
@@ -147,13 +156,6 @@
             <link>https://www.hkcode.dpdns.org/posts/24.html</link>
             <description>交易系统跑起来之后，最怕的不是策略亏钱，而是某个环节悄悄挂了却没人知道。API 断连、行情数据停止更新、磁盘写满、定时任务没跑——这些问题往往在盘中才暴露，那时候已经晚了。 解决办法是写一个系统巡检模块，定时检查各模块健康状态，异常时主动推送告警。这篇文章拆解一下我的实现方案。 一、巡检项设计 巡检不是越多越好，要覆盖...</description>
             <pubDate>2026-09-23</pubDate>
-            <category>Python自动化</category>
-        </item>
-        <item>
-            <title>Python请求频率控制：从sleep到令牌桶的演进</title>
-            <link>https://www.hkcode.dpdns.org/posts/23.html</link>
-            <description>做量化交易和自动化脚本，绕不开API请求频率控制。交易所接口有硬性限频，数据服务商按套餐限制QPS，爬虫目标站点更是随时可能封IP。控制不好频率，轻则请求失败，重则账号被封。 这篇文章梳理三种频率控制方案：sleep延迟、基于时间窗口的计数器、令牌桶算法。从最简单的开始，逐步演进到生产级方案。 方案一：time.sle...</description>
-            <pubDate>2026-09-22</pubDate>
             <category>Python自动化</category>
         </item>
     </channel>
