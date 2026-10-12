@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>The Silent Alert Bug: When Your Instant Push Exists but Never Fires</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/15.html</link>
+            <description>Your alert formatter is probably fine. The problem is that nobody calls it. The Symptom A user reports that instant push notifications stopped working....</description>
+            <pubDate>2026-10-12</pubDate>
+            <category>Notifications</category>
+        </item>
+        <item>
             <title>Notification Deduplication: A Five-Minute Title Window</title>
             <link>https://www.hkcode.dpdns.org/en/posts/14.html</link>
             <description>Alerts that fire twice for the same event are worse than alerts that never fire at all....</description>
