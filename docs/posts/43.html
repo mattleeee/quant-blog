@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统重装后的完整恢复流程：从备份到上线 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="系统重装后的完整恢复流程：从备份到上线
+
+系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。...">
+    <meta name="keywords" content="系统重装,恢复流程,备份,迁移">
+    <meta property="og:title" content="系统重装后的完整恢复流程：从备份到上线">
+    <meta property="og:description" content="系统重装后的完整恢复流程：从备份到上线
+
+系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/43.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>系统重装后的完整恢复流程：从备份到上线</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-12</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。整套流程用 Python 脚本半自动化完成，避免手动操作遗漏。</p>
+<h2 id="_1">恢复前的准备：检查清单</h2>
+<p>重装前如果没做备份，后面全是补救。我的习惯是把关键资产放在一个独立的备份盘里，结构如下：</p>
+<pre class="codehilite"><code>D:\backup\
+├── scripts\           # 所有 Python 脚本
+├── data\              # 历史数据（CSV/Parquet/SQLite）
+├── configs\           # 配置文件（.env, yaml, json）
+├── tasks\             # 定时任务导出（XML）
+└── requirements\      # 各项目的依赖清单
+</code></pre>
+
+<p>重装后先确认这几样东西都在。如果定时任务没提前导出，重装后就只能凭记忆重建——这是最容易踩的坑。</p>
+<p><strong>恢复检查清单：</strong></p>
+<ul>
+<li>[ ] 备份盘可读，目录结构完整</li>
+<li>[ ] Python 版本与原来一致（建议记录版本号）</li>
+<li>[ ] 依赖清单存在（<code>pip freeze</code> 导出过）</li>
+<li>[ ] 定时任务 XML 已导出</li>
+<li>[ ] 历史数据文件完整（对比文件数量与大小）</li>
+<li>[ ] 环境变量、API Key 等敏感配置已单独备份</li>
+</ul>
+<h2 id="_2">第一步：从备份目录复制脚本</h2>
+<p>先写一个恢复脚本，把备份目录里的内容按类别分发到目标位置。这样比手动拖拽可靠，也方便重复执行。</p>
+<pre class="codehilite"><code class="language-python">import shutil
+from pathlib import Path
+
+BACKUP_DIR = Path(r&quot;D:\backup&quot;)
+TARGET_SCRIPTS = Path(r&quot;D:\scripts&quot;)
+TARGET_CONFIGS = Path(r&quot;D:\configs&quot;)
+TARGET_DATA = Path(r&quot;D:\data&quot;)
+
+def copy_tree(src: Path, dst: Path, pattern: str = &quot;*&quot;):
+    &quot;&quot;&quot;复制目录内容，保留结构，跳过已存在且大小一致的文件&quot;&quot;&quot;
+    dst.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for item in src.rglob(pattern):
+        if item.is_file():
+            rel = item.relative_to(src)
+            target = dst / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and target.stat().st_size == item.stat().st_size:
+                continue
+            shutil.copy2(item, target)
+            count += 1
+    return count
+
+if __name__ == &quot;__main__&quot;:
+    n1 = copy_tree(BACKUP_DIR / &quot;scripts&quot;, TARGET_SCRIPTS, &quot;*.py&quot;)
+    n2 = copy_tree(BACKUP_DIR / &quot;configs&quot;, TARGET_CONFIGS)
+    n3 = copy_tree(BACKUP_DIR / &quot;data&quot;, TARGET_DATA)
+    print(f&quot;scripts: {n1}, configs: {n2}, data: {n3}&quot;)
+</code></pre>
+
+<p>用 <code>copy2</code> 保留时间戳，跳过同名同大小的文件，重复执行不会覆盖新改动。</p>
+<h2 id="python">第二步：安装 Python 依赖</h2>
+<p>依赖安装最怕版本漂移。我的做法是备份时按项目导出 <code>requirements.txt</code>，恢复时逐个安装。</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import sys
+from pathlib import Path
+
+REQ_DIR = Path(r&quot;D:\backup\requirements&quot;)
+
+def install_requirements(req_file: Path):
+    print(f&quot;==&gt; 安装 {req_file.name}&quot;)
+    result = subprocess.run(
+        [sys.executable, &quot;-m&quot;, &quot;pip&quot;, &quot;install&quot;, &quot;-r&quot;, str(req_file)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f&quot;[FAIL] {req_file.name}\n{result.stderr}&quot;)
+        return False
+    print(f&quot;[OK] {req_file.name}&quot;)
+    return True
+
+if __name__ == &quot;__main__&quot;:
+    failed = []
+    for req in sorted(REQ_DIR.glob(&quot;*.txt&quot;)):
+        if not install_requirements(req):
+            failed.append(req.name)
+    if failed:
+        print(&quot;失败的依赖清单：&quot;, failed)
+    else:
+        print(&quot;全部依赖安装完成&quot;)
+</code></pre>
+
+<p>几个实践要点：</p>
+<ol>
+<li><strong>先装 pip 自身</strong>：<code>python -m pip install --upgrade pip</code></li>
+<li><strong>国内源加速</strong>：加 <code>-i https://pypi.tuna.tsinghua.edu.cn/simple</code></li>
+<li><strong>虚拟环境隔离</strong>：不同项目用不同 venv，别全塞全局环境</li>
+<li><strong>编译型库</strong>（如 TA-Lib、pyarrow）可能需先装 Visual C++ Build Tools</li>
+</ol>
+<p>如果某个包版本找不到，用 <code>pip install package==x.y.z</code> 精确指定，不要用 <code>&gt;=</code> 让它自由发挥。</p>
+<h2 id="windows">第三步：重建 Windows 定时任务</h2>
+<p>这是重装后最繁琐的一步。Windows 任务计划程序支持用 <code>schtasks</code> 命令行导入 XML，比图形界面点选快得多。</p>
+<h3 id="_3">导出与导入</h3>
+<p>重装前用这条命令导出所有任务：</p>
+<pre class="codehilite"><code class="language-bash">schtasks /query /fo LIST /v &gt; D:\backup\tasks\all_tasks.txt
+</code></pre>
+
+<p>更精确的方式是只导出自己创建的任务（排除微软系统任务），然后逐个导出 XML：</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+from pathlib import Path
+
+EXPORT_DIR = Path(r&quot;D:\backup\tasks&quot;)
+EXPORT_DIR.mkdir(exist_ok=True)
+
+def export_tasks():
+    result = subprocess.run(
+        [&quot;schtasks&quot;, &quot;/query&quot;, &quot;/fo&quot;, &quot;CSV&quot;, &quot;/nh&quot;],
+        capture_output=True, text=True, encoding=&quot;gbk&quot;
+    )
+    for line in result.stdout.splitlines():
+        parts = line.split(&quot;,&quot;)
+        if len(parts) &lt; 2:
+            continue
+        name = parts[0].strip('&quot;')
+        # 只导出非微软自带任务
+        if name.startswith(&quot;\\Microsoft&quot;) or not name:
+            continue
+        safe_name = name.strip(&quot;\\&quot;).replace(&quot;\\&quot;, &quot;_&quot;)
+        xml_path = EXPORT_DIR / f&quot;{safe_name}.xml&quot;
+        subprocess.run(
+            [&quot;schtasks&quot;, &quot;/query&quot;, &quot;/tn&quot;, name, &quot;/xml&quot;],
+            stdout=open(xml_path, &quot;w&quot;, encoding=&quot;utf-16&quot;),
+            check=False
+        )
+        print(f&quot;导出: {name} -&gt; {xml_path.name}&quot;)
+</code></pre>
+
+<h3 id="_4">重建任务</h3>
+<p>导入时用 <code>/create /xml</code>：</p>
+<pre class="codehilite"><code class="language-python">def import_tasks():
+    for xml_file in EXPORT_DIR.glob(&quot;*.xml&quot;):
+        result = subprocess.run(
+            [&quot;schtasks&quot;, &quot;/create&quot;, &quot;/tn&quot;, xml_file.stem, &quot;/xml&quot;, str(xml_file), &quot;/f&quot;],
+            capture_output=True, text=True, encoding=&quot;gbk&quot;
+        )
+        status = &quot;OK&quot; if result.returncode == 0 else &quot;FAIL&quot;
+        print(f&quot;[{status}] {xml_file.stem}&quot;)
+        if result.returncode != 0:
+            print(result.stderr)
+</code></pre>
+
+<p><strong>关键坑点：</strong></p>
+<ul>
+<li>XML 里记录了原机器的用户名和路径，如果新系统用户名不同，导入会失败。需要手动改 XML 中的 <code>&lt;UserId&gt;</code> 和 <code>&lt;Command&gt;</code> 路径。</li>
+<li>任务默认以当前用户运行，涉及网络或高权限操作要勾选"使用最高权限运行"。</li>
+<li>触发器时间如果是过去的日期，任务不会立即执行，需要手动 <code>schtasks /run /tn 任务名</code> 测试。</li>
+</ul>
+<p>导入后立即验证：</p>
+<pre class="codehilite"><code class="language-bash">schtasks /query /tn &quot;你的任务名&quot; /v /fo LIST
+</code></pre>
+
+<h2 id="_5">第四步：迁移历史数据</h2>
+<p>数据迁移的核心是<strong>校验完整性</strong>。我一般用文件数量 + 总大小 + 关键文件哈希三重校验。</p>
+<pre class="codehilite"><code class="language-python">import hashlib
+from pathlib import Path
+
+def dir_signature(root: Path):
+    &quot;&quot;&quot;返回目录的文件数、总大小、合并哈希&quot;&quot;&quot;
+    files = sorted(p for p in root.rglob(&quot;*&quot;) if p.is_file())
+    total_size = sum(p.stat().st_size for p in files)
+    h = hashlib.sha256()
+    for p in files:
+        h.update(p.name.encode())
+        h.update(str(p.stat().st_size).encode())
+    return len(files), total_size, h.hexdigest()
+
+src = Path(r&quot;D:\backup\data&quot;)
+dst = Path(r&quot;D:\data&quot;)
+
+s_sig = dir_signature(src)
+d_sig = dir_signature(dst)
+print(f&quot;源: {s_sig}&quot;)
+print(f&quot;目标: {d_sig}&quot;)
+print(&quot;一致&quot; if s_sig == d_sig else &quot;不一致，需排查&quot;)
+</code></pre>
+
+<p>如果数据量不大（几 GB 以内），直接复制即可。如果涉及 SQLite 数据库，注意：</p>
+<ul>
+<li>复制前确保没有进程占用</li>
+<li>用 <code>sqlite3 db.sqlite ".backup backup.sqlite"</code> 做热备份更安全</li>
+<li>迁移后跑一次 <code>PRAGMA integrity_check;</code></li>
+</ul>
+<p>对于 Parquet/CSV 这类历史行情数据，迁移后建议按日期范围抽样校验：</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+df = pd.read_parquet(r&quot;D:\data\history\BTCUSDT_1h.parquet&quot;)
+print(df.shape)
+print(df.index.min(), df.index.max())
+print(df.isna().sum())
+</code></pre>
+
+<h2 id="_6">第五步：验证各模块功能</h2>
+<p>到这一步，文件都在了，但能不能跑是另一回事。我按模块逐个验证，写一个统一的检查脚本：</p>
+<pre class="codehilite"><code class="language-python">import importlib
+import subprocess
+import sys
+from pathlib import Path
+
+CHECKS = [
+    (&quot;数据读取&quot;, &quot;check_data&quot;),
+    (&quot;策略模块&quot;, &quot;check_strategy&quot;),
+    (&quot;回测引擎&quot;, &quot;check_backtest&quot;),
+    (&quot;定时任务&quot;, &quot;check_tasks&quot;),
+]
+
+def run_check(name, func_name):
+    try:
+        mod = importlib.import_module(func_name)
+        ok = mod.run()
+        print(f&quot;[{'OK' if ok else 'FAIL'}] {name}&quot;)
+        return ok
+    except Exception as e:
+        print(f&quot;[ERROR] {name}: {e}&quot;)
+        return False
+
+if __name__ == &quot;__main__&quot;:
+    results = [run_check(n, f) for n, f in CHECKS]
+    print(f&quot;\n通过 {sum(results)}/{len(results)}&quot;)
+</code></pre>
+
+<p>每个 <code>check_xxx.py</code> 做具体验证，例如：</p>
+<pre class="codehilite"><code class="language-python"># check_data.py
+def run():
+    import pandas as pd
+    from pathlib import Path
+    files = list(Path(r&quot;D:\data\history&quot;).glob(&quot;*.parquet&quot;))
+    if not files:
+        return False
+    df = pd.read_parquet(files[0])
+    return len(df) &gt; 0 and not df.empty
+</code></pre>
+
+<p><strong>验证要点：</strong></p>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>验证方法</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据</td>
+<td>读取首尾文件，检查行数、时间范围、空值</td>
+</tr>
+<tr>
+<td>策略</td>
+<td>用固定输入跑一次，对比输出是否符合预期</td>
+</tr>
+<tr>
+<td>回测</td>
+<td>跑一段已知结果的历史区间，核对收益指标</td>
+</tr>
+<tr>
+<td>定时任务</td>
+<td>手动触发一次，看日志是否正常输出</td>
+</tr>
+<tr>
+<td>通知</td>
+<td>发一条测试消息到 Telegram/邮件</td>
+</tr>
+</tbody>
+</table>
+<p>日志目录也要检查，确认脚本有写入权限：</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+log_dir = Path(r&quot;D:\logs&quot;)
+log_dir.mkdir(exist_ok=True)
+test_file = log_dir / &quot;recovery_test.log&quot;
+test_file.write_text(&quot;test&quot;, encoding=&quot;utf-8&quot;)
+print(&quot;日志可写&quot; if test_file.exists() else &quot;日志不可写&quot;)
+</code></pre>
+
+<h2 id="_7">常见问题</h2>
+<p><strong>1. <code>schtasks</code> 导入报"访问被拒绝"</strong></p>
+<p>用管理员权限打开终端再执行。或者检查 XML 里的 <code>&lt;RunLevel&gt;</code> 是否为 <code>HighestAvailable</code>。</p>
+<p><strong>2. 中文乱码</strong></p>
+<p><code>subprocess</code> 调用 <code>schtasks</code> 时指定 <code>encoding="gbk"</code>，Windows 命令行默认 GBK 编码。</p>
+<p><strong>3. 依赖装完但 import 失败</strong></p>
+<p>多半是虚拟环境没激活，或者装到了另一个 Python 版本下。用 <code>where python</code> 和 <code>sys.executable</code> 确认路径。</p>
+<p><strong>4. 定时任务执行了但脚本没输出</strong></p>
+<p>检查任务里的"起始于"路径。相对路径在任务计划里是相对于 <code>C:\Windows\System32</code>，必须写绝对路径。</p>
+<p><strong>5. 数据文件时间戳错乱</strong></p>
+<p>用 <code>shutil.copy2</code> 而不是 <code>copy</code>，前者保留元数据。</p>
+<h2 id="_8">收尾：把流程脚本化</h2>
+<p>上面每一步我都写成了独立脚本，放在 <code>D:\scripts\recovery\</code> 下，用 <code>main.py</code> 串起来：</p>
+<pre class="codehilite"><code class="language-python"># main.py
+from copy_scripts import run as copy_run
+from install_deps import run as deps_run
+from import_tasks import run as tasks_run
+from verify_all import run as verify_run
+
+def main():
+    print(&quot;=== 1. 复制脚本 ===&quot;)
+    copy_run()
+    print(&quot;=== 2. 安装依赖 ===&quot;)
+    deps_run()
+    print(&quot;=== 3. 重建定时任务 ===&quot;)
+    tasks_run()
+    print(&quot;=== 4. 验证 ===&quot;)
+    verify_run()
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+
+<p>下次重装，一条命令跑完，剩下的只是排查个别报错。恢复流程本身也是代码，值得像策略一样维护和迭代。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">系统重装</span><span class="tag-badge">恢复流程</span><span class="tag-badge">备份</span><span class="tag-badge">迁移</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
