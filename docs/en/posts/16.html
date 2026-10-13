@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UTF-8 vs GBK: The Root Cause of Cross-Machine Script Failures - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A script that runs fine on your laptop and dies on the server is almost never a logic bug....">
+    <meta name="keywords" content="UTF-8,GBK,codepage,PYTHONIOENCODING,Windows">
+    <meta property="og:title" content="UTF-8 vs GBK: The Root Cause of Cross-Machine Script Failures">
+    <meta property="og:description" content="A script that runs fine on your laptop and dies on the server is almost never a logic bug....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/16.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>UTF-8 vs GBK: The Root Cause of Cross-Machine Script Failures</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-13</span>
+                <span class="category"><span class="tag-badge">Encoding</span></span>
+            </div>
+            <div class="post-content">
+<p>A script that runs fine on your laptop and dies on the server is almost never a logic bug. It is an encoding bug that was always there, dormant, waiting for a machine with a different codepage. Windows makes this especially easy to trip over because the default encoding is not a constant — it is a property of the OS locale, and it leaks into every <code>open()</code> call, every <code>print()</code>, and every subprocess you spawn.</p>
+<p>Here is the failure mode, the mechanism, and the fixes that actually hold up in production.</p>
+<h2 id="the-two-machines">The Two Machines</h2>
+<p>The scenario is common enough to be a template:</p>
+<ul>
+<li><strong>Dev box:</strong> Windows 11, "Beta: Use Unicode UTF-8 for worldwide language support" enabled. <code>sys.stdout.encoding</code> reports <code>utf-8</code>, <code>locale.getpreferredencoding()</code> reports <code>utf-8</code>.</li>
+<li><strong>Production:</strong> Chinese Windows Server 2016, default locale. Codepage 936 (GBK). <code>sys.stdout.encoding</code> reports <code>cp936</code>, <code>locale.getpreferredencoding()</code> reports <code>cp936</code>.</li>
+</ul>
+<p>Same Python version, same code. The dev box is in a UTF-8 bubble; the server is not. Everything that depends on the ambient encoding flips behavior between them.</p>
+<h3 id="what-open-actually-does">What <code>open()</code> actually does</h3>
+<p>When you call <code>open(path, "w")</code> without an <code>encoding</code> argument, Python uses <code>locale.getpreferredencoding(False)</code>. On the dev box that is <code>utf-8</code>. On the server that is <code>cp936</code>. This single default is the source of most cross-machine breakage.</p>
+<pre class="codehilite"><code class="language-python"># This is not portable. The encoding is decided by the machine.
+with open(&quot;report.txt&quot;, &quot;w&quot;) as f:
+    f.write(&quot;季度汇总\n&quot;)
+</code></pre>
+
+<p>On the dev box, <code>report.txt</code> is UTF-8. On the server, it is GBK. If a downstream tool on either side assumes the other encoding, you get mojibake or a decode error. The file is byte-for-byte different depending on where it ran, and nothing in the code says so.</p>
+<h3 id="what-print-actually-does">What <code>print()</code> actually does</h3>
+<p><code>print()</code> writes to <code>sys.stdout</code>, which is a <code>TextIOWrapper</code> whose encoding is derived from the console codepage. On the server, that is <code>cp936</code>. If you print a character that GBK cannot represent, you get:</p>
+<pre class="codehilite"><code>UnicodeEncodeError: 'gbk' codec can't encode character '\u2713' in position 0: illegal multibyte sequence
+</code></pre>
+
+<p>A checkmark, an emoji, a CJK extension character, a box-drawing glyph — any of these will crash a <code>print()</code> on the server and do nothing on the dev box. This is the failure that surfaces first because it is loud.</p>
+<h2 id="the-failure-cases">The Failure Cases</h2>
+<h3 id="case-1-print-crashes-on-the-server">Case 1: <code>print()</code> crashes on the server</h3>
+<pre class="codehilite"><code class="language-python">print(&quot;Done ✓&quot;)  # fine on UTF-8 console, UnicodeEncodeError on cp936
+</code></pre>
+
+<p>The traceback points at <code>print</code>, which makes it look like a stdout problem. It is. The console cannot represent <code>✓</code> in GBK, and Python raises rather than substituting.</p>
+<h3 id="case-2-file-paths-get-mangled">Case 2: File paths get mangled</h3>
+<p>This one is quieter and worse. Windows paths are UTF-16 internally, but when they cross a codepage boundary — through a <code>.bat</code> file, an environment variable, or a subprocess argument — they get encoded and decoded using the active codepage. A path containing a character outside GBK, or a path that was written as UTF-8 in a bat file and read as GBK, comes back as garbage:</p>
+<pre class="codehilite"><code class="language-python"># Path read from a config file that was saved as UTF-8
+# but the interpreter decoded it as cp936
+path = &quot;C:\\数据\\报表.csv&quot;   # becomes &quot;C:\\鏁版嵁\\鎶ヨ〃.csv&quot;
+</code></pre>
+
+<p>The file exists. The path string does not match it. <code>FileNotFoundError</code> on a file you can see in Explorer.</p>
+<h3 id="case-3-bat-files-corrupt-non-ascii">Case 3: Bat files corrupt non-ASCII</h3>
+<p>A <code>.bat</code> file with Chinese characters in it is interpreted using the console codepage at the time <code>cmd.exe</code> reads it. If the file is saved as UTF-8 (with or without BOM) and the console is cp936, <code>cmd.exe</code> misreads every multibyte character. <code>echo 开始</code> prints <code>寮€濮�</code>, and worse, any command built from those characters operates on the wrong path or argument.</p>
+<h3 id="case-4-subprocess-output-decoded-with-the-wrong-codec">Case 4: Subprocess output decoded with the wrong codec</h3>
+<pre class="codehilite"><code class="language-python">import subprocess
+out = subprocess.run([&quot;some_tool.exe&quot;], capture_output=True).stdout
+text = out.decode()  # uses locale.getpreferredencoding() -&gt; cp936 on server
+</code></pre>
+
+<p>If <code>some_tool.exe</code> emits UTF-8, this decode produces mojibake or raises. If it emits GBK and you decode as UTF-8, same result in reverse. The subprocess inherits no encoding contract, so you have to impose one.</p>
+<h2 id="the-survival-rules">The Survival Rules</h2>
+<p>These five rules eliminate the entire class of bug. They are not stylistic preferences; each one closes a specific hole.</p>
+<h3 id="rule-1-always-pass-encoding-to-open">Rule 1: Always pass <code>encoding=</code> to <code>open()</code></h3>
+<p>Never rely on the locale default. Be explicit at every call site.</p>
+<pre class="codehilite"><code class="language-python">import io
+
+# Reading
+with open(&quot;input.csv&quot;, &quot;r&quot;, encoding=&quot;utf-8&quot;, newline=&quot;&quot;) as f:
+    rows = f.read().splitlines()
+
+# Writing
+with open(&quot;output.csv&quot;, &quot;w&quot;, encoding=&quot;utf-8&quot;, newline=&quot;&quot;) as f:
+    f.write(&quot;name,value\n&quot;)
+    f.write(&quot;季度,42\n&quot;)
+</code></pre>
+
+<p>For CSV specifically, pass the encoding through to the <code>csv</code> module's file handle, not to the reader/writer:</p>
+<pre class="codehilite"><code class="language-python">import csv
+
+with open(&quot;data.csv&quot;, &quot;w&quot;, encoding=&quot;utf-8&quot;, newline=&quot;&quot;) as f:
+    writer = csv.writer(f)
+    writer.writerow([&quot;symbol&quot;, &quot;note&quot;])
+    writer.writerow([&quot;AAA&quot;, &quot;正常&quot;])
+</code></pre>
+
+<p><code>newline=""</code> matters on Windows: without it, the <code>csv</code> module writes <code>\r\r\n</code> because the text layer translates <code>\n</code> and the writer already emits <code>\r\n</code>.</p>
+<p>If you need to interoperate with Excel on a Chinese Windows box, <code>utf-8-sig</code> (UTF-8 with BOM) is the pragmatic choice for CSV — Excel will open it correctly without an import wizard:</p>
+<pre class="codehilite"><code class="language-python">with open(&quot;for_excel.csv&quot;, &quot;w&quot;, encoding=&quot;utf-8-sig&quot;, newline=&quot;&quot;) as f:
+    ...
+</code></pre>
+
+<p>Be aware this is a CSV/Excel concession. For logs and internal data, plain UTF-8 is correct.</p>
+<h3 id="rule-2-set-pythonioencodingutf-8-in-launchers">Rule 2: Set <code>PYTHONIOENCODING=utf-8</code> in launchers</h3>
+<p>Setting this environment variable forces <code>sys.stdin</code>, <code>sys.stdout</code>, and <code>sys.stderr</code> to UTF-8 regardless of the console codepage. In a bat launcher:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+python main.py
+</code></pre>
+
+<p><code>PYTHONUTF8=1</code> enables UTF-8 mode, which additionally forces <code>locale.getpreferredencoding()</code> to return <code>utf-8</code>, making even the un-annotated <code>open()</code> calls behave consistently. Combining both is belt and suspenders, and it is cheap.</p>
+<p>There is a catch: when stdout is redirected to a file or a pipe, the console codepage no longer matters and the encoding is whatever <code>PYTHONIOENCODING</code> says. When stdout is an interactive console, the console still has to <em>render</em> the characters. Setting <code>PYTHONIOENCODING=utf-8</code> stops the <code>UnicodeEncodeError</code>, but the console may show boxes for characters it cannot display. That is a cosmetic limitation of the console, not a data corruption — the bytes written to a redirected file are correct UTF-8.</p>
+<p>You can verify what the interpreter sees:</p>
+<pre class="codehilite"><code class="language-python">import sys, locale
+print(&quot;stdout:&quot;, sys.stdout.encoding)
+print(&quot;preferred:&quot;, locale.getpreferredencoding(False))
+print(&quot;utf8 mode:&quot;, sys.flags.utf8_mode)
+</code></pre>
+
+<p>Run this on both machines before you debug anything else. It tells you immediately which regime you are in.</p>
+<h3 id="rule-3-wrap-console-prints-in-a-gbk-safe-fallback">Rule 3: Wrap console prints in a GBK-safe fallback</h3>
+<p>Even with <code>PYTHONIOENCODING</code> set, you cannot always control how your script is launched. A scheduled task, a service wrapper, or a colleague's <code>cmd</code> window may not set the variable. A defensive print wrapper costs little and never crashes:</p>
+<pre class="codehilite"><code class="language-python">import sys
+
+def safe_print(*args, **kwargs):
+    &quot;&quot;&quot;Print without ever raising UnicodeEncodeError.
+
+    Falls back to a lossy ASCII representation when the target
+    stream cannot encode the text.
+    &quot;&quot;&quot;
+    stream = kwargs.get(&quot;file&quot;, sys.stdout)
+    encoding = getattr(stream, &quot;encoding&quot;, None) or &quot;ascii&quot;
+    text = &quot; &quot;.join(str(a) for a in args)
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        text = text.encode(encoding, errors=&quot;replace&quot;).decode(encoding)
+    print(text, **kwargs)
+</code></pre>
+
+<p><code>safe_print("Done ✓")</code> on a cp936 console prints <code>Done ?</code> instead of raising. The information about the checkmark is lost, but the script continues. For status output that is the right trade. For data you intend to parse later, do not print it — log it (Rule 4).</p>
+<p>If you want to preserve more information, you can map known glyphs to ASCII equivalents before falling back:</p>
+<pre class="codehilite"><code class="language-python">_FALLBACKS = {&quot;✓&quot;: &quot;[OK]&quot;, &quot;✗&quot;: &quot;[FAIL]&quot;, &quot;→&quot;: &quot;-&gt;&quot;, &quot;—&quot;: &quot;-&quot;}
+
+def safe_print(*args, **kwargs):
+    stream = kwargs.get(&quot;file&quot;, sys.stdout)
+    encoding = getattr(stream, &quot;encoding&quot;, None) or &quot;ascii&quot;
+    text = &quot; &quot;.join(str(a) for a in args)
+    for ch, repl in _FALLBACKS.items():
+        if ch in text:
+            try:
+                text.encode(encoding)
+            except UnicodeEncodeError:
+                text = text.replace(ch, repl)
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        text = text.encode(encoding, errors=&quot;backslashreplace&quot;).decode(encoding)
+    print(text, **kwargs)
+</code></pre>
+
+<h3 id="rule-4-write-log-files-as-utf-8-regardless-of-console-codepage">Rule 4: Write log files as UTF-8 regardless of console codepage</h3>
+<p>Logs are data. They should not depend on the console. Configure logging with an explicit UTF-8 file handler and, if you also log to the console, let the console handler degrade gracefully.</p>
+<pre class="codehilite"><code class="language-python">import logging
+import sys
+
+logger = logging.getLogger(&quot;app&quot;)
+logger.setLevel(logging.INFO)
+
+# File handler: always UTF-8, independent of the console.
+fh = logging.FileHandler(&quot;app.log&quot;, encoding=&quot;utf-8&quot;)
+fh.setFormatter(logging.Formatter(&quot;%(asctime)s %(levelname)s %(message)s&quot;))
+logger.addHandler(fh)
+
+# Console handler: keep it, but tolerate an unencodable console.
+ch = logging.StreamHandler(sys.stdout)
+ch.setFormatter(logging.Formatter(&quot;%(levelname)s %(message)s&quot;))
+logger.addHandler(ch)
+
+logger.info(&quot;处理完成，共 %d 条记录&quot;, 128)
+</code></pre>
+
+<p>The file always gets clean UTF-8 bytes. The console handler may still raise on a cp936 console if the message contains an unencodable character — which is why Rule 2 (set <code>PYTHONIOENCODING</code>) and Rule 3 (safe wrapper) matter. If you want the logging module itself to never raise, wrap the stream:</p>
+<pre class="codehilite"><code class="language-python">import io
+
+class SafeStream(io.TextIOBase):
+    def __init__(self, raw):
+        self._raw = raw
+        self.encoding = getattr(raw, &quot;encoding&quot;, None) or &quot;ascii&quot;
+
+    def write(self, s):
+        try:
+            s.encode(self.encoding)
+        except (UnicodeEncodeError, LookupError):
+            s = s.encode(self.encoding, errors=&quot;replace&quot;).decode(self.encoding)
+        return self._raw.write(s)
+
+    def flush(self):
+        self._raw.flush()
+
+ch = logging.StreamHandler(SafeStream(sys.stdout))
+</code></pre>
+
+<p>This is the same idea as <code>safe_print</code>, applied at the stream level so every handler benefits.</p>
+<h3 id="rule-5-keep-bat-files-ascii-only">Rule 5: Keep bat files ASCII-only</h3>
+<p>This is the rule people resist, and it is the one that saves the most pain. A <code>.bat</code> file is read by <code>cmd.exe</code> under the active console codepage. There is no reliable way to make a bat file containing non-ASCII text behave identically across codepages — the <code>chcp</code> command changes the console codepage but does not retroactively fix how <code>cmd.exe</code> parsed the bytes it already read from the file.</p>
+<p>Keep every <code>.bat</code> file pure ASCII. Move any non-ASCII string into a Python script or a UTF-8 data file that Python reads with an explicit encoding.</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+REM ASCII only. No Chinese characters in this file.
+set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
+python &quot;%~dp0\run_task.py&quot; %*
+</code></pre>
+
+<p>If you must reference a path with non-ASCII characters, do it from Python, not from the bat file:</p>
+<pre class="codehilite"><code class="language-python"># run_task.py
+from pathlib import Path
+
+base = Path(r&quot;C:\data&quot;)          # ASCII in the source, safe
+target = base / &quot;季度报表.csv&quot;    # non-ASCII lives in Python source,
+                                  # which is UTF-8 by default (PEP 3120)
+with open(target, &quot;r&quot;, encoding=&quot;utf-8&quot;, newline=&quot;&quot;) as f:
+    ...
+</code></pre>
+
+<p>Python source files are UTF-8 by default since Python 3, so non-ASCII literals in <code>.py</code> files are safe. The bat file is the only place where the bytes are re-interpreted by a non-Python parser.</p>
+<h2 id="a-checklist">A Checklist</h2>
+<p>Before shipping a script that will run on a machine you do not control:</p>
+<ol>
+<li>Every <code>open()</code> has an explicit <code>encoding=</code>.</li>
+<li>Every subprocess capture is decoded with an explicit encoding, or you use <code>text=True, encoding="utf-8"</code>.</li>
+<li>The launcher sets <code>PYTHONIOENCODING=utf-8</code> and <code>PYTHONUTF8=1</code>.</li>
+<li>Console output goes through a fallback that cannot raise.</li>
+<li>Log files are UTF-8, always.</li>
+<li>Bat files contain only ASCII.</li>
+<li>You ran the <code>sys.stdout.encoding</code> / <code>locale.getpreferredencoding</code> probe on both machines.</li>
+</ol>
+<p>The pattern behind all of these is the same: stop letting the ambient locale decide anything. Encoding is a property of your program's data contract, not of the machine it happens to run on. Once you make it explicit, the dev box and the server stop disagreeing.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">UTF-8</span><span class="tag-badge">GBK</span><span class="tag-badge">codepage</span><span class="tag-badge">PYTHONIOENCODING</span><span class="tag-badge">Windows</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
