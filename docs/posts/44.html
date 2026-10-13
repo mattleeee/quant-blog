@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>历史数据迁移实战：从旧平台到新平台的完整方案 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="历史数据迁移实战：从旧平台到新平台的完整方案
+
+量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。...">
+    <meta name="keywords" content="数据迁移,平台迁移,数据完整性,Python">
+    <meta property="og:title" content="历史数据迁移实战：从旧平台到新平台的完整方案">
+    <meta property="og:description" content="历史数据迁移实战：从旧平台到新平台的完整方案
+
+量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/44.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>历史数据迁移实战：从旧平台到新平台的完整方案</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-13</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。</p>
+<p>这篇文章以一个真实场景为例：把旧平台的交易记录、缓存数据、配置文件迁移到新平台。方案覆盖备份、格式转换、完整性校验、迁移后验证和回滚，代码可以直接参考使用。</p>
+<h2 id="_1">一、迁移前的准备工作</h2>
+<h3 id="11">1.1 梳理数据资产</h3>
+<p>先别急着写代码，先搞清楚要迁什么。量化系统里通常有三类数据：</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>典型内容</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>交易记录</td>
+<td>订单、成交、持仓、资金曲线</td>
+<td>强一致性要求，不可丢失</td>
+</tr>
+<tr>
+<td>缓存数据</td>
+<td>行情快照、指标缓存、特征向量</td>
+<td>可重建，但重建耗时长</td>
+</tr>
+<tr>
+<td>配置文件</td>
+<td>策略参数、账户配置、风控阈值</td>
+<td>体积小，但错一个字段就出事</td>
+</tr>
+</tbody>
+</table>
+<h3 id="12">1.2 冻结写入</h3>
+<p>迁移期间旧平台必须停止写入，否则会出现数据漂移。最稳妥的做法是停掉策略进程，或者把数据库切到只读模式。</p>
+<pre class="codehilite"><code class="language-python">import sqlite3
+
+def set_readonly(db_path: str):
+    &quot;&quot;&quot;将 SQLite 数据库设为只读，防止迁移期间写入&quot;&quot;&quot;
+    conn = sqlite3.connect(db_path)
+    conn.execute(&quot;PRAGMA query_only = ON;&quot;)
+    return conn
+</code></pre>
+
+<p>如果是 MySQL/PostgreSQL，直接 <code>REVOKE INSERT, UPDATE, DELETE</code> 即可。</p>
+<h2 id="_2">二、数据备份</h2>
+<h3 id="21">2.1 全量备份</h3>
+<p>备份要保证原子性——要么全成功，要么全失败。用时间戳目录隔离每次备份：</p>
+<pre class="codehilite"><code class="language-python">import os
+import shutil
+import hashlib
+from datetime import datetime
+from pathlib import Path
+
+def backup_all(source_dirs: dict, backup_root: str) -&gt; str:
+    &quot;&quot;&quot;
+    source_dirs: {'trades': '/old/trades', 'cache': '/old/cache', 'config': '/old/config'}
+    返回本次备份目录
+    &quot;&quot;&quot;
+    ts = datetime.now().strftime(&quot;%Y%m%d_%H%M%S&quot;)
+    backup_dir = Path(backup_root) / f&quot;backup_{ts}&quot;
+    backup_dir.mkdir(parents=True, exist_ok=False)
+
+    for name, src in source_dirs.items():
+        dst = backup_dir / name
+        if not os.path.exists(src):
+            raise FileNotFoundError(f&quot;源目录不存在: {src}&quot;)
+        shutil.copytree(src, dst)
+        print(f&quot;[OK] {name} -&gt; {dst}&quot;)
+
+    return str(backup_dir)
+</code></pre>
+
+<h3 id="22">2.2 生成校验清单</h3>
+<p>备份完立刻算哈希，后面校验用得上：</p>
+<pre class="codehilite"><code class="language-python">def build_manifest(root_dir: str) -&gt; dict:
+    &quot;&quot;&quot;遍历目录，生成 {相对路径: sha256} 清单&quot;&quot;&quot;
+    manifest = {}
+    for path in Path(root_dir).rglob(&quot;*&quot;):
+        if path.is_file():
+            h = hashlib.sha256()
+            with open(path, &quot;rb&quot;) as f:
+                for chunk in iter(lambda: f.read(8192), b&quot;&quot;):
+                    h.update(chunk)
+            manifest[str(path.relative_to(root_dir))] = h.hexdigest()
+    return manifest
+</code></pre>
+
+<h2 id="_3">三、格式转换</h2>
+<p>旧平台和新平台的数据结构往往不一样。这里最容易踩的坑是字段名、时间格式、数值精度。</p>
+<h3 id="31">3.1 交易记录转换</h3>
+<p>假设旧平台用 CSV，字段是 <code>time, symbol, side, price, qty</code>，新平台要求 Parquet，字段改成 <code>ts, code, direction, fill_price, volume</code>，且时间统一为 UTC 毫秒时间戳。</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+FIELD_MAP = {
+    &quot;time&quot;: &quot;ts&quot;,
+    &quot;symbol&quot;: &quot;code&quot;,
+    &quot;side&quot;: &quot;direction&quot;,
+    &quot;price&quot;: &quot;fill_price&quot;,
+    &quot;qty&quot;: &quot;volume&quot;,
+}
+
+def convert_trades(src_csv: str, dst_parquet: str):
+    df = pd.read_csv(src_csv)
+
+    # 字段重命名
+    df = df.rename(columns=FIELD_MAP)
+
+    # 时间统一为 UTC 毫秒
+    df[&quot;ts&quot;] = pd.to_datetime(df[&quot;ts&quot;], utc=True).astype(&quot;int64&quot;) // 10**6
+
+    # 方向统一为 BUY/SELL
+    df[&quot;direction&quot;] = df[&quot;direction&quot;].str.upper().map(
+        {&quot;B&quot;: &quot;BUY&quot;, &quot;S&quot;: &quot;SELL&quot;, &quot;BUY&quot;: &quot;BUY&quot;, &quot;SELL&quot;: &quot;SELL&quot;}
+    )
+
+    # 数值精度对齐
+    df[&quot;fill_price&quot;] = df[&quot;fill_price&quot;].astype(&quot;float64&quot;).round(8)
+    df[&quot;volume&quot;] = df[&quot;volume&quot;].astype(&quot;float64&quot;).round(8)
+
+    # 按时间排序
+    df = df.sort_values(&quot;ts&quot;).reset_index(drop=True)
+
+    df.to_parquet(dst_parquet, index=False)
+    print(f&quot;[OK] {len(df)} 条交易记录 -&gt; {dst_parquet}&quot;)
+    return df
+</code></pre>
+
+<h3 id="32">3.2 缓存数据转换</h3>
+<p>缓存通常可以重建，但如果重建要跑几个小时，还是迁过去划算。缓存的关键是保留原始精度，别在转换过程中丢信息。</p>
+<pre class="codehilite"><code class="language-python">import pickle
+import numpy as np
+
+def convert_cache(src_pkl: str, dst_npz: str):
+    with open(src_pkl, &quot;rb&quot;) as f:
+        cache = pickle.load(f)
+
+    arrays = {}
+    for key, val in cache.items():
+        if isinstance(val, (list, np.ndarray)):
+            arrays[key] = np.asarray(val)
+        else:
+            # 非数组类型序列化进 meta
+            arrays[f&quot;meta__{key}&quot;] = np.array([val], dtype=object)
+
+    np.savez_compressed(dst_npz, **arrays)
+    print(f&quot;[OK] 缓存 {len(arrays)} 个键 -&gt; {dst_npz}&quot;)
+</code></pre>
+
+<h3 id="33">3.3 配置文件转换</h3>
+<p>配置文件最怕字段遗漏。用一个 schema 做白名单校验，多余的字段报警但不阻断，缺失的字段直接报错。</p>
+<pre class="codehilite"><code class="language-python">import json
+
+CONFIG_SCHEMA = {
+    &quot;strategy&quot;: [&quot;name&quot;, &quot;params&quot;, &quot;enabled&quot;],
+    &quot;risk&quot;: [&quot;max_position&quot;, &quot;max_drawdown&quot;, &quot;stop_loss&quot;],
+    &quot;account&quot;: [&quot;broker&quot;, &quot;account_id&quot;],
+}
+
+def convert_config(src_json: str, dst_json: str):
+    with open(src_json) as f:
+        cfg = json.load(f)
+
+    new_cfg = {}
+    for section, keys in CONFIG_SCHEMA.items():
+        if section not in cfg:
+            raise KeyError(f&quot;缺少配置段: {section}&quot;)
+        new_cfg[section] = {}
+        for k in keys:
+            if k not in cfg[section]:
+                raise KeyError(f&quot;缺少字段: {section}.{k}&quot;)
+            new_cfg[section][k] = cfg[section][k]
+
+        extra = set(cfg[section]) - set(keys)
+        if extra:
+            print(f&quot;[WARN] {section} 存在未知字段: {extra}&quot;)
+
+    with open(dst_json, &quot;w&quot;) as f:
+        json.dump(new_cfg, f, indent=2, ensure_ascii=False)
+    print(f&quot;[OK] 配置 -&gt; {dst_json}&quot;)
+</code></pre>
+
+<h2 id="_4">四、完整性校验</h2>
+<p>迁移完必须校验，不能凭感觉。校验分三层：</p>
+<h3 id="41">4.1 文件级校验</h3>
+<p>对比源和目标的哈希清单，确保文件没坏。</p>
+<pre class="codehilite"><code class="language-python">def diff_manifest(src_manifest: dict, dst_manifest: dict) -&gt; dict:
+    result = {&quot;missing&quot;: [], &quot;extra&quot;: [], &quot;changed&quot;: []}
+    src_keys, dst_keys = set(src_manifest), set(dst_manifest)
+
+    result[&quot;missing&quot;] = list(src_keys - dst_keys)
+    result[&quot;extra&quot;] = list(dst_keys - src_keys)
+    result[&quot;changed&quot;] = [
+        k for k in src_keys &amp; dst_keys
+        if src_manifest[k] != dst_manifest[k]
+    ]
+    return result
+</code></pre>
+
+<h3 id="42">4.2 记录级校验</h3>
+<p>文件哈希只能证明字节一致，格式转换后哈希必然不同。这时候要校验业务字段：</p>
+<pre class="codehilite"><code class="language-python">def verify_trades(src_df: pd.DataFrame, dst_df: pd.DataFrame):
+    assert len(src_df) == len(dst_df), \
+        f&quot;记录数不一致: {len(src_df)} vs {len(dst_df)}&quot;
+
+    # 时间戳对齐（允许 ±1ms 误差）
+    ts_diff = (src_df[&quot;ts&quot;].sort_values().values -
+               dst_df[&quot;ts&quot;].sort_values().values)
+    assert abs(ts_diff).max() &lt;= 1, &quot;时间戳偏差过大&quot;
+
+    # 价格和数量对齐
+    for col, tol in [(&quot;fill_price&quot;, 1e-8), (&quot;volume&quot;, 1e-8)]:
+        diff = (src_df[col].values - dst_df[col].values)
+        assert abs(diff).max() &lt; tol, f&quot;{col} 精度超限&quot;
+
+    print(&quot;[OK] 交易记录校验通过&quot;)
+</code></pre>
+
+<h3 id="43">4.3 聚合校验</h3>
+<p>记录级过了还不够，做一次聚合对账，防止排序错位之类的隐蔽问题：</p>
+<pre class="codehilite"><code class="language-python">def aggregate_check(df: pd.DataFrame) -&gt; dict:
+    return {
+        &quot;count&quot;: len(df),
+        &quot;total_volume&quot;: float(df[&quot;volume&quot;].sum()),
+        &quot;avg_price&quot;: float(df[&quot;fill_price&quot;].mean()),
+        &quot;first_ts&quot;: int(df[&quot;ts&quot;].min()),
+        &quot;last_ts&quot;: int(df[&quot;ts&quot;].max()),
+    }
+
+def compare_aggregates(src: dict, dst: dict, tol=1e-6):
+    for key in src:
+        a, b = src[key], dst[key]
+        if isinstance(a, float):
+            assert abs(a - b) &lt; tol, f&quot;{key} 不一致: {a} vs {b}&quot;
+        else:
+            assert a == b, f&quot;{key} 不一致: {a} vs {b}&quot;
+    print(&quot;[OK] 聚合校验通过&quot;)
+</code></pre>
+
+<h2 id="_5">五、迁移后验证</h2>
+<p>数据迁完了不代表系统能用。要跑一遍端到端验证：</p>
+<h3 id="51">5.1 回放验证</h3>
+<p>用新平台加载迁移后的数据，跑一遍历史回放，看指标是否和旧平台一致。</p>
+<pre class="codehilite"><code class="language-python">def replay_check(new_platform, old_metrics: dict, start_ts: int, end_ts: int):
+    new_platform.load_data(start_ts, end_ts)
+    new_metrics = new_platform.run_backtest()
+
+    for key in old_metrics:
+        old_v, new_v = old_metrics[key], new_metrics[key]
+        rel_diff = abs(old_v - new_v) / (abs(old_v) + 1e-9)
+        status = &quot;OK&quot; if rel_diff &lt; 1e-4 else &quot;FAIL&quot;
+        print(f&quot;[{status}] {key}: old={old_v:.6f} new={new_v:.6f} diff={rel_diff:.2e}&quot;)
+</code></pre>
+
+<h3 id="52">5.2 抽样人工核对</h3>
+<p>程序校验再严，也建议随机抽 10~20 条记录人工看一眼。特别是边界情况：跨日订单、部分成交、撤单记录。</p>
+<pre class="codehilite"><code class="language-python">import random
+
+def sample_check(df: pd.DataFrame, n=10):
+    samples = df.sample(n=min(n, len(df)), random_state=42)
+    for _, row in samples.iterrows():
+        print(row.to_dict())
+</code></pre>
+
+<h2 id="_6">六、回滚方案</h2>
+<p>迁移不可能 100% 一次成功，必须准备好回滚。核心思路：<strong>新平台独立部署，旧平台保持可启动状态</strong>。</p>
+<h3 id="61">6.1 回滚触发条件</h3>
+<ul>
+<li>记录级校验失败</li>
+<li>回放指标偏差超过阈值</li>
+<li>新平台启动后 30 分钟内出现异常</li>
+</ul>
+<h3 id="62">6.2 回滚脚本</h3>
+<pre class="codehilite"><code class="language-python">import shutil
+from pathlib import Path
+
+def rollback(backup_dir: str, target_dirs: dict):
+    &quot;&quot;&quot;
+    target_dirs: {'trades': '/new/trades', ...}
+    从备份恢复
+    &quot;&quot;&quot;
+    backup = Path(backup_dir)
+    for name, target in target_dirs.items():
+        src = backup / name
+        if not src.exists():
+            raise FileNotFoundError(f&quot;备份缺失: {src}&quot;)
+
+        target_path = Path(target)
+        if target_path.exists():
+            shutil.rmtree(target_path)
+        shutil.copytree(src, target_path)
+        print(f&quot;[ROLLBACK] {name} &lt;- {src}&quot;)
+
+    print(&quot;[OK] 回滚完成，请重启旧平台服务&quot;)
+</code></pre>
+
+<h3 id="63">6.3 双写过渡期</h3>
+<p>如果业务允许，迁移后可以保持 1~3 天的双写：新平台为主，旧平台只记录。对账无误后再彻底下线旧平台。这是最稳妥的做法，代价是短期维护成本翻倍。</p>
+<h2 id="_7">七、一些踩过的坑</h2>
+<p><strong>时间戳精度</strong>：旧平台用秒，新平台用毫秒，直接转换会丢精度。转换前先确认单位。</p>
+<p><strong>浮点数比较</strong>：不要用 <code>==</code> 比较价格，用 <code>abs(a-b) &lt; 1e-8</code>。</p>
+<p><strong>Parquet 的 schema 推断</strong>：pandas 写 Parquet 时如果某列全为整数，读回来可能是 int，也可能是 float。显式指定 dtype 更安全。</p>
+<p><strong>配置文件的默认值</strong>：新平台可能有旧平台没有的字段，转换时要主动补默认值，不要指望新平台容错。</p>
+<p><strong>缓存顺序</strong>：如果缓存里有依赖顺序的结构（比如时间序列），序列化时要保持顺序，<code>pickle</code> 默认保序，但 JSON 转 dict 后要注意 Python 3.7+ 才保序。</p>
+<h2 id="_8">八、完整流程串联</h2>
+<p>把上面的模块串起来，一个完整的迁移脚本大概长这样：</p>
+<pre class="codehilite"><code class="language-python">def migrate(source_dirs, backup_root, work_dir):
+    # 1. 备份
+    backup_dir = backup_all(source_dirs, backup_root)
+    src_manifest = build_manifest(backup_dir)
+
+    # 2. 转换
+    convert_trades(f&quot;{backup_dir}/trades/trades.csv&quot;,
+                   f&quot;{work_dir}/trades.parquet&quot;)
+    convert_cache(f&quot;{backup_dir}/cache/cache.pkl&quot;,
+                  f&quot;{work_dir}/cache.npz&quot;)
+    convert_config(f&quot;{backup_dir}/config/config.json&quot;,
+                   f&quot;{work_dir}/config.json&quot;)
+
+    # 3. 校验
+    src_df = pd.read_csv(f&quot;{backup_dir}/trades/trades.csv&quot;)
+    dst_df = pd.read_parquet(f&quot;{work_dir}/trades.parquet&quot;)
+    verify_trades(src_df.rename(columns=FIELD_MAP), dst_df)
+    compare_aggregates(aggregate_check(src_df.rename(columns=FIELD_MAP)),
+                       aggregate_check(dst_df))
+
+    # 4. 部署到新平台后跑回放验证
+    # replay_check(new_platform, old_metrics, start_ts, end_ts)
+
+    print(&quot;[DONE] 迁移完成，请执行回放验证&quot;)
+    return backup_dir
+</code></pre>
+
+<p>迁移这件事，80% 的工作量在准备和校验，20% 在转换。别把顺序搞反了，先备份、再校验、最后才动手改数据。回滚方案不是可选项，是必选项——真出事的时候，它是你唯一的救命稻草。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">数据迁移</span><span class="tag-badge">平台迁移</span><span class="tag-badge">数据完整性</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
