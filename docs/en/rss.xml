@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>UTF-8 vs GBK: The Root Cause of Cross-Machine Script Failures</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/16.html</link>
+            <description>A script that runs fine on your laptop and dies on the server is almost never a logic bug....</description>
+            <pubDate>2026-10-13</pubDate>
+            <category>Encoding</category>
+        </item>
+        <item>
             <title>The Silent Alert Bug: When Your Instant Push Exists but Never Fires</title>
             <link>https://www.hkcode.dpdns.org/en/posts/15.html</link>
             <description>Your alert formatter is probably fine. The problem is that nobody calls it. The Symptom A user reports that instant push notifications stopped working....</description>
