@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PowerShell on Legacy Chinese Windows: UTF-8 with BOM or Bust - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Windows PowerShell 5.1 does not guess encodings. When it loads a .ps1 file, it looks for a byte-order mark....">
+    <meta name="keywords" content="PowerShell,BOM,UTF-8,GBK,scripting">
+    <meta property="og:title" content="PowerShell on Legacy Chinese Windows: UTF-8 with BOM or Bust">
+    <meta property="og:description" content="Windows PowerShell 5.1 does not guess encodings. When it loads a .ps1 file, it looks for a byte-order mark....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/17.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>PowerShell on Legacy Chinese Windows: UTF-8 with BOM or Bust</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-14</span>
+                <span class="category"><span class="tag-badge">Encoding</span></span>
+            </div>
+            <div class="post-content">
+<p>Windows PowerShell 5.1 does not guess encodings. When it loads a <code>.ps1</code> file, it looks for a byte-order mark. If it finds one, it decodes accordingly. If it does not, it falls back to the system's ANSI code page — and on a Chinese Windows install, that code page is GBK (CP936). Every non-ASCII character in your script is then decoded through the wrong table, and you get mojibake that does not throw an error. It just quietly changes what your script means.</p>
+<p>This is the story of how a path check turned into a week of debugging, and the one rule that fixed it: every <code>.ps1</code> file ships as UTF-8 with BOM and CRLF endings.</p>
+<h2 id="the-symptom">The symptom</h2>
+<p>A deployment script had a line like this:</p>
+<pre class="codehilite"><code class="language-powershell">$configDir = Join-Path $env:ProgramData &quot;我的工具\配置&quot;
+if (-not (Test-Path $configDir)) {
+    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+}
+</code></pre>
+
+<p>On the developer's machine it worked. On the build server it created a directory named something like <code>æˆ‘çš„å·¥å…·</code> — or sometimes it created nothing at all, and <code>Test-Path</code> returned <code>$false</code> for a path that clearly existed when inspected manually in Explorer.</p>
+<p>The reason is straightforward once you see the bytes. The file was saved by an editor as UTF-8 without BOM. PowerShell 5.1 read it as GBK. The UTF-8 bytes for <code>我</code> are <code>E6 88 91</code>. Decoded as GBK, those three bytes are a valid two-byte character plus a stray byte, producing a different string entirely. PowerShell then passed that corrupted string to the Windows API, which dutifully created a directory with a nonsense name. <code>Test-Path</code> on the <em>intended</em> name failed because the intended name was never used.</p>
+<p>No exception. No warning. Just a different program than the one you wrote.</p>
+<h2 id="detecting-it-hex-dump-the-first-bytes">Detecting it: hex-dump the first bytes</h2>
+<p>The fastest way to confirm the diagnosis is to look at the raw bytes at the start of the file.</p>
+<pre class="codehilite"><code class="language-powershell"># Show the first 8 bytes of a script file
+$bytes = [System.IO.File]::ReadAllBytes(&quot;.\deploy.ps1&quot;)[0..7]
+($bytes | ForEach-Object { $_.ToString(&quot;X2&quot;) }) -join ' '
+</code></pre>
+
+<p>Interpretation:</p>
+<ul>
+<li><code>EF BB BF</code> — UTF-8 with BOM. PowerShell 5.1 decodes correctly.</li>
+<li><code>FF FE</code> — UTF-16 LE with BOM. Also fine.</li>
+<li><code>FE FF</code> — UTF-16 BE with BOM. Fine, rare.</li>
+<li>Anything else — no BOM. PowerShell 5.1 falls back to the ANSI code page. On a GBK system that means GBK.</li>
+</ul>
+<p>If you see <code>E6 88 91</code> at the start of a file containing <code>我</code>, you have a BOM-less UTF-8 file, and 5.1 is about to misread it.</p>
+<p>A quick Python check across a whole directory is often easier than doing this by hand:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+BOMS = {
+    b&quot;\xef\xbb\xbf&quot;: &quot;utf-8-sig&quot;,
+    b&quot;\xff\xfe&quot;: &quot;utf-16-le&quot;,
+    b&quot;\xfe\xff&quot;: &quot;utf-16-be&quot;,
+}
+
+def sniff(path: Path) -&gt; str:
+    head = path.read_bytes()[:4]
+    for bom, enc in BOMS.items():
+        if head.startswith(bom):
+            return enc
+    # No BOM. Try strict UTF-8; if it fails, it is almost certainly ANSI/GBK.
+    try:
+        path.read_bytes().decode(&quot;utf-8&quot;)
+        return &quot;utf-8 (NO BOM) &lt;-- 5.1 will misread this&quot;
+    except UnicodeDecodeError:
+        return &quot;ansi/gbk (NO BOM)&quot;
+
+for ps1 in Path(&quot;scripts&quot;).rglob(&quot;*.ps1&quot;):
+    print(f&quot;{ps1}: {sniff(ps1)}&quot;)
+</code></pre>
+
+<p>Run this on any legacy repo and the offending files surface immediately. On a Chinese Windows box, the mix of "utf-8 (NO BOM)" and "ansi/gbk" files is the whole problem in one listing.</p>
+<h2 id="why-bom-less-utf-8-is-a-trap-on-chinese-windows">Why BOM-less UTF-8 is a trap on Chinese Windows</h2>
+<p>The default encoding for reading files in PowerShell 5.1 is not UTF-8. It is <code>[System.Text.Encoding]::Default</code>, which maps to the active ANSI code page. On an English system that is CP1252. On a Simplified Chinese system it is CP936 (GBK). On a Japanese system, CP932. The behavior of the same script file therefore depends on the locale of the machine running it.</p>
+<p>This is the part that makes the bug so expensive. The script is not wrong on every machine — it is wrong on machines whose code page differs from the one the author implicitly assumed. A BOM removes the ambiguity: it tells the parser "this is UTF-8" regardless of locale.</p>
+<p>The same trap applies to <code>Get-Content</code> and <code>Set-Content</code> in 5.1. <code>Get-Content</code> without <code>-Encoding</code> uses the ANSI default; <code>Set-Content</code> without <code>-Encoding</code> writes ANSI. Round-tripping a UTF-8 file through those cmdlets silently converts it to GBK.</p>
+<h2 id="bulk-converting-a-repo-to-utf-8-with-bom">Bulk-converting a repo to UTF-8 with BOM</h2>
+<p>You can fix a directory of scripts with PowerShell itself. The trick is to read the bytes, decode them with the correct source encoding, and write them back with a BOM.</p>
+<pre class="codehilite"><code class="language-powershell"># convert-to-utf8bom.ps1
+param(
+    [Parameter(Mandatory)][string]$Root,
+    [string]$SourceEncoding = &quot;utf-8&quot;   # use &quot;gb2312&quot; for legacy GBK files
+)
+
+$utf8Bom = New-Object System.Text.UTF8Encoding($true)
+
+Get-ChildItem -Path $Root -Recurse -Filter *.ps1 | ForEach-Object {
+    $path  = $_.FullName
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+
+    # Already has a UTF-8 BOM? Skip.
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        Write-Host &quot;skip (already BOM): $path&quot;
+        return
+    }
+
+    $text = [System.Text.Encoding]::GetEncoding($SourceEncoding).GetString($bytes)
+
+    # Normalize line endings to CRLF.
+    $text = $text -replace &quot;`r`n&quot;, &quot;`n&quot; -replace &quot;`n&quot;, &quot;`r`n&quot;
+
+    [System.IO.File]::WriteAllText($path, $text, $utf8Bom)
+    Write-Host &quot;converted: $path&quot;
+}
+</code></pre>
+
+<p>Two things matter here. First, <code>WriteAllText</code> with a <code>UTF8Encoding($true)</code> instance emits the BOM; <code>UTF8Encoding($false)</code> does not. Second, you must know the source encoding. If a file is genuinely GBK, decoding it as UTF-8 will throw or produce replacement characters. The Python sniffer above tells you which is which before you run the conversion.</p>
+<p>The same job in Python, which is often more convenient in CI:</p>
+<pre class="codehilite"><code class="language-python">import sys
+from pathlib import Path
+
+def to_utf8_bom(path: Path, source_encoding: str) -&gt; None:
+    raw = path.read_bytes()
+    if raw.startswith(b&quot;\xef\xbb\xbf&quot;):
+        return
+    text = raw.decode(source_encoding)
+    text = text.replace(&quot;\r\n&quot;, &quot;\n&quot;).replace(&quot;\n&quot;, &quot;\r\n&quot;)
+    path.write_bytes(b&quot;\xef\xbb\xbf&quot; + text.encode(&quot;utf-8&quot;))
+
+for p in Path(sys.argv[1]).rglob(&quot;*.ps1&quot;):
+    try:
+        to_utf8_bom(p, &quot;utf-8&quot;)
+    except UnicodeDecodeError:
+        to_utf8_bom(p, &quot;gbk&quot;)
+    print(f&quot;converted {p}&quot;)
+</code></pre>
+
+<p>The fallback to <code>gbk</code> on <code>UnicodeDecodeError</code> handles mixed repos where some files were saved as ANSI by an older editor. Once every file is UTF-8 with BOM, the ambiguity is gone.</p>
+<h2 id="powershell-7-behaves-differently">PowerShell 7 behaves differently</h2>
+<p>PowerShell 7 (Core) changed the defaults. <code>Get-Content</code> and the script loader default to UTF-8 without requiring a BOM, and <code>Set-Content</code> writes UTF-8 without BOM by default. So the same BOM-less file that 5.1 mangles will load correctly in 7.</p>
+<p>That is a feature, and also a trap. If your scripts run under both 5.1 and 7 — which is common on servers that still have Windows PowerShell installed alongside Core — you need the file to work under the stricter reader. UTF-8 with BOM works in both. BOM-less UTF-8 works only in 7. So the rule is not "use UTF-8"; the rule is "use UTF-8 with BOM" if any 5.1 host might touch the file.</p>
+<p>Note also that PowerShell 7 still honors the BOM when present, so adding it does not break anything under Core.</p>
+<h2 id="a-pre-flight-check-before-you-ship">A pre-flight check before you ship</h2>
+<p>The fix is cheap; the discipline is what fails. Put a validator in your build or pre-commit step so a BOM-less file never reaches a 5.1 host.</p>
+<pre class="codehilite"><code class="language-python">#!/usr/bin/env python3
+&quot;&quot;&quot;Fail the build if any .ps1 is not UTF-8 with BOM and CRLF.&quot;&quot;&quot;
+import sys
+from pathlib import Path
+
+def check(path: Path) -&gt; list[str]:
+    errors = []
+    raw = path.read_bytes()
+
+    if not raw.startswith(b&quot;\xef\xbb\xbf&quot;):
+        errors.append(&quot;missing UTF-8 BOM&quot;)
+    else:
+        try:
+            raw[3:].decode(&quot;utf-8&quot;)
+        except UnicodeDecodeError as exc:
+            errors.append(f&quot;not valid UTF-8: {exc}&quot;)
+
+    # CRLF check: reject lone LF outside of the final byte.
+    body = raw[3:] if raw.startswith(b&quot;\xef\xbb\xbf&quot;) else raw
+    if b&quot;\n&quot; in body.replace(b&quot;\r\n&quot;, b&quot;&quot;):
+        errors.append(&quot;contains LF-only line endings; expected CRLF&quot;)
+
+    return errors
+
+failed = False
+for p in sorted(Path(&quot;.&quot;).rglob(&quot;*.ps1&quot;)):
+    errs = check(p)
+    if errs:
+        failed = True
+        for e in errs:
+            print(f&quot;{p}: {e}&quot;)
+
+sys.exit(1 if failed else 0)
+</code></pre>
+
+<p>Drop this into CI as a gate. The failure message is specific enough that the fix is obvious: save the file as UTF-8 with BOM, convert line endings to CRLF, commit.</p>
+<p>If you want the validator to auto-fix instead of fail, reuse the conversion functions above and re-run the check. In a pre-commit hook, auto-fixing is usually the better default — it removes the human from the loop entirely.</p>
+<h2 id="the-rule">The rule</h2>
+<p>Every <code>.ps1</code> file that might ever run under Windows PowerShell 5.1 must be saved as UTF-8 with BOM and CRLF line endings. BOM-less UTF-8 is a valid encoding and a broken script on a GBK system. UTF-16 also works but is unusual in a repo and confuses diffs and tooling. Stick to UTF-8 with BOM.</p>
+<p>The failure mode — silent mojibake, locale-dependent behavior, no exception — is what makes this worth a hard rule rather than a convention. A linter catches it in a second; a human catches it after a week of <code>Test-Path</code> returning <code>$false</code> on a path that exists.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">PowerShell</span><span class="tag-badge">BOM</span><span class="tag-badge">UTF-8</span><span class="tag-badge">GBK</span><span class="tag-badge">scripting</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
