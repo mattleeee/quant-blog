@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>多策略组合系统的架构演进：从单策略到全天候</title>
+            <link>https://www.hkcode.dpdns.org/posts/45.html</link>
+            <description>多策略组合系统的架构演进：从单策略到全天候
+
+阶段一：单策略裸奔
+
+最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。...</description>
+            <pubDate>2026-10-14</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>历史数据迁移实战：从旧平台到新平台的完整方案</title>
             <link>https://www.hkcode.dpdns.org/posts/44.html</link>
             <description>历史数据迁移实战：从旧平台到新平台的完整方案
@@ -151,13 +162,6 @@
             <link>https://www.hkcode.dpdns.org/posts/26.html</link>
             <description>均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。 一、均线的数学本质与类型选择 均线的核心是对价格序列做低通滤波。不同的均线类型,本质是滤波器设计不同。 1.1...</description>
             <pubDate>2026-09-25</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>三层验证方法论：参数扫描+月度一致性+稳健性消融</title>
-            <link>https://www.hkcode.dpdns.org/posts/25.html</link>
-            <description>一个策略回测出来夏普2.0，不代表它能用。可能只是参数恰好踩中了历史噪声，可能只是某一个月贡献了全部收益，也可能去掉某个核心逻辑后表现反而更好——说明那个逻辑本来就没用。 单次回测的信息量极低。要判断一个策略是否值得进一步投入，我习惯用三层验证来过滤：参数扫描看稳定性，月度一致性看收益分布，稳健性消融看逻辑必要性。三层...</description>
-            <pubDate>2026-09-24</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
