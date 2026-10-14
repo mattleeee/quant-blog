@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多策略组合系统的架构演进：从单策略到全天候 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="多策略组合系统的架构演进：从单策略到全天候
+
+阶段一：单策略裸奔
+
+最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。...">
+    <meta name="keywords" content="架构演进,多策略,系统架构,Python">
+    <meta property="og:title" content="多策略组合系统的架构演进：从单策略到全天候">
+    <meta property="og:description" content="多策略组合系统的架构演进：从单策略到全天候
+
+阶段一：单策略裸奔
+
+最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/45.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>多策略组合系统的架构演进：从单策略到全天候</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-14</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<h2 id="_1">阶段一：单策略裸奔</h2>
+<p>最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。</p>
+<pre class="codehilite"><code class="language-python">import time
+import pandas as pd
+from datetime import datetime
+
+class SingleStrategyRunner:
+    def __init__(self, strategy, broker):
+        self.strategy = strategy
+        self.broker = broker
+
+    def run(self):
+        while True:
+            now = datetime.now()
+            # 收盘后计算信号
+            if now.hour == 15 and now.minute == 5:
+                data = self.broker.get_history(days=120)
+                signal = self.strategy.generate_signal(data)
+                if signal == 1:
+                    self.broker.buy(target=0.95)
+                elif signal == -1:
+                    self.broker.sell_all()
+            time.sleep(30)
+</code></pre>
+
+<p><strong>问题清单：</strong></p>
+<ul>
+<li>策略逻辑与执行逻辑耦合，改一行代码要停整个进程</li>
+<li>没有状态管理，进程挂了持仓状态全靠券商接口反查</li>
+<li>单点故障，一次异常退出就彻底躺平</li>
+<li>无法回测与实盘共用同一套代码，两边逻辑经常漂移</li>
+</ul>
+<p>这个阶段的核心矛盾是<strong>耦合</strong>。策略、执行、调度、状态全混在一起，任何一处改动都可能引发连锁反应。</p>
+<h2 id="_2">阶段二：多策略并行——解耦与隔离</h2>
+<p>当手里攒了三五个策略，第一反应是"多开几个进程"。但这只是把单点故障变成了多点故障。</p>
+<p>真正的演进方向是<strong>事件驱动 + 策略隔离</strong>。核心思路：把每个策略封装成独立单元，通过统一的事件总线通信，状态由中央账本管理。</p>
+<pre class="codehilite"><code class="language-python">from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Dict
+import queue
+import threading
+
+@dataclass
+class SignalEvent:
+    strategy_id: str
+    symbol: str
+    direction: int  # 1 买, -1 卖, 0 平
+    weight: float
+    timestamp: float
+
+class Strategy(ABC):
+    def __init__(self, strategy_id: str):
+        self.strategy_id = strategy_id
+
+    @abstractmethod
+    def on_data(self, data: pd.DataFrame) -&gt; list[SignalEvent]:
+        ...
+
+class StrategyEngine:
+    &quot;&quot;&quot;每个策略跑在独立线程，产出信号事件&quot;&quot;&quot;
+    def __init__(self, bus: queue.Queue):
+        self.bus = bus
+        self.strategies: Dict[str, Strategy] = {}
+        self._stop = threading.Event()
+
+    def register(self, strategy: Strategy):
+        self.strategies[strategy.strategy_id] = strategy
+
+    def _run_one(self, strategy: Strategy):
+        while not self._stop.is_set():
+            data = self._fetch_data(strategy.strategy_id)
+            if data is None or data.empty:
+                time.sleep(1)
+                continue
+            for event in strategy.on_data(data):
+                self.bus.put(event)
+            time.sleep(5)
+
+    def start(self):
+        for s in self.strategies.values():
+            threading.Thread(target=self._run_one, args=(s,), daemon=True).start()
+
+    def _fetch_data(self, sid: str):
+        # 实际项目替换为行情源
+        return None
+</code></pre>
+
+<p>中央账本负责汇总所有策略的目标仓位，做净额处理：</p>
+<pre class="codehilite"><code class="language-python">class PortfolioLedger:
+    &quot;&quot;&quot;汇总多策略信号，输出净目标仓位&quot;&quot;&quot;
+    def __init__(self):
+        self.target: Dict[str, float] = {}
+        self.lock = threading.Lock()
+
+    def apply(self, event: SignalEvent):
+        with self.lock:
+            key = event.symbol
+            delta = event.direction * event.weight
+            self.target[key] = self.target.get(key, 0.0) + delta
+            # 单标的敞口上限
+            self.target[key] = max(-1.0, min(1.0, self.target[key]))
+
+    def snapshot(self) -&gt; Dict[str, float]:
+        with self.lock:
+            return dict(self.target)
+</code></pre>
+
+<p><strong>这一阶段解决的问题：</strong></p>
+<ul>
+<li>策略之间互不干扰，一个策略抛异常不影响其他策略</li>
+<li>信号与执行分离，执行层只认净目标仓位</li>
+<li>回测和实盘共用 <code>Strategy</code> 接口，逻辑不再漂移</li>
+</ul>
+<p><strong>新暴露的问题：</strong></p>
+<ul>
+<li>多策略同时满仓时，总仓位可能超过 100%，杠杆失控</li>
+<li>策略之间相关性高，回撤叠加，组合并没有真正分散</li>
+<li>没有资金分配机制，谁先发信号谁占坑</li>
+</ul>
+<h2 id="_3">阶段三：资金分配与风险预算</h2>
+<p>多策略并行不等于多策略组合。组合的关键在于<strong>资金如何在策略之间分配</strong>。</p>
+<p>最朴素的做法是等权，但等权忽略了策略的波动率差异。更合理的是<strong>风险平价（Risk Parity）</strong>：让每个策略对组合的风险贡献相等。</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def risk_parity_weights(returns: pd.DataFrame, lookback: int = 60) -&gt; pd.Series:
+    &quot;&quot;&quot;
+    returns: 每列一个策略的日收益率
+    返回: 各策略权重，使风险贡献相等
+    &quot;&quot;&quot;
+    recent = returns.tail(lookback).dropna()
+    cov = recent.cov().values
+    n = cov.shape[0]
+
+    # 迭代求解风险平价权重
+    w = np.ones(n) / n
+    for _ in range(500):
+        port_var = w @ cov @ w
+        marginal = cov @ w
+        rc = w * marginal / np.sqrt(port_var)  # 风险贡献
+        target = rc.mean()
+        w = w * (target / rc)
+        w = w / w.sum()
+    return pd.Series(w, index=returns.columns)
+
+
+def apply_vol_target(weights: pd.Series, returns: pd.DataFrame,
+                     target_vol: float = 0.15) -&gt; pd.Series:
+    &quot;&quot;&quot;在风险平价基础上叠加波动率目标&quot;&quot;&quot;
+    port_ret = (returns.tail(60) * weights).sum(axis=1)
+    realized = port_ret.std() * np.sqrt(252)
+    scale = target_vol / realized if realized &gt; 0 else 1.0
+    return weights * min(scale, 2.0)  # 杠杆上限 2 倍
+</code></pre>
+
+<p>在 <code>PortfolioLedger</code> 里引入权重层：</p>
+<pre class="codehilite"><code class="language-python">class WeightedLedger(PortfolioLedger):
+    def __init__(self, weights: Dict[str, float]):
+        super().__init__()
+        self.weights = weights  # strategy_id -&gt; 资金权重
+
+    def apply(self, event: SignalEvent):
+        w = self.weights.get(event.strategy_id, 0.0)
+        scaled = SignalEvent(
+            strategy_id=event.strategy_id,
+            symbol=event.symbol,
+            direction=event.direction,
+            weight=event.weight * w,
+            timestamp=event.timestamp,
+        )
+        super().apply(scaled)
+</code></pre>
+
+<p><strong>架构对比：</strong></p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>阶段一</th>
+<th>阶段二</th>
+<th>阶段三</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>策略隔离</td>
+<td>无</td>
+<td>线程级</td>
+<td>线程级 + 权重隔离</td>
+</tr>
+<tr>
+<td>资金管理</td>
+<td>全仓</td>
+<td>净额封顶</td>
+<td>风险平价 + 波动目标</td>
+</tr>
+<tr>
+<td>故障影响</td>
+<td>全局</td>
+<td>单策略</td>
+<td>单策略</td>
+</tr>
+<tr>
+<td>回撤特征</td>
+<td>单策略回撤</td>
+<td>相关性叠加</td>
+<td>风险分散</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_4">阶段四：全天候——状态机与动态切换</h2>
+<p>到了这一步，系统能跑多策略、能分配资金，但还有一个致命问题：<strong>策略有生命周期</strong>。</p>
+<p>趋势策略在震荡市里连续亏损，套利策略在流动性枯竭时失效。如果一直给所有策略分配资金，等于在无效环境里持续送钱。</p>
+<p>全天候的核心不是"永远满仓"，而是<strong>根据市场状态动态调整策略权重</strong>。</p>
+<pre class="codehilite"><code class="language-python">from enum import Enum
+
+class Regime(Enum):
+    TREND_UP = &quot;trend_up&quot;
+    TREND_DOWN = &quot;trend_down&quot;
+    RANGE = &quot;range&quot;
+    HIGH_VOL = &quot;high_vol&quot;
+
+class RegimeDetector:
+    &quot;&quot;&quot;基于波动率和趋势强度识别市场状态&quot;&quot;&quot;
+    def __init__(self, lookback: int = 20):
+        self.lookback = lookback
+
+    def detect(self, prices: pd.Series) -&gt; Regime:
+        ret = prices.pct_change().tail(self.lookback)
+        vol = ret.std() * np.sqrt(252)
+
+        # 趋势强度：ADX 简化版
+        ma_fast = prices.tail(5).mean()
+        ma_slow = prices.tail(20).mean()
+        trend_strength = abs(ma_fast - ma_slow) / ma_slow
+
+        if vol &gt; 0.35:
+            return Regime.HIGH_VOL
+        if trend_strength &gt; 0.03:
+            return Regime.TREND_UP if ma_fast &gt; ma_slow else Regime.TREND_DOWN
+        return Regime.RANGE
+
+
+# 策略在不同状态下的权重系数
+REGIME_MULTIPLIER = {
+    Regime.TREND_UP:   {&quot;trend&quot;: 1.5, &quot;mean_rev&quot;: 0.3, &quot;arb&quot;: 1.0},
+    Regime.TREND_DOWN: {&quot;trend&quot;: 1.5, &quot;mean_rev&quot;: 0.3, &quot;arb&quot;: 1.0},
+    Regime.RANGE:      {&quot;trend&quot;: 0.3, &quot;mean_rev&quot;: 1.5, &quot;arb&quot;: 1.0},
+    Regime.HIGH_VOL:   {&quot;trend&quot;: 0.5, &quot;mean_rev&quot;: 0.5, &quot;arb&quot;: 0.8},
+}
+</code></pre>
+
+<p>把状态检测接入权重层，形成闭环：</p>
+<pre class="codehilite"><code class="language-python">class AllWeatherLedger(WeightedLedger):
+    def __init__(self, base_weights, strategy_types, detector):
+        super().__init__(base_weights)
+        self.strategy_types = strategy_types  # strategy_id -&gt; &quot;trend&quot;/&quot;mean_rev&quot;/&quot;arb&quot;
+        self.detector = detector
+        self.current_regime = Regime.RANGE
+
+    def update_regime(self, prices: pd.Series):
+        new_regime = self.detector.detect(prices)
+        if new_regime != self.current_regime:
+            self.current_regime = new_regime
+            self._rebalance_weights()
+
+    def _rebalance_weights(self):
+        mult = REGIME_MULTIPLIER[self.current_regime]
+        raw = {
+            sid: self.weights[sid] * mult.get(self.strategy_types[sid], 1.0)
+            for sid in self.weights
+        }
+        total = sum(raw.values())
+        self.weights = {k: v / total for k, v in raw.items()}
+</code></pre>
+
+<p><strong>全天候架构的四个层次：</strong></p>
+<pre class="codehilite"><code>┌─────────────────────────────────────┐
+│  数据层：行情 + 状态检测             │
+├─────────────────────────────────────┤
+│  策略层：独立线程，事件驱动输出信号   │
+├─────────────────────────────────────┤
+│  组合层：风险平价 + 状态权重调整      │
+├─────────────────────────────────────┤
+│  执行层：净额下单 + 状态持久化        │
+└─────────────────────────────────────┘
+</code></pre>
+
+<h2 id="_5">工程上的几个坑</h2>
+<p><strong>1. 状态持久化。</strong> 进程重启后必须恢复持仓、权重、当前市场状态。用 SQLite 或 Redis 都行，关键是要有 <code>snapshot()</code> 和 <code>restore()</code> 对称接口。</p>
+<p><strong>2. 时钟对齐。</strong> 多策略跑在不同线程，信号时间戳必须统一到同一时钟源，否则净额计算会出现时序错乱。</p>
+<p><strong>3. 回测与实盘的一致性。</strong> 状态检测、权重计算、净额处理这三层必须在回测里完整复现。很多组合回测好看实盘拉胯，就是因为回测只跑了策略层，没跑组合层。</p>
+<p><strong>4. 权重调整的频率。</strong> 状态检测太频繁会导致权重抖动，交易成本爆炸。实践中用日频检测、周频调权，配合最小变动阈值。</p>
+<h2 id="_6">演进路线总结</h2>
+<p>从单策略到全天候，本质是<strong>不断把隐式假设显式化</strong>的过程：</p>
+<ul>
+<li>阶段一假设"只有一个策略"，阶段二把它变成"多策略隔离"</li>
+<li>阶段二假设"资金平均分配"，阶段三把它变成"风险预算"</li>
+<li>阶段三假设"策略永远有效"，阶段四把它变成"状态自适应"</li>
+</ul>
+<p>每一步演进都不是为了架构好看，而是因为上一层的假设在实盘中被打脸了。架构演进的驱动力永远来自真实的亏损和故障，而不是设计模式。</p>
+<p>代码层面，核心是保持 <code>Strategy</code> 接口稳定，让组合层和执行层可以独立演化。策略作者只关心 <code>on_data</code> 返回什么信号，不需要知道资金怎么分配、状态怎么切换。这种分层是系统能持续演进的前提。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">架构演进</span><span class="tag-badge">多策略</span><span class="tag-badge">系统架构</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
