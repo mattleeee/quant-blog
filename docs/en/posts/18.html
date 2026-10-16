@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Making .bat Files Bulletproof Across Windows Machines - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Batch files are the glue of Windows automation and the most fragile part of it....">
+    <meta name="keywords" content="batch file,ASCII,CRLF,chcp,portability">
+    <meta property="og:title" content="Making .bat Files Bulletproof Across Windows Machines">
+    <meta property="og:description" content="Batch files are the glue of Windows automation and the most fragile part of it....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/18.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Making .bat Files Bulletproof Across Windows Machines</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-16</span>
+                <span class="category"><span class="tag-badge">Encoding</span></span>
+            </div>
+            <div class="post-content">
+<p>Batch files are the glue of Windows automation and the most fragile part of it. They look trivial: a text file with a few commands, saved as <code>.bat</code>, double-clicked. Then you copy that file to another machine and it explodes — sometimes literally, with a console full of <code>'xxx' is not recognized as an internal or external command</code>. The failures are rarely about the commands. They are about bytes: the encoding, the line endings, the codepage, and the invisible characters that a text editor added without asking.</p>
+<p>This post covers the hardening rules I now apply to every <code>.bat</code> I ship, why each rule exists, and how each one has broken a real deployment. At the end there is a byte-level verification script you can run before shipping.</p>
+<h2 id="the-failure-mode-is-always-the-same">The failure mode is always the same</h2>
+<p>A batch file is not parsed by a compiler. <code>cmd.exe</code> reads it line by line, byte by byte, and interprets what it finds. There is no schema, no lint, no type system. If a byte is unexpected, <code>cmd</code> either ignores it, misinterprets it, or feeds it to a command that does something you did not intend.</p>
+<p>That means every rule below is really the same rule: control the bytes.</p>
+<h2 id="rule-1-pure-ascii-content">Rule 1: Pure ASCII content</h2>
+<p>The single most common cause of "works on my machine" batch failures is non-ASCII text. A Chinese comment, a curly quote pasted from a document, an em dash — all of it becomes a liability the moment the file leaves the editor that created it.</p>
+<p>Here is the mechanism. <code>cmd.exe</code> reads the batch file using the console's current codepage, not a fixed encoding declared in the file. On a Chinese Windows install that is typically 936 (GBK). On a US install it is 437 or 1252. On a modern developer machine it might be 65001 (UTF-8) if someone ran <code>chcp 65001</code> earlier in the session. The same bytes are decoded differently depending on the machine.</p>
+<p>A UTF-8 Chinese comment like <code>:: 检查目录</code> becomes three bytes per character. Under codepage 936, those bytes decode into different characters, and — worse — some byte sequences contain <code>0x5C</code> (<code>\</code>) or <code>0x7C</code> (<code>|</code>), which <code>cmd</code> treats as syntax. I have seen a comment line turn into a pipe and split a command in half. The error message pointed at a line that looked completely innocent.</p>
+<p>The fix is boring: keep the <code>.bat</code> pure ASCII. Comments in English, no accented characters, no smart quotes, no emoji. If you genuinely need localized documentation, put it in a companion <code>.txt</code> file next to the script:</p>
+<pre class="codehilite"><code>deploy.bat
+deploy.notes.zh-CN.txt
+</code></pre>
+
+<p>The <code>.txt</code> is never executed, so its encoding does not matter to <code>cmd</code>. The <code>.bat</code> stays safe. This also has a nice side effect: the script becomes readable to anyone on the team regardless of their Windows language settings.</p>
+<p>If you must print localized text from the batch file itself, see Rule 3 — but keep the <em>file content</em> ASCII even then, and emit the localized strings via a separate mechanism.</p>
+<h3 id="checking-for-non-ascii-bytes">Checking for non-ASCII bytes</h3>
+<p>This is the check I run most often, because it catches the problem before it ever reaches a machine:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+def find_non_ascii(path: Path) -&gt; list[tuple[int, int, int]]:
+    &quot;&quot;&quot;Return (line_no, col_no, byte) for every non-ASCII byte.&quot;&quot;&quot;
+    hits = []
+    data = path.read_bytes()
+    line, col = 1, 0
+    for b in data:
+        if b == 0x0A:
+            line += 1
+            col = 0
+            continue
+        col += 1
+        if b &gt; 0x7F:
+            hits.append((line, col, b))
+    return hits
+
+for line, col, byte in find_non_ascii(Path(&quot;deploy.bat&quot;)):
+    print(f&quot;line {line}, col {col}: 0x{byte:02X}&quot;)
+</code></pre>
+
+<p>Even one hit is enough to reject the file. There is no upside to a non-ASCII byte in a <code>.bat</code>.</p>
+<h2 id="rule-2-crlf-line-endings-always">Rule 2: CRLF line endings, always</h2>
+<p>Unix line endings (<code>LF</code>, <code>0x0A</code>) are the second classic killer. <code>cmd.exe</code> expects <code>CRLF</code> (<code>0x0D 0x0A</code>). What happens with bare <code>LF</code> depends on the command, which is what makes it so nasty.</p>
+<p>Simple commands often work. But <code>goto</code> labels, <code>if</code> blocks with parentheses, and <code>for</code> loops can behave unpredictably, because <code>cmd</code> reads ahead and the missing carriage return shifts its notion of where a line ends. The symptom is usually a <code>goto</code> that jumps to nowhere, or a block that executes the wrong branch. I once spent an afternoon on a <code>for /f</code> loop that silently skipped its body on one machine and worked on another — the only difference was that the broken file had been checked out with <code>core.autocrlf=false</code>.</p>
+<p>The root cause is usually Git. If <code>.bat</code> files are committed with <code>LF</code> and checked out on Linux or macOS, they arrive on Windows with <code>LF</code>. The fix is a <code>.gitattributes</code> entry:</p>
+<pre class="codehilite"><code>*.bat text eol=crlf
+*.cmd text eol=crlf
+</code></pre>
+
+<p>That single line prevents an entire class of incidents. Add it before you have batch files in the repo, not after.</p>
+<h3 id="verifying-line-endings-in-python">Verifying line endings in Python</h3>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+def check_line_endings(path: Path) -&gt; list[int]:
+    &quot;&quot;&quot;Return line numbers that end with bare LF (no preceding CR).&quot;&quot;&quot;
+    bad = []
+    data = path.read_bytes()
+    line = 1
+    i = 0
+    while i &lt; len(data):
+        b = data[i]
+        if b == 0x0A:
+            if i == 0 or data[i - 1] != 0x0D:
+                bad.append(line)
+            line += 1
+        i += 1
+    return bad
+</code></pre>
+
+<p>Note that this flags <code>LF</code> at the very start of the file too, which is correct — a batch file should not begin with a bare newline.</p>
+<h2 id="rule-3-do-not-rely-on-the-console-codepage">Rule 3: Do not rely on the console codepage</h2>
+<p><code>chcp</code> changes the active console codepage, and it is tempting to write <code>chcp 65001</code> at the top of a script so that UTF-8 output works. This is a trap for two reasons.</p>
+<p>First, <code>chcp 65001</code> historically broke more than it fixed on older Windows versions, and behavior still varies by build. Second, and more importantly, the codepage at the time <code>cmd</code> <em>reads the file</em> is what matters for parsing — changing it inside the script only affects output after that point. If the file itself contains non-ASCII bytes, you have already lost before <code>chcp</code> runs.</p>
+<p>The working pattern is:</p>
+<ol>
+<li>Keep the <code>.bat</code> pure ASCII (Rule 1).</li>
+<li>If you must print localized text, call <code>chcp</code> as the very first command, and only when needed.</li>
+<li>Better: do not print localized text from the batch file at all. Let a Python helper do it.</li>
+</ol>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal
+rem Pure ASCII only. No chcp unless localized output is required.
+python &quot;%~dp0report.py&quot; %*
+if errorlevel 1 (
+    echo report.py failed with code %errorlevel%
+    exit /b %errorlevel%
+)
+endlocal
+</code></pre>
+
+<p>The Python helper handles its own encoding, which is far more controllable:</p>
+<pre class="codehilite"><code class="language-python">import sys
+
+def safe_print(text: str) -&gt; None:
+    &quot;&quot;&quot;Print to stdout, degrading gracefully if the console can't encode it.&quot;&quot;&quot;
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or &quot;ascii&quot;
+        print(text.encode(enc, errors=&quot;replace&quot;).decode(enc))
+</code></pre>
+
+<p>This keeps the batch file dumb and portable, and puts the encoding decisions where they can actually be tested.</p>
+<h2 id="rule-4-quote-every-path-and-derive-paths-from-userprofile">Rule 4: Quote every path, and derive paths from <code>%USERPROFILE%</code></h2>
+<p>Unquoted paths break on spaces. This is old news, but the subtler problem is <em>which</em> paths you use. Hardcoding <code>C:\Users\Alice</code> works until the script runs as a service account, on a machine where the profile is on <code>D:</code>, or under a different user. Derive everything from environment variables:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal
+set &quot;APPDIR=%USERPROFILE%\AppData\Local\MyTool&quot;
+set &quot;LOGDIR=%APPDIR%\logs&quot;
+if not exist &quot;%APPDIR%&quot; mkdir &quot;%APPDIR%&quot;
+if not exist &quot;%LOGDIR%&quot; mkdir &quot;%LOGDIR%&quot;
+</code></pre>
+
+<p>Every expansion is quoted. <code>%USERPROFILE%</code> can contain spaces (rare but legal), and <code>%APPDIR%</code> certainly can. An unquoted <code>mkdir %APPDIR%</code> with a space in the path creates two directories in the current folder and then fails on the second one.</p>
+<h2 id="rule-5-use-dp0-for-self-locating-paths">Rule 5: Use <code>%~dp0</code> for self-locating paths</h2>
+<p>Scripts that reference sibling files — a <code>.py</code> helper, a config, a log — should locate them relative to the script, not relative to the current working directory. <code>%~dp0</code> expands to the drive and path of the batch file itself, including the trailing backslash.</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal
+python &quot;%~dp0report.py&quot; --config &quot;%~dp0config.json&quot;
+</code></pre>
+
+<p>Without this, double-clicking the <code>.bat</code> from Explorer works (cwd is the script folder), but running it from a shortcut or a scheduler task with a different working directory fails. I have seen a scheduled task run at 3 AM with cwd <code>C:\Windows\System32</code> and fail to find its own config. <code>%~dp0</code> fixes it permanently.</p>
+<p>One caveat: <code>%~dp0</code> already ends with a backslash, so <code>"%~dp0\file"</code> produces a double backslash. It usually works, but write <code>"%~dp0file"</code> instead.</p>
+<h2 id="rule-6-no-trailing-spaces-after-set-varvalue">Rule 6: No trailing spaces after <code>set "VAR=value"</code></h2>
+<p>This is the one that costs people hours because the output looks correct. Consider:</p>
+<pre class="codehilite"><code class="language-bat">set &quot;MODE=prod&quot; 
+echo Mode is [%MODE%]
+</code></pre>
+
+<p>There is a single trailing space after <code>prod</code> on the first line. <code>cmd</code> includes it in the value. The variable is now <code>prod</code>, not <code>prod</code>. Every comparison against <code>prod</code> fails, every path built from it has a trailing space, and the <code>echo</code> shows <code>[prod ]</code> — which is easy to miss when you skim the console.</p>
+<p>The quoted form <code>set "VAR=value"</code> protects against trailing spaces <em>before</em> the assignment and against special characters in the value, but it does not protect against a space <em>inside</em> the quotes. There is no way to see it in a normal editor. This is exactly the kind of thing a byte-level check should catch.</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+import re
+
+SET_RE = re.compile(rb'^\s*set\s+&quot;([^=]+)=([^&quot;]*)&quot;\s*$', re.IGNORECASE)
+
+def find_trailing_space_in_set(path: Path) -&gt; list[tuple[int, bytes, bytes]]:
+    &quot;&quot;&quot;Flag `set &quot;VAR=value &quot;` where value ends with a space.&quot;&quot;&quot;
+    hits = []
+    for i, line in enumerate(path.read_bytes().splitlines(), start=1):
+        m = SET_RE.match(line)
+        if m and m.group(2).endswith(b&quot; &quot;):
+            hits.append((i, m.group(1), m.group(2)))
+    return hits
+</code></pre>
+
+<p>Any hit is a bug. Fix the source line; do not try to compensate downstream.</p>
+<h2 id="the-pre-ship-verification-script">The pre-ship verification script</h2>
+<p>All of the above collapses into one script. Run it in CI or as a pre-commit hook. It reads the file as bytes, which is the only honest way to inspect a batch file.</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+import re
+import sys
+
+SET_RE = re.compile(rb'^\s*set\s+&quot;([^=]+)=([^&quot;]*)&quot;\s*$', re.IGNORECASE)
+
+def audit_bat(path: Path) -&gt; list[str]:
+    problems = []
+    data = path.read_bytes()
+
+    # 1. Non-ASCII bytes
+    line, col = 1, 0
+    for b in data:
+        if b == 0x0A:
+            line += 1
+            col = 0
+            continue
+        col += 1
+        if b &gt; 0x7F:
+            problems.append(f&quot;line {line}: non-ASCII byte 0x{b:02X}&quot;)
+
+    # 2. Bare LF line endings
+    line = 1
+    for i, b in enumerate(data):
+        if b == 0x0A:
+            if i == 0 or data[i - 1] != 0x0D:
+                problems.append(f&quot;line {line}: bare LF (expected CRLF)&quot;)
+            line += 1
+
+    # 3. Trailing space inside set &quot;VAR=value &quot;
+    for i, raw in enumerate(data.splitlines(), start=1):
+        m = SET_RE.match(raw)
+        if m and m.group(2).endswith(b&quot; &quot;):
+            problems.append(f&quot;line {i}: trailing space in set \&quot;{m.group(1).decode()}=...\&quot;&quot;)
+
+    # 4. Unquoted %USERPROFILE% expansions (heuristic)
+    for i, raw in enumerate(data.splitlines(), start=1):
+        stripped = raw.strip()
+        if stripped.startswith(b&quot;rem&quot;) or stripped.startswith(b&quot;::&quot;):
+            continue
+        for var in (b&quot;%USERPROFILE%&quot;, b&quot;%APPDIR%&quot;):
+            if var in raw and b'&quot;' not in raw:
+                problems.append(
+                    f&quot;line {i}: {var.decode()} used without quotes&quot;
+                )
+
+    return problems
+
+if __name__ == &quot;__main__&quot;:
+    failed = False
+    for p in sys.argv[1:]:
+        path = Path(p)
+        issues = audit_bat(path)
+        if issues:
+            failed = True
+            print(f&quot;{path}:&quot;)
+            for issue in issues:
+                print(f&quot;  {issue}&quot;)
+    sys.exit(1 if failed else 0)
+</code></pre>
+
+<p>The heuristic in check 4 is deliberately crude — it flags lines that mention those variables without any quotes at all. It is not a parser, but it catches the mistakes that actually happen. Extend the variable list as your scripts grow.</p>
+<p>Run it like this:</p>
+<pre class="codehilite"><code>python audit_bat.py deploy.bat install.bat
+</code></pre>
+
+<p>Exit code 1 means do not ship. Wire it into CI and the class of failures described here mostly disappears.</p>
+<h2 id="what-this-buys-you">What this buys you</h2>
+<p>None of these rules are clever. They are the residue of real incidents: a comment that split a command, a <code>goto</code> that missed its label, a scheduled task that could not find its config, a variable with an invisible trailing space. Each one is cheap to prevent at the byte level and expensive to debug at runtime.</p>
+<p>The habit that matters is reading batch files as bytes, not as text. Once you do that, the fixes are obvious. More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-16 08:46:41</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ZEREBRO</td>
+<td>高质量标的做多</td>
+<td>$0.051</td>
+<td>$0.0541</td>
+<td>$0.0494</td>
+<td>1:2.0</td>
+</tr>
+<tr>
+<td>ARC</td>
+<td>短平快做多</td>
+<td>$0.0359</td>
+<td>$0.037</td>
+<td>$0.035</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">batch file</span><span class="tag-badge">ASCII</span><span class="tag-badge">CRLF</span><span class="tag-badge">chcp</span><span class="tag-badge">portability</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
