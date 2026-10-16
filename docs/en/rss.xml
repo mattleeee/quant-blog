@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Making .bat Files Bulletproof Across Windows Machines</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/18.html</link>
+            <description>Batch files are the glue of Windows automation and the most fragile part of it....</description>
+            <pubDate>2026-10-16</pubDate>
+            <category>Encoding</category>
+        </item>
+        <item>
             <title>PowerShell on Legacy Chinese Windows: UTF-8 with BOM or Bust</title>
             <link>https://www.hkcode.dpdns.org/en/posts/17.html</link>
             <description>Windows PowerShell 5.1 does not guess encodings. When it loads a .ps1 file, it looks for a byte-order mark. If it finds one, it decodes accordingly....</description>
