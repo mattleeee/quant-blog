@@ -7,6 +7,19 @@
         <language>zh-CN</language>
         
         <item>
+            <title>推送优先级设计：为什么MA信号推送要提前执行</title>
+            <link>https://www.hkcode.dpdns.org/posts/46.html</link>
+            <description>推送优先级设计：为什么MA信号推送要提前执行
+
+问题背景
+
+我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。最初的实现很&quot;自然&quot;——按业务逻辑顺序串行执行，最后统一推送所有通知。
+
+这个设计在大多数时候没问题。...</description>
+            <pubDate>2026-10-16</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>多策略组合系统的架构演进：从单策略到全天候</title>
             <link>https://www.hkcode.dpdns.org/posts/45.html</link>
             <description>多策略组合系统的架构演进：从单策略到全天候
@@ -155,13 +168,6 @@
             <link>https://www.hkcode.dpdns.org/posts/27.html</link>
             <description>止盈止损参数不是拍脑袋定的。RR（Risk-Reward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。 一、RR 与胜率的数学关系 1.1 期望收益公式 任何一笔交易的期望收益可以写成： E...</description>
             <pubDate>2026-09-26</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>技术指标实战：均线系统的参数选择与信号逻辑</title>
-            <link>https://www.hkcode.dpdns.org/posts/26.html</link>
-            <description>均线系统是最古老的技术指标之一,也是被误解最深的一类。很多人停留在&quot;金叉买入、死叉卖出&quot;的层面,但真正决定策略盈亏的,是周期选择、信号过滤和参数稳定性这三件事。这篇文章从工程实现的角度,把均线系统拆开讲清楚。 一、均线的数学本质与类型选择 均线的核心是对价格序列做低通滤波。不同的均线类型,本质是滤波器设计不同。 1.1...</description>
-            <pubDate>2026-09-25</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
