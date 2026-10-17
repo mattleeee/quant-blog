@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON配置文件管理：原子读写与异常恢复 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="JSON配置文件管理：原子读写与异常恢复
+
+量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。...">
+    <meta name="keywords" content="JSON,配置文件,原子操作,异常恢复">
+    <meta property="og:title" content="JSON配置文件管理：原子读写与异常恢复">
+    <meta property="og:description" content="JSON配置文件管理：原子读写与异常恢复
+
+量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/47.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>JSON配置文件管理：原子读写与异常恢复</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-17</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。这篇文章分享一套我在实盘项目里用了两年多的配置管理方案，核心解决四件事：原子写入、异常恢复、版本管理、热加载。</p>
+<h2 id="jsondump">为什么直接 <code>json.dump</code> 会出问题</h2>
+<p>先看一段几乎所有人一开始都会写的代码：</p>
+<pre class="codehilite"><code class="language-python">import json
+
+def save_config(path, config):
+    with open(path, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+</code></pre>
+
+<p>这段代码在 99% 的情况下没问题，问题出在剩下的 1%：</p>
+<ol>
+<li><strong>写入过程中进程被杀</strong>。<code>open(path, "w")</code> 会立刻把原文件截断为 0 字节，如果此时进程崩溃、机器断电、或者被 <code>kill -9</code>，你手里就只剩一个空文件或者半截 JSON。</li>
+<li><strong>并发写入</strong>。多个进程同时写同一个文件，内容会互相覆盖，最终落盘的可能是两个 JSON 交错的结果，解析必然失败。</li>
+<li><strong>磁盘满</strong>。写到一半 <code>ENOSPC</code>，文件同样是残缺的。</li>
+</ol>
+<p>配置文件丢失的代价，在量化系统里往往不是"重写一遍"这么简单——如果你的持仓状态、参数快照存在里面，丢一次可能就要人工对账。</p>
+<h2 id="tempfile-osreplace">原子写入：tempfile + os.replace</h2>
+<p>解决思路是"先写临时文件，写完再原子替换"。<code>os.replace</code> 在 POSIX 系统上对应 <code>rename(2)</code>，是原子操作；在 Windows 上底层用 <code>MoveFileEx</code>，同样保证目标文件要么是旧的、要么是新的，不会出现中间态。</p>
+<pre class="codehilite"><code class="language-python">import json
+import os
+import tempfile
+from pathlib import Path
+
+
+def atomic_write_json(path, data, *, indent=2, fsync=True):
+    &quot;&quot;&quot;原子写入 JSON 文件。
+
+    1. 在目标目录创建临时文件（同目录保证同一文件系统，rename 才是原子的）
+    2. 写入并 flush + fsync，确保数据真正落盘
+    3. os.replace 原子替换目标文件
+    &quot;&quot;&quot;
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 临时文件必须和目标文件在同一目录，否则跨文件系统的 rename 会退化为 copy
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f&quot;.{path.name}.&quot;,
+        suffix=&quot;.tmp&quot;,
+    )
+    try:
+        with os.fdopen(fd, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+            json.dump(data, f, ensure_ascii=False, indent=indent)
+            f.flush()
+            if fsync:
+                os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        if fsync:
+            # 目录项本身也需要 fsync，否则极端断电场景下 rename 可能丢失
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        # 失败时清理临时文件，避免目录里堆积垃圾
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+</code></pre>
+
+<p>几个容易踩的坑：</p>
+<ul>
+<li><strong>临时文件必须放在目标目录</strong>。<code>tempfile.mkstemp()</code> 默认用 <code>/tmp</code>，如果 <code>/tmp</code> 和配置目录不在同一个文件系统，<code>os.replace</code> 会抛 <code>OSError: [Errno 18] Invalid cross-device link</code>。</li>
+<li><strong><code>fsync</code> 不能省</strong>。<code>flush()</code> 只把数据从 Python 缓冲区推到内核页缓存，断电后仍会丢。<code>fsync</code> 才真正落盘。代价是慢，一次几毫秒，配置文件写入频率低，完全值得。</li>
+<li><strong>目录也要 fsync</strong>。<code>rename</code> 修改的是目录项，某些文件系统（ext4 的 <code>data=writeback</code> 模式）下不 fsync 目录，断电后可能看到旧文件。</li>
+</ul>
+<h2 id="_1">读取异常恢复：默认配置兜底</h2>
+<p>写完要防丢，读的时候要防坏。JSON 文件可能因为磁盘错误、外部程序误改、编码问题而损坏。读取时应该做到"坏文件不阻塞启动，但也不能静默吞掉"。</p>
+<pre class="codehilite"><code class="language-python">import logging
+import shutil
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+def load_json_safe(path, default=None, *, backup_broken=True):
+    &quot;&quot;&quot;安全读取 JSON，异常时返回 default。
+
+    - 文件不存在：返回 default
+    - JSON 解析失败：备份损坏文件，返回 default
+    - 编码错误：同上
+    &quot;&quot;&quot;
+    path = Path(path)
+    if not path.exists():
+        logger.info(&quot;配置文件 %s 不存在，使用默认配置&quot;, path)
+        return default
+
+    try:
+        with path.open(&quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.error(&quot;配置文件 %s 解析失败: %s&quot;, path, e)
+        if backup_broken:
+            ts = datetime.now().strftime(&quot;%Y%m%d_%H%M%S&quot;)
+            broken = path.with_suffix(f&quot;{path.suffix}.broken.{ts}&quot;)
+            try:
+                shutil.move(str(path), str(broken))
+                logger.warning(&quot;损坏文件已备份至 %s&quot;, broken)
+            except OSError as move_err:
+                logger.error(&quot;备份损坏文件失败: %s&quot;, move_err)
+        return default
+    except OSError as e:
+        logger.error(&quot;读取配置文件 %s 失败: %s&quot;, path, e)
+        return default
+</code></pre>
+
+<p>这里有两个设计决策值得说明：</p>
+<p><strong>为什么备份而不是直接删？</strong> 损坏的配置里可能还残留着部分有效信息，比如手工改坏了一个括号，但里面的参数是你调了很久的。备份出来人工看一眼，比直接覆盖强。</p>
+<p><strong>为什么返回 default 而不是抛异常？</strong> 量化系统通常 7×24 运行，一个配置文件坏掉不应该让整个进程起不来。用默认配置启动、打一条 ERROR 日志、让监控告警，比直接 crash 更符合运维预期。当然，如果你的场景是"配置缺失必须人工介入"，那就在调用方判断 <code>default is None</code> 时主动抛异常。</p>
+<h2 id="_2">版本管理：让配置可追溯</h2>
+<p>配置文件被改坏了，最常见的问题是"不知道改之前长什么样"。加一个轻量的版本字段和自动备份，能让回滚变成一行命令的事。</p>
+<pre class="codehilite"><code class="language-python">CONFIG_VERSION = 3
+
+
+class ConfigManager:
+    def __init__(self, path, defaults=None, *, max_backups=10):
+        self.path = Path(path)
+        self.defaults = defaults or {}
+        self.max_backups = max_backups
+        self._cache = None
+
+    def _migrate(self, cfg):
+        &quot;&quot;&quot;把旧版本配置升级到当前版本。&quot;&quot;&quot;
+        version = cfg.get(&quot;_version&quot;, 0)
+        if version == CONFIG_VERSION:
+            return cfg
+
+        if version &lt; 1:
+            cfg.setdefault(&quot;risk&quot;, {})
+        if version &lt; 2:
+            cfg[&quot;risk&quot;].setdefault(&quot;max_position&quot;, 0.2)
+        if version &lt; 3:
+            cfg.setdefault(&quot;log_level&quot;, &quot;INFO&quot;)
+
+        cfg[&quot;_version&quot;] = CONFIG_VERSION
+        logger.info(&quot;配置从 v%s 迁移到 v%s&quot;, version, CONFIG_VERSION)
+        return cfg
+
+    def load(self):
+        raw = load_json_safe(self.path, default=None)
+        if raw is None:
+            raw = dict(self.defaults)
+            raw[&quot;_version&quot;] = CONFIG_VERSION
+        cfg = self._migrate(raw)
+        self._cache = cfg
+        return cfg
+
+    def save(self, cfg):
+        self._backup()
+        atomic_write_json(self.path, cfg)
+        self._cache = cfg
+
+    def _backup(self):
+        if not self.path.exists():
+            return
+        ts = datetime.now().strftime(&quot;%Y%m%d_%H%M%S&quot;)
+        backup = self.path.with_suffix(f&quot;{self.path.suffix}.{ts}.bak&quot;)
+        try:
+            shutil.copy2(self.path, backup)
+        except OSError as e:
+            logger.warning(&quot;备份失败: %s&quot;, e)
+            return
+        self._prune_backups()
+
+    def _prune_backups(self):
+        pattern = f&quot;{self.path.name}.*.bak&quot;
+        backups = sorted(self.path.parent.glob(pattern))
+        for old in backups[:-self.max_backups]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+</code></pre>
+
+<p>版本管理的核心是 <code>_version</code> 字段加迁移函数。每次结构变更，递增 <code>CONFIG_VERSION</code>，在 <code>_migrate</code> 里补一段升级逻辑。这样老配置文件也能平滑升级，不需要人工改。</p>
+<p>备份策略用"每次保存前 copy 一份 + 保留最近 N 份"，简单够用。别用 git 管理配置——配置文件里可能有敏感信息（API key、账户），塞进 git 容易出事故。</p>
+<h2 id="_3">热加载：不重启更新配置</h2>
+<p>策略跑着跑着要调参数，重启进程代价太大。热加载的方案是：后台线程定期检查文件 <code>mtime</code>，发现变化就重新加载。</p>
+<pre class="codehilite"><code class="language-python">import threading
+import time
+
+
+class ConfigWatcher:
+    def __init__(self, manager, interval=2.0, on_reload=None):
+        self.manager = manager
+        self.interval = interval
+        self.on_reload = on_reload
+        self._stop = threading.Event()
+        self._thread = None
+        self._last_mtime = 0.0
+
+    def start(self):
+        self._last_mtime = self._get_mtime()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=self.interval + 1)
+
+    def _get_mtime(self):
+        try:
+            return self.manager.path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _run(self):
+        while not self._stop.wait(self.interval):
+            mtime = self._get_mtime()
+            if mtime == self._last_mtime:
+                continue
+            self._last_mtime = mtime
+            try:
+                cfg = self.manager.load()
+                logger.info(&quot;配置已热加载&quot;)
+                if self.on_reload:
+                    self.on_reload(cfg)
+            except Exception as e:
+                logger.exception(&quot;热加载失败，保留旧配置: %s&quot;, e)
+</code></pre>
+
+<p>几个注意点：</p>
+<ul>
+<li><strong>用 <code>mtime</code> 判断变化，别用文件内容 hash</strong>。hash 每次都要读全文件，配置小无所谓，但如果配置里挂了大数据就不划算。<code>mtime</code> 的精度在大多数文件系统上足够。</li>
+<li><strong>热加载失败要保留旧配置</strong>。<code>load()</code> 内部已经做了异常兜底，但 <code>on_reload</code> 回调里如果抛异常，不能污染当前状态。上面用 try/except 包住了。</li>
+<li><strong>回调里不要做重活</strong>。热加载线程是守护线程，回调里如果做数据库迁移、重连之类的操作，会阻塞后续检测。重活丢到队列里异步处理。</li>
+<li><strong>多进程场景要注意</strong>。上面的方案只适用于单进程。多进程要么用文件锁 + 版本号，要么直接上 <code>etcd</code>/<code>consul</code> 这类配置中心。单机量化系统用文件 + watcher 就够了。</li>
+</ul>
+<h2 id="_4">串起来用</h2>
+<pre class="codehilite"><code class="language-python">if __name__ == &quot;__main__&quot;:
+    logging.basicConfig(level=logging.INFO)
+
+    mgr = ConfigManager(
+        &quot;config/strategy.json&quot;,
+        defaults={&quot;risk&quot;: {&quot;max_position&quot;: 0.2}, &quot;log_level&quot;: &quot;INFO&quot;},
+    )
+    cfg = mgr.load()
+    print(&quot;当前配置:&quot;, cfg)
+
+    watcher = ConfigWatcher(mgr, interval=1.0,
+                            on_reload=lambda c: print(&quot;重载:&quot;, c))
+    watcher.start()
+
+    try:
+        time.sleep(30)
+    finally:
+        watcher.stop()
+</code></pre>
+
+<p>跑起来之后，手动改一下 <code>config/strategy.json</code>，一秒内就能看到重载日志。</p>
+<h2 id="_5">小结</h2>
+<p>这套方案的核心就四点：</p>
+<ol>
+<li><strong>原子写入</strong>：<code>tempfile.mkstemp</code> 同目录建临时文件 → 写入 → <code>fsync</code> → <code>os.replace</code> → <code>fsync</code> 目录。</li>
+<li><strong>异常恢复</strong>：读取失败返回默认值，损坏文件自动备份，不阻塞启动。</li>
+<li><strong>版本管理</strong>：<code>_version</code> 字段 + 迁移函数 + 保存前备份 + 保留最近 N 份。</li>
+<li><strong>热加载</strong>：后台线程轮询 <code>mtime</code>，回调里做重活，失败保留旧配置。</li>
+</ol>
+<p>代码量不大，但能省掉很多半夜起来修配置的麻烦。配置文件这种基础设施，值得多花半小时把它做扎实。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">JSON</span><span class="tag-badge">配置文件</span><span class="tag-badge">原子操作</span><span class="tag-badge">异常恢复</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
