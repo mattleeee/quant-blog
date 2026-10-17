@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>JSON配置文件管理：原子读写与异常恢复</title>
+            <link>https://www.hkcode.dpdns.org/posts/47.html</link>
+            <description>JSON配置文件管理：原子读写与异常恢复
+
+量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。...</description>
+            <pubDate>2026-10-17</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>推送优先级设计：为什么MA信号推送要提前执行</title>
             <link>https://www.hkcode.dpdns.org/posts/46.html</link>
             <description>推送优先级设计：为什么MA信号推送要提前执行
@@ -161,13 +170,6 @@
             <link>https://www.hkcode.dpdns.org/posts/28.html</link>
             <description>为什么需要分批止盈 一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。 本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。这个规则简单、可量化、容易回测。 设计思路 核心状态机 每笔持仓需要维护几个状态： 状...</description>
             <pubDate>2026-09-27</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>止盈止损参数选择：RR盈亏比3:1背后的逻辑</title>
-            <link>https://www.hkcode.dpdns.org/posts/27.html</link>
-            <description>止盈止损参数不是拍脑袋定的。RR（Risk-Reward Ratio）3:1 是一个被广泛引用的基准，但很多人只知道&quot;要设 3:1&quot;，不知道它从哪来、什么时候该改、改了之后期望收益怎么变。这篇文章从数学期望出发，用代码算清楚这笔账。 一、RR 与胜率的数学关系 1.1 期望收益公式 任何一笔交易的期望收益可以写成： E...</description>
-            <pubDate>2026-09-26</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
