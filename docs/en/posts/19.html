@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Publishing to Juejin Through Its Web API: The mark_content Lesson - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Automating content publishing is a common task for developer-advocates and technical writers....">
+    <meta name="keywords" content="Juejin,undocumented API,mark_content,publishing,reverse engineering">
+    <meta property="og:title" content="Publishing to Juejin Through Its Web API: The mark_content Lesson">
+    <meta property="og:description" content="Automating content publishing is a common task for developer-advocates and technical writers....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/19.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Publishing to Juejin Through Its Web API: The mark_content Lesson</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-17</span>
+                <span class="category"><span class="tag-badge">API Integration</span></span>
+            </div>
+            <div class="post-content">
+<p>Automating content publishing is a common task for developer-advocates and technical writers. Juejin (掘金) is a popular Chinese developer community, and like many modern web apps, it relies on an internal HTTP API for its editor. That API is undocumented and changes without notice. This post is a post-mortem of a silent regression: drafts saved with empty bodies and a publish call returning <code>err_no=1010</code>. The fix turned out to be a single field name, but finding it required a disciplined reverse-engineering loop that is worth writing down.</p>
+<h2 id="the-symptom">The Symptom</h2>
+<p>The publisher had been running for months. It did three things:</p>
+<ol>
+<li><code>POST /api/v1/draft/save</code> with the article body.</li>
+<li><code>POST /api/v1/draft/publish</code> to push the draft live.</li>
+<li>Log the returned <code>article_id</code> and URL.</li>
+</ol>
+<p>Then, without any code change on our side, every run produced a draft with an empty body. The publish step returned:</p>
+<pre class="codehilite"><code class="language-json">{&quot;err_no&quot;: 1010, &quot;err_msg&quot;: &quot;草稿内容为空&quot;}
+</code></pre>
+
+<p>Translated: "draft content is empty." The draft existed, the title was correct, but the body was blank. The API had added a requirement: the Markdown source must be sent in a field called <code>mark_content</code>, separate from the rendered HTML field the client had been sending.</p>
+<h2 id="reverse-engineering-the-regression">Reverse-Engineering the Regression</h2>
+<p>The first move with any undocumented API is to stop guessing and capture what the real client does. Open Juejin in a browser, open DevTools, go to the Network tab, and filter for <code>Fetch/XHR</code>. Then perform the action manually — write a draft with some text and hit save.</p>
+<p>You will see a request to something like:</p>
+<pre class="codehilite"><code>POST https://api.juejin.cn/content_api/v1/article_draft/save
+</code></pre>
+
+<p>Right-click the request, choose <strong>Copy as cURL (bash)</strong>, and paste it into a text editor. This gives you the full request: method, URL, headers, cookies, and the JSON body. Do the same for the publish action. Two captures are enough to reconstruct the whole flow.</p>
+<p>The cURL for the save call looks roughly like this (truncated):</p>
+<pre class="codehilite"><code class="language-bash">curl 'https://api.juejin.cn/content_api/v1/article_draft/save' \
+  -H 'content-type: application/json' \
+  -H 'cookie: sessionid=...; uuid=...' \
+  -H 'user-agent: Mozilla/5.0 ...' \
+  --data-raw '{&quot;title&quot;:&quot;test&quot;,&quot;mark_content&quot;:&quot;# hello&quot;,&quot;brief_content&quot;:&quot;&quot;,&quot;category_id&quot;:&quot;1&quot;,&quot;tag_ids&quot;:[]}'
+</code></pre>
+
+<p>The key observation: the body contains <strong>both</strong> <code>mark_content</code> and, in the full capture, a <code>html_content</code> or similar rendered field. The old client only sent the rendered field. The new API validates <code>mark_content</code> and rejects the request if it is missing or empty.</p>
+<h3 id="reading-the-error-code">Reading the Error Code</h3>
+<p><code>err_no=1010</code> is not documented. But the mapping is easy to infer once you reproduce it deliberately:</p>
+<ul>
+<li>Save a draft with <code>mark_content</code> present and non-empty → publish succeeds.</li>
+<li>Save a draft with <code>mark_content</code> omitted → publish returns <code>1010</code>.</li>
+<li>Save a draft with <code>mark_content: ""</code> → publish returns <code>1010</code>.</li>
+</ul>
+<p>That three-point experiment tells you the field is required and that empty string is treated as absent. It also tells you the failure is server-side validation, not an auth problem — a 401 or <code>err_no</code> in the 1000s with a different message would point elsewhere.</p>
+<h2 id="replaying-the-calls-from-python">Replaying the Calls from Python</h2>
+<p>With the cURL captures in hand, the translation to <code>requests</code> is mechanical. The only care needed is header fidelity: <code>content-type</code>, <code>user-agent</code>, and the cookie header.</p>
+<pre class="codehilite"><code class="language-python">import json
+import requests
+
+BASE = &quot;https://api.juejin.cn&quot;
+SAVE_URL = f&quot;{BASE}/content_api/v1/article_draft/save&quot;
+PUBLISH_URL = f&quot;{BASE}/content_api/v1/article_draft/publish&quot;
+
+HEADERS = {
+    &quot;content-type&quot;: &quot;application/json&quot;,
+    &quot;user-agent&quot;: (
+        &quot;Mozilla/5.0 (Windows NT 10.0; Win64; x64) &quot;
+        &quot;AppleWebKit/537.36 (KHTML, like Gecko) &quot;
+        &quot;Chrome/122.0.0.0 Safari/537.36&quot;
+    ),
+    &quot;origin&quot;: &quot;https://juejin.cn&quot;,
+    &quot;referer&quot;: &quot;https://juejin.cn/&quot;,
+}
+
+
+def save_draft(session: requests.Session, title: str, markdown: str,
+               category_id: str, tag_ids: list[str]) -&gt; str:
+    payload = {
+        &quot;title&quot;: title,
+        &quot;mark_content&quot;: markdown,      # the field that broke everything
+        &quot;brief_content&quot;: markdown[:100],
+        &quot;category_id&quot;: category_id,
+        &quot;tag_ids&quot;: tag_ids,
+    }
+    resp = session.post(SAVE_URL, headers=HEADERS,
+                        data=json.dumps(payload), timeout=30)
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get(&quot;err_no&quot;) != 0:
+        raise RuntimeError(f&quot;save failed: {body}&quot;)
+    return body[&quot;data&quot;][&quot;id&quot;]
+
+
+def publish_draft(session: requests.Session, draft_id: str) -&gt; str:
+    payload = {&quot;draft_id&quot;: draft_id, &quot;column_ids&quot;: []}
+    resp = session.post(PUBLISH_URL, headers=HEADERS,
+                        data=json.dumps(payload), timeout=30)
+    resp.raise_for_status()
+    body = resp.json()
+    if body.get(&quot;err_no&quot;) != 0:
+        raise RuntimeError(f&quot;publish failed: {body}&quot;)
+    return body[&quot;data&quot;][&quot;article_id&quot;]
+</code></pre>
+
+<p>Two details matter here. First, <code>data=json.dumps(payload)</code> is used instead of <code>json=payload</code>. Both work in most cases, but the explicit form makes the serialization visible and avoids surprises if you later need to control separators or encoding. Second, the session object is reused so cookies persist across the save and publish calls — publishing a draft that was just saved in a different session will fail.</p>
+<h2 id="the-cookie-problem-in-windows-batch-launchers">The Cookie Problem in Windows Batch Launchers</h2>
+<p>The publisher was launched from a <code>.bat</code> file, which is where the next bug lived. The cookie header contains <code>sessionid=...; uuid=...</code>. In a batch file, <code>%</code> is the escape character for environment variables. If any cookie value contains a <code>%</code>, CMD will try to expand it and mangle the string. Worse, the mangling is silent — you get a 401 or a mysterious <code>err_no</code> with no hint about why.</p>
+<p>The fix is to stop passing cookies as a command-line string entirely. Store them in a file and read them at runtime.</p>
+<p><code>cookies.json</code>:</p>
+<pre class="codehilite"><code class="language-json">{
+  &quot;sessionid&quot;: &quot;your-session-id-here&quot;,
+  &quot;uuid&quot;: &quot;your-uuid-here&quot;
+}
+</code></pre>
+
+<p>Loader:</p>
+<pre class="codehilite"><code class="language-python">import json
+from pathlib import Path
+
+def load_session(cookie_file: str = &quot;cookies.json&quot;) -&gt; requests.Session:
+    data = json.loads(Path(cookie_file).read_text(encoding=&quot;utf-8&quot;))
+    session = requests.Session()
+    for name, value in data.items():
+        session.cookies.set(name, value, domain=&quot;.juejin.cn&quot;)
+    return session
+</code></pre>
+
+<p>Now the <code>.bat</code> launcher is trivial and cannot mangle anything:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+python publish.py --draft drafts\my-post.md
+</code></pre>
+
+<p>If you must keep cookies in the batch file for some reason, double every <code>%</code> as <code>%%</code>. But the file approach is strictly better: it is readable, diffable, and easy to rotate when the session expires. Never commit <code>cookies.json</code> — add it to <code>.gitignore</code>. The <code>sessionid</code> is a full account credential.</p>
+<h2 id="batch-backfill-republishing-20-historical-posts">Batch Backfill: Republishing 20 Historical Posts</h2>
+<p>Once the single-post path worked, the obvious next step was to repair the archive. Twenty posts had been published with empty bodies over the broken window. Rather than fix them by hand, a backfill script iterated over local Markdown files, matched each to its existing draft or article ID, and re-saved with <code>mark_content</code> populated.</p>
+<p>The matching step is the interesting part. If you did not store the article ID at publish time, you cannot reliably match by title alone. The pragmatic approach is to store a small manifest alongside the drafts:</p>
+<pre class="codehilite"><code class="language-json">{
+  &quot;my-post.md&quot;: {&quot;draft_id&quot;: &quot;7123...&quot;, &quot;article_id&quot;: &quot;7124...&quot;}
+}
+</code></pre>
+
+<p>The backfill script then reads the manifest, loads each Markdown file, and re-saves:</p>
+<pre class="codehilite"><code class="language-python">import json
+from pathlib import Path
+
+def backfill(session, drafts_dir: str, manifest_path: str,
+             category_id: str, tag_ids: list[str]) -&gt; None:
+    manifest = json.loads(Path(manifest_path).read_text(encoding=&quot;utf-8&quot;))
+    ok, failed = 0, []
+
+    for filename, entry in manifest.items():
+        path = Path(drafts_dir) / filename
+        if not path.exists():
+            failed.append((filename, &quot;missing file&quot;))
+            continue
+
+        markdown = path.read_text(encoding=&quot;utf-8&quot;)
+        title = markdown.splitlines()[0].lstrip(&quot;# &quot;).strip()
+
+        try:
+            new_id = save_draft(session, title, markdown,
+                                category_id, tag_ids)
+            entry[&quot;draft_id&quot;] = new_id
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            failed.append((filename, str(exc)))
+
+    Path(manifest_path).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding=&quot;utf-8&quot;,
+    )
+    print(f&quot;backfilled {ok}, failed {len(failed)}&quot;)
+    for name, reason in failed:
+        print(f&quot;  {name}: {reason}&quot;)
+</code></pre>
+
+<p>Two operational notes from running this against 20 posts:</p>
+<ul>
+<li><strong>Rate-limit yourself.</strong> Insert a <code>time.sleep(2)</code> between iterations. Twenty rapid-fire saves can trip a soft throttle, and the failure mode is an ambiguous error rather than a clean 429.</li>
+<li><strong>Write the manifest after every success, not at the end.</strong> If the script dies at post 14, you do not want to re-save the first 13. The version above writes once at the end for brevity; in production, flush after each item.</li>
+</ul>
+<p>The run republished all 20 posts in a single pass. The only failures were two files whose titles had been edited in the CMS after the original publish, so the manifest IDs pointed at stale drafts. Those were resolved by re-creating the drafts and updating the manifest.</p>
+<h2 id="lessons-for-any-undocumented-api">Lessons for Any Undocumented API</h2>
+<p>The regression was a one-field change, but the process that found it generalizes:</p>
+<ol>
+<li><strong>Capture before you theorize.</strong> Copy-as-cURL from DevTools is the ground truth. The browser is the only client the server is guaranteed to support.</li>
+<li><strong>Diff the capture against your payload.</strong> The missing field was visible the moment the two were placed side by side.</li>
+<li><strong>Reproduce the error deliberately.</strong> Vary one field at a time until you can trigger and clear the failure on demand. That is what turns <code>err_no=1010</code> from a mystery into a known precondition.</li>
+<li><strong>Keep credentials out of shell strings.</strong> Files beat command lines, especially on Windows.</li>
+<li><strong>Make batch operations idempotent and resumable.</strong> Persist progress as you go.</li>
+</ol>
+<p>The publisher has run clean since. The <code>mark_content</code> field is now set in one place, and the backfill script lives in the repo as a reusable repair tool for the next time the API quietly grows a new requirement.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Juejin</span><span class="tag-badge">undocumented API</span><span class="tag-badge">mark_content</span><span class="tag-badge">publishing</span><span class="tag-badge">reverse engineering</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
