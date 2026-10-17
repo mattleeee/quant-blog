@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Publishing to Juejin Through Its Web API: The mark_content Lesson</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/19.html</link>
+            <description>Automating content publishing is a common task for developer-advocates and technical writers....</description>
+            <pubDate>2026-10-17</pubDate>
+            <category>API Integration</category>
+        </item>
+        <item>
             <title>Making .bat Files Bulletproof Across Windows Machines</title>
             <link>https://www.hkcode.dpdns.org/en/posts/18.html</link>
             <description>Batch files are the glue of Windows automation and the most fragile part of it....</description>
