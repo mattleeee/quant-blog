@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Publishing a Static Site to GitHub Pages Without git</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/20.html</link>
+            <description>Why Skip git at All? Sometimes git isn&#x27;t an option. Corporate proxies strip the smart HTTP protocol....</description>
+            <pubDate>2026-10-18</pubDate>
+            <category>API Integration</category>
+        </item>
+        <item>
             <title>Publishing to Juejin Through Its Web API: The mark_content Lesson</title>
             <link>https://www.hkcode.dpdns.org/en/posts/19.html</link>
             <description>Automating content publishing is a common task for developer-advocates and technical writers....</description>
