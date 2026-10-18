@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Publishing a Static Site to GitHub Pages Without git - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why Skip git at All? Sometimes git isn&#x27;t an option. Corporate proxies strip the smart HTTP protocol....">
+    <meta name="keywords" content="GitHub Contents API,SHA,base64,idempotent push,GitHub Pages">
+    <meta property="og:title" content="Publishing a Static Site to GitHub Pages Without git">
+    <meta property="og:description" content="Why Skip git at All? Sometimes git isn&#x27;t an option. Corporate proxies strip the smart HTTP protocol....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/20.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Publishing a Static Site to GitHub Pages Without git</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-18</span>
+                <span class="category"><span class="tag-badge">API Integration</span></span>
+            </div>
+            <div class="post-content">
+<p>Sometimes <code>git</code> isn't an option. Corporate proxies strip the smart HTTP protocol. A build agent has no credential helper and no working clone. You're inside a sandbox that only exposes HTTPS to <code>api.github.com</code>. The repository still needs to receive files, and GitHub Pages still needs to rebuild.</p>
+<p>The Contents API gives you a REST path to the same effect: read a file, write a file, get a commit. It's slower than <code>git push</code> and it produces one commit per file, but it works from anywhere you can make an HTTPS request. This post covers the mechanics that make it behave well: SHA comparison to avoid no-op commits, a deterministic directory walk, rate-limit handling, and a verification read after every write.</p>
+<h2 id="the-blob-sha-is-not-a-hash-of-the-file">The Blob SHA Is Not a Hash of the File</h2>
+<p>The first trap is assuming the <code>sha</code> field returned by the Contents API is <code>sha1(file_bytes)</code>. It isn't. It's the git object ID of the blob, which is the SHA-1 of a header plus the content:</p>
+<pre class="codehilite"><code>sha1(b&quot;blob &quot; + str(len(content)).encode() + b&quot;\x00&quot; + content)
+</code></pre>
+
+<p>That header is why you can compute the remote file's SHA locally without any network call. If your computed value matches the <code>sha</code> from <code>GET /contents/{path}</code>, the file on GitHub is byte-identical to your local copy and the <code>PUT</code> can be skipped entirely.</p>
+<pre class="codehilite"><code class="language-python">import hashlib
+
+def git_blob_sha(content: bytes) -&gt; str:
+    header = b&quot;blob &quot; + str(len(content)).encode(&quot;ascii&quot;) + b&quot;\x00&quot;
+    return hashlib.sha1(header + content).hexdigest()
+</code></pre>
+
+<p>This one function is the core of an idempotent deploy. Everything else is plumbing around it.</p>
+<h3 id="why-the-skip-matters">Why the skip matters</h3>
+<p>Without the comparison, every deploy rewrites every file. GitHub treats each <code>PUT</code> as a new commit, even when the content is unchanged, so you get:</p>
+<ul>
+<li>A commit log full of "Update index.html" entries with zero diff.</li>
+<li>A Pages build triggered per commit, so a 200-file site fires 200 builds.</li>
+<li>Rate-limit budget consumed on writes that changed nothing.</li>
+</ul>
+<p>With the comparison, a redeploy of an unchanged site makes zero <code>PUT</code> calls. Only files that actually changed produce commits.</p>
+<h2 id="reading-the-current-state">Reading the Current State</h2>
+<p><code>GET /repos/{owner}/{repo}/contents/{path}</code> returns either a single object (for a file) or a list (for a directory). For a file you want three fields: <code>sha</code>, <code>content</code>, and <code>encoding</code>. The <code>content</code> field is base64 with newlines embedded, so strip whitespace before decoding if you need to compare bytes rather than SHAs.</p>
+<pre class="codehilite"><code class="language-python">import base64
+import requests
+
+API = &quot;https://api.github.com&quot;
+
+def get_file(session, owner, repo, path, ref=&quot;main&quot;):
+    url = f&quot;{API}/repos/{owner}/{repo}/contents/{path}&quot;
+    r = session.get(url, params={&quot;ref&quot;: ref})
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list):
+        raise ValueError(f&quot;{path} is a directory, not a file&quot;)
+    content = base64.b64decode(data[&quot;content&quot;].replace(&quot;\n&quot;, &quot;&quot;))
+    return {&quot;sha&quot;: data[&quot;sha&quot;], &quot;content&quot;: content}
+</code></pre>
+
+<p>A <code>404</code> means the file doesn't exist at that ref yet, which is the normal case on first deploy. Treat it as <code>None</code>, not as an error.</p>
+<h2 id="walking-the-tree-deterministically">Walking the Tree Deterministically</h2>
+<p>Directory iteration order differs across filesystems, and it differs again between runs on the same machine. That matters because your deploy log, your commit order, and any partial-failure recovery all depend on a stable sequence. Sort explicitly.</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+def iter_files(root: Path, ignore=(&quot;.git&quot;, &quot;.github&quot;, &quot;__pycache__&quot;)):
+    for p in sorted(root.rglob(&quot;*&quot;)):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        if any(part in ignore for part in rel.parts):
+            continue
+        yield rel.as_posix(), p.read_bytes()
+</code></pre>
+
+<p>Sorting on the full relative path string gives you a depth-first order that's stable across platforms. <code>rglob</code> returns paths, but you sort after filtering, so the order doesn't depend on <code>os.scandir</code> behavior.</p>
+<p>Two details worth pinning down: use <code>as_posix()</code> for the API path so Windows separators never leak into URLs, and read bytes rather than text. Line-ending normalization or encoding guesses will change the blob SHA and defeat the comparison.</p>
+<h2 id="the-push">The Push</h2>
+<p>The <code>PUT</code> endpoint takes <code>message</code>, <code>content</code> (base64), and <code>sha</code> — but only when updating. Omitting <code>sha</code> on an existing file returns <code>409 Conflict</code>, which is GitHub's way of stopping you from clobbering a concurrent write. Including a stale <code>sha</code> also fails, so the read and write need to be close together.</p>
+<pre class="codehilite"><code class="language-python">def push_file(session, owner, repo, path, content, current, message=None):
+    url = f&quot;{API}/repos/{owner}/{repo}/contents/{path}&quot;
+    local_sha = git_blob_sha(content)
+    if current is not None and current[&quot;sha&quot;] == local_sha:
+        return {&quot;status&quot;: &quot;unchanged&quot;, &quot;sha&quot;: local_sha}
+
+    body = {
+        &quot;message&quot;: message or f&quot;deploy: {path}&quot;,
+        &quot;content&quot;: base64.b64encode(content).decode(&quot;ascii&quot;),
+    }
+    if current is not None:
+        body[&quot;sha&quot;] = current[&quot;sha&quot;]
+
+    r = session.put(url, json=body)
+    r.raise_for_status()
+    return {&quot;status&quot;: &quot;pushed&quot;, &quot;sha&quot;: r.json()[&quot;content&quot;][&quot;sha&quot;]}
+</code></pre>
+
+<p>The response echoes the new blob SHA under <code>content.sha</code>. In principle it equals <code>local_sha</code>. In practice, don't assume — verify it (next section).</p>
+<h3 id="base64-encoding">Base64 encoding</h3>
+<p><code>base64.b64encode</code> produces standard base64 with <code>=</code> padding, which is what the API expects. The API tolerates newlines in the payload but there's no reason to add them. For large files, the entire payload goes in a JSON body, so the practical ceiling is around 1 MB per file for the standard Contents API — above that you need the Git Data API (blobs, trees, commits) instead.</p>
+<h2 id="verifying-the-write">Verifying the Write</h2>
+<p>A <code>200</code> from <code>PUT</code> means GitHub accepted the request. It does not prove the blob on the default branch matches what you sent — webhooks, branch protection rules, or an intervening push can all change the outcome. Re-fetching the SHA is cheap and closes the loop.</p>
+<pre class="codehilite"><code class="language-python">def deploy_file(session, owner, repo, path, content, ref=&quot;main&quot;):
+    current = get_file(session, owner, repo, path, ref=ref)
+    result = push_file(session, owner, repo, path, content, current)
+    if result[&quot;status&quot;] == &quot;unchanged&quot;:
+        return result
+
+    check = get_file(session, owner, repo, path, ref=ref)
+    if check is None or check[&quot;sha&quot;] != git_blob_sha(content):
+        raise RuntimeError(
+            f&quot;verification failed for {path}: &quot;
+            f&quot;expected {git_blob_sha(content)}, got {check and check['sha']}&quot;
+        )
+    return result
+</code></pre>
+
+<p>The read-after-write costs one extra request per changed file. On a deploy where most files are unchanged, that's a handful of requests. On a first deploy of a large site, it doubles the request count — worth it, because a silent mismatch means your Pages site is serving stale content and you won't know until someone notices.</p>
+<h2 id="rate-limiting">Rate Limiting</h2>
+<p>Authenticated requests get 5,000 per hour against the REST API. A 300-file site with verification and a first-time full deploy costs roughly 300 <code>GET</code>s (returning 404 for new files), 300 <code>PUT</code>s, and 300 verification <code>GET</code>s — about 900 requests. Two deploys like that in an hour and you're at a third of your budget. Repeated deploys with the SHA skip cost 300 <code>GET</code>s each, since every file is still read.</p>
+<p>Handle <code>403</code> and <code>429</code> explicitly. GitHub returns <code>403</code> with <code>X-RateLimit-Remaining: 0</code> when exhausted, and <code>Retry-After</code> on secondary limits.</p>
+<pre class="codehilite"><code class="language-python">import time
+
+def request_with_backoff(session, method, url, **kwargs):
+    for attempt in range(5):
+        r = session.request(method, url, **kwargs)
+        if r.status_code in (403, 429):
+            retry_after = r.headers.get(&quot;Retry-After&quot;)
+            wait = int(retry_after) if retry_after else 2 ** attempt
+            time.sleep(wait)
+            continue
+        return r
+    return r
+</code></pre>
+
+<p>Wire this into <code>get_file</code> and <code>push_file</code> by replacing <code>session.get</code> / <code>session.put</code> with <code>request_with_backoff</code>. Cap the retries — a hard-failing deploy should stop, not spin.</p>
+<p>If you're near the limit, the cheapest optimization is a single <code>GET /repos/{owner}/{repo}/git/trees/{ref}?recursive=1</code> call to fetch every blob SHA at once, then compare locally and only <code>GET</code>/<code>PUT</code> the files that differ. That collapses the read phase from N requests to 1.</p>
+<h2 id="the-commit-per-file-tradeoff">The Commit-Per-File Tradeoff</h2>
+<p>Every <code>PUT</code> creates a commit. There's no way around that through the Contents API alone. The consequences:</p>
+<ul>
+<li><strong>History noise.</strong> A 50-file change becomes 50 commits. If you care about readable history, batch the message (<code>deploy: &lt;path&gt; [3/50]</code>) or accept it.</li>
+<li><strong>Pages rebuilds.</strong> Pages builds on push to the publishing branch. Sequential commits can queue builds or cancel earlier ones. If your site takes 90 seconds to build, a 200-file deploy can take a long time to settle.</li>
+<li><strong>Atomicity.</strong> A failure halfway through leaves the repo in a mixed state — some files new, some old. There's no transaction. Design the deploy to be resumable: because the SHA skip is idempotent, re-running the deploy after a failure picks up exactly where it stopped.</li>
+</ul>
+<p>If any of those are unacceptable, the Git Data API is the answer: create blobs, build a tree, create one commit, update the ref. That's a single commit and a single Pages build, at the cost of more code and a wider blast radius if you get the tree wrong. For small sites and infrequent deploys, per-file commits are fine.</p>
+<h2 id="putting-it-together">Putting It Together</h2>
+<pre class="codehilite"><code class="language-python">def deploy_site(root: Path, owner: str, repo: str, ref: str = &quot;main&quot;):
+    session = requests.Session()
+    session.headers.update({
+        &quot;Authorization&quot;: f&quot;Bearer {token}&quot;,
+        &quot;Accept&quot;: &quot;application/vnd.github+json&quot;,
+        &quot;X-GitHub-Api-Version&quot;: &quot;2022-11-28&quot;,
+    })
+
+    stats = {&quot;pushed&quot;: 0, &quot;unchanged&quot;: 0}
+    for path, content in iter_files(root):
+        result = deploy_file(session, owner, repo, path, content, ref=ref)
+        stats[result[&quot;status&quot;]] += 1
+        print(f&quot;{result['status']:9} {path}&quot;)
+    return stats
+</code></pre>
+
+<p>Run it twice. The second run should report every file as <code>unchanged</code> and make zero writes. If it doesn't, your comparison is broken — most often because you're reading text instead of bytes, or because something in the build pipeline is rewriting files with different line endings between runs.</p>
+<p>That idempotency is the whole point. It makes the deploy safe to retry, keeps the commit log honest, and keeps Pages from rebuilding for nothing.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-18 08:46:32</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AGT</td>
+<td>弱做多</td>
+<td>$0.0843</td>
+<td>$0.0906</td>
+<td>$0.0822</td>
+<td>1:3.0</td>
+</tr>
+<tr>
+<td>BTW</td>
+<td>短平快做多</td>
+<td>$2.3242</td>
+<td>$2.3939</td>
+<td>$2.2661</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">GitHub Contents API</span><span class="tag-badge">SHA</span><span class="tag-badge">base64</span><span class="tag-badge">idempotent push</span><span class="tag-badge">GitHub Pages</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
