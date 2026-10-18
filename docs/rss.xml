@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Python日志系统设计：分级输出与文件轮转</title>
+            <link>https://www.hkcode.dpdns.org/posts/48.html</link>
+            <description>Python日志系统设计：分级输出与文件轮转
+
+日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。...</description>
+            <pubDate>2026-10-18</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>JSON配置文件管理：原子读写与异常恢复</title>
             <link>https://www.hkcode.dpdns.org/posts/47.html</link>
             <description>JSON配置文件管理：原子读写与异常恢复
@@ -163,13 +172,6 @@
             <link>https://www.hkcode.dpdns.org/posts/29.html</link>
             <description>RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。这篇文章讲清楚三件事：RSI的计算原理、如何用它过滤开仓、如何用它做动态止损，并给出可直接运行的Python代码。 RSI的计算原理 RSI由Wil...</description>
             <pubDate>2026-09-28</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>分批止盈实现：浮盈3%半仓止盈的Python代码逻辑</title>
-            <link>https://www.hkcode.dpdns.org/posts/28.html</link>
-            <description>为什么需要分批止盈 一次性止盈的问题在于：卖早了怕踏空，卖晚了怕回吐。分批止盈是在两者之间取平衡——用一部分仓位锁定利润，另一部分继续博弈更大空间。 本文实现一个具体规则：浮盈达到3%时平掉一半仓位，剩余仓位持有到浮盈6%时全部平仓。这个规则简单、可量化、容易回测。 设计思路 核心状态机 每笔持仓需要维护几个状态： 状...</description>
-            <pubDate>2026-09-27</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
