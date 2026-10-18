@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Python日志系统设计：分级输出与文件轮转 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Python日志系统设计：分级输出与文件轮转
+
+日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。...">
+    <meta name="keywords" content="日志系统,logging,文件轮转,Python">
+    <meta property="og:title" content="Python日志系统设计：分级输出与文件轮转">
+    <meta property="og:description" content="Python日志系统设计：分级输出与文件轮转
+
+日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/48.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Python日志系统设计：分级输出与文件轮转</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-18</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。<code>print</code> 只能救急，<code>logging</code> 才是正解。这篇文章拆解一套可直接落地的日志系统设计：分级输出、文件轮转、格式规范、异常捕获，以及长期运行程序的日志管理策略。</p>
+<h2 id="print">一、为什么不用 print</h2>
+<p>先说清楚问题。<code>print</code> 的缺陷：</p>
+<ul>
+<li>无法分级，DEBUG 信息和 ERROR 信息混在一起</li>
+<li>无法按级别过滤，生产环境想关掉调试输出得改代码</li>
+<li>没有时间戳、模块名、行号，排查问题时定位困难</li>
+<li>不支持输出到多个目标（控制台 + 文件 + 远程）</li>
+<li>文件会无限增长，没有轮转机制</li>
+</ul>
+<p><code>logging</code> 模块解决以上全部问题。标准库自带，无需安装。</p>
+<h2 id="_1">二、日志分级：五个级别的实际用法</h2>
+<p>Python <code>logging</code> 定义了五个标准级别，数值越大越严重：</p>
+<table>
+<thead>
+<tr>
+<th>级别</th>
+<th>数值</th>
+<th>使用场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DEBUG</td>
+<td>10</td>
+<td>变量值、函数入参、循环中间状态</td>
+</tr>
+<tr>
+<td>INFO</td>
+<td>20</td>
+<td>程序启动、任务完成、关键流程节点</td>
+</tr>
+<tr>
+<td>WARNING</td>
+<td>30</td>
+<td>可恢复的异常、降级处理、配置缺失</td>
+</tr>
+<tr>
+<td>ERROR</td>
+<td>40</td>
+<td>功能失败，但程序还能继续跑</td>
+</tr>
+<tr>
+<td>CRITICAL</td>
+<td>50</td>
+<td>程序无法继续，需要立即人工介入</td>
+</tr>
+</tbody>
+</table>
+<p>关键规则：<strong>logger 的有效级别 = 自身级别与所有 handler 级别中最严格的那个</strong>。很多人配置了 <code>logger.setLevel(logging.DEBUG)</code> 但发现 DEBUG 日志不输出，原因往往是 handler 的级别还停留在默认的 WARNING。</p>
+<p>一个常见的误区是把所有信息都打成 INFO。实际项目中，INFO 应该只保留"业务上有意义的事件"，比如"策略信号触发""订单提交成功"。循环里的每次迭代、每个中间变量，一律 DEBUG。这样生产环境把级别调到 INFO，日志量立刻降下来。</p>
+<h2 id="loggingbasicconfig">三、基础配置：从 logging.basicConfig 到完整方案</h2>
+<p><code>basicConfig</code> 适合脚本快速上手：</p>
+<pre class="codehilite"><code class="language-python">import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=&quot;%(asctime)s | %(levelname)-8s | %(name)s | %(message)s&quot;,
+    datefmt=&quot;%Y-%m-%d %H:%M:%S&quot;,
+)
+logger = logging.getLogger(__name__)
+logger.info(&quot;程序启动&quot;)
+</code></pre>
+
+<p>但它只能配置一次，且无法同时输出到控制台和文件（不同格式）。生产环境建议用 <code>dictConfig</code> 或手动构建 handler。下面直接给一套完整方案。</p>
+<h2 id="_2">四、完整日志系统实现</h2>
+<h3 id="41">4.1 日志格式设计</h3>
+<p>格式字段的选择直接影响排查效率。推荐包含：时间戳（精确到毫秒）、级别、模块名、行号、消息。</p>
+<pre class="codehilite"><code class="language-python">LOG_FORMAT = (
+    &quot;%(asctime)s.%(msecs)03d | %(levelname)-8s | &quot;
+    &quot;%(name)s:%(lineno)d | %(message)s&quot;
+)
+DATE_FORMAT = &quot;%Y-%m-%d %H:%M:%S&quot;
+</code></pre>
+
+<p><code>%(name)s</code> 是 logger 名称，通常用 <code>__name__</code> 传入，能看出日志来自哪个模块。<code>%(lineno)d</code> 是行号，排查时直接跳转。<code>%(msecs)03d</code> 补三位毫秒，高频交易场景下秒级时间戳不够用。</p>
+<h3 id="42-rotatingfilehandler">4.2 按大小轮转：RotatingFileHandler</h3>
+<p>最常用的轮转策略。单个文件达到上限就切分，保留 N 个备份。</p>
+<pre class="codehilite"><code class="language-python">import logging
+from logging.handlers import RotatingFileHandler
+import os
+
+def build_logger(
+    name: str,
+    log_dir: str = &quot;logs&quot;,
+    level: int = logging.INFO,
+    max_bytes: int = 10 * 1024 * 1024,  # 10MB
+    backup_count: int = 5,
+) -&gt; logging.Logger:
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)  # logger 本身放开，由 handler 控制
+    logger.propagate = False
+
+    # 避免重复添加 handler（模块被多次 import 时）
+    if logger.handlers:
+        return logger
+
+    formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
+
+    # 控制台：只输出 INFO 及以上
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(formatter)
+
+    # 文件：记录 DEBUG 及以上，按大小轮转
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, f&quot;{name}.log&quot;),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding=&quot;utf-8&quot;,
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(console)
+    logger.addHandler(file_handler)
+    return logger
+
+
+if __name__ == &quot;__main__&quot;:
+    log = build_logger(&quot;demo&quot;)
+    log.debug(&quot;这条只进文件&quot;)
+    log.info(&quot;这条同时进控制台和文件&quot;)
+    log.error(&quot;错误信息&quot;)
+</code></pre>
+
+<p>这样配置后，控制台保持干净（只看 INFO 以上），文件里保留完整的 DEBUG 链路，出问题时可以回溯。</p>
+<h3 id="43-timedrotatingfilehandler">4.3 按时间轮转：TimedRotatingFileHandler</h3>
+<p>适合日志量不稳定、但需要按天/小时归档的场景。量化系统经常需要"按交易日切分日志"，这个 handler 更合适。</p>
+<pre class="codehilite"><code class="language-python">from logging.handlers import TimedRotatingFileHandler
+
+def add_timed_handler(logger: logging.Logger, log_dir: str = &quot;logs&quot;) -&gt; None:
+    os.makedirs(log_dir, exist_ok=True)
+    formatter = logging.Formatter(LOG_FORMAT, DATE_FORMAT)
+
+    handler = TimedRotatingFileHandler(
+        os.path.join(log_dir, &quot;app.log&quot;),
+        when=&quot;midnight&quot;,      # 每天零点切分
+        interval=1,
+        backupCount=30,       # 保留 30 天
+        encoding=&quot;utf-8&quot;,
+        utc=False,            # 用本地时间
+    )
+    handler.suffix = &quot;%Y-%m-%d&quot;   # 切分后的文件名后缀
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+</code></pre>
+
+<p><code>when</code> 参数支持 <code>S</code>（秒）、<code>M</code>（分）、<code>H</code>（小时）、<code>D</code>（天）、<code>midnight</code>（每天零点）、<code>W0</code>~<code>W6</code>（每周几）。注意 <code>backupCount</code> 在 <code>midnight</code> 模式下表示保留的天数。</p>
+<p><strong>两种轮转的取舍</strong>：按大小轮转能控制磁盘占用上限，但切分时间点不可预测；按时间轮转便于归档和检索，但单日日志量可能爆炸。实际项目里可以两个 handler 同时挂载——一个按大小兜底，一个按天归档。</p>
+<h3 id="44">4.4 异常自动记录</h3>
+<p>这是最容易被忽略的部分。<code>logger.error(str(e))</code> 只记录异常消息，丢掉 traceback，等于白记。正确做法：</p>
+<pre class="codehilite"><code class="language-python">import traceback
+
+# 方式一：在 except 块中
+try:
+    1 / 0
+except Exception:
+    log.exception(&quot;计算任务失败&quot;)   # 自动带上完整 traceback
+
+# 方式二：手动格式化
+try:
+    raise ValueError(&quot;bad config&quot;)
+except Exception as e:
+    log.error(&quot;配置解析失败: %s\n%s&quot;, e, traceback.format_exc())
+</code></pre>
+
+<p><code>logger.exception()</code> 等价于 <code>logger.error(..., exc_info=True)</code>，必须在 <code>except</code> 块内调用才有效。</p>
+<p>对于长期运行的服务，建议在入口处统一捕获未处理异常：</p>
+<pre class="codehilite"><code class="language-python">import sys
+
+def main():
+    log = build_logger(&quot;app&quot;)
+    try:
+        run_service()
+    except KeyboardInterrupt:
+        log.info(&quot;收到中断信号，准备退出&quot;)
+    except Exception:
+        log.exception(&quot;未捕获异常，程序退出&quot;)
+        sys.exit(1)
+</code></pre>
+
+<p>另外，可以用 <code>sys.excepthook</code> 兜底那些逃逸出 <code>try</code> 的异常：</p>
+<pre class="codehilite"><code class="language-python">def install_excepthook(logger: logging.Logger) -&gt; None:
+    def handler(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        logger.critical(&quot;未捕获异常&quot;, exc_info=(exc_type, exc_value, exc_tb))
+    sys.excepthook = handler
+</code></pre>
+
+<h2 id="_3">五、长期运行程序的日志管理</h2>
+<h3 id="51-dictconfig">5.1 用 dictConfig 统一配置</h3>
+<p>当项目模块变多，手动 addHandler 会变得散乱。<code>logging.config.dictConfig</code> 支持用字典集中声明，还能读取 YAML/JSON 配置。</p>
+<pre class="codehilite"><code class="language-python">import logging.config
+
+LOGGING_CONFIG = {
+    &quot;version&quot;: 1,
+    &quot;disable_existing_loggers&quot;: False,
+    &quot;formatters&quot;: {
+        &quot;standard&quot;: {
+            &quot;format&quot;: LOG_FORMAT,
+            &quot;datefmt&quot;: DATE_FORMAT,
+        },
+    },
+    &quot;handlers&quot;: {
+        &quot;console&quot;: {
+            &quot;class&quot;: &quot;logging.StreamHandler&quot;,
+            &quot;level&quot;: &quot;INFO&quot;,
+            &quot;formatter&quot;: &quot;standard&quot;,
+            &quot;stream&quot;: &quot;ext://sys.stdout&quot;,
+        },
+        &quot;file&quot;: {
+            &quot;class&quot;: &quot;logging.handlers.RotatingFileHandler&quot;,
+            &quot;level&quot;: &quot;DEBUG&quot;,
+            &quot;formatter&quot;: &quot;standard&quot;,
+            &quot;filename&quot;: &quot;logs/app.log&quot;,
+            &quot;maxBytes&quot;: 10485760,
+            &quot;backupCount&quot;: 5,
+            &quot;encoding&quot;: &quot;utf-8&quot;,
+        },
+    },
+    &quot;loggers&quot;: {
+        &quot;app&quot;: {
+            &quot;level&quot;: &quot;DEBUG&quot;,
+            &quot;handlers&quot;: [&quot;console&quot;, &quot;file&quot;],
+            &quot;propagate&quot;: False,
+        },
+    },
+    &quot;root&quot;: {
+        &quot;level&quot;: &quot;WARNING&quot;,
+        &quot;handlers&quot;: [&quot;console&quot;],
+    },
+}
+
+logging.config.dictConfig(LOGGING_CONFIG)
+log = logging.getLogger(&quot;app&quot;)
+</code></pre>
+
+<p><code>disable_existing_loggers: False</code> 很重要——默认值是 True，会把已经创建的 logger 全部禁用，第三方库的日志也跟着消失。</p>
+<h3 id="52">5.2 多进程场景的坑</h3>
+<p><code>RotatingFileHandler</code> 在多进程下不安全：多个进程同时写同一个文件、同时触发轮转，会导致日志丢失或文件损坏。解决方案：</p>
+<ul>
+<li><strong>每个进程写独立文件</strong>：文件名带上 PID 或 worker 编号</li>
+<li><strong>用 <code>QueueHandler</code> + <code>QueueListener</code></strong>：主进程统一写盘，子进程只往队列里丢</li>
+</ul>
+<pre class="codehilite"><code class="language-python">from logging.handlers import QueueHandler, QueueListener
+import multiprocessing as mp
+import queue
+
+def worker_process(log_queue: mp.Queue, worker_id: int):
+    logger = logging.getLogger(f&quot;worker-{worker_id}&quot;)
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(QueueHandler(log_queue))
+    logger.info(&quot;worker %d 启动&quot;, worker_id)
+    # ... 业务逻辑
+
+def run_with_queue():
+    log_queue = mp.Queue()
+    logger = build_logger(&quot;main&quot;)
+    listener = QueueListener(log_queue, *logger.handlers)
+    listener.start()
+    try:
+        procs = [
+            mp.Process(target=worker_process, args=(log_queue, i))
+            for i in range(4)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join()
+    finally:
+        listener.stop()
+</code></pre>
+
+<p>队列方案把写盘集中到单点，彻底规避竞争。</p>
+<h3 id="53">5.3 日志量与磁盘控制</h3>
+<p>长期运行的程序要算一笔账：假设每秒 100 条日志，平均每行 200 字节，一天就是 1.7GB。几个控制手段：</p>
+<ol>
+<li><strong>生产环境把级别调到 INFO 或 WARNING</strong>，DEBUG 只在排障时临时开启</li>
+<li><strong><code>backupCount</code> 必须设置</strong>，否则旧日志永远不删</li>
+<li><strong>高频日志用采样</strong>：循环里的日志加计数器，每 N 次打一条</li>
+<li><strong>日志目录单独挂载</strong>，避免写满系统盘导致服务崩溃</li>
+</ol>
+<pre class="codehilite"><code class="language-python">class SampledLogger:
+    &quot;&quot;&quot;每 N 次调用才真正输出一次，用于高频循环&quot;&quot;&quot;
+    def __init__(self, logger: logging.Logger, every: int = 100):
+        self.logger = logger
+        self.every = every
+        self.count = 0
+
+    def debug(self, msg, *args):
+        self.count += 1
+        if self.count % self.every == 0:
+            self.logger.debug(&quot;[sampled %d] &quot; + msg, self.count, *args)
+</code></pre>
+
+<h3 id="54">5.4 日志中不要记录敏感信息</h3>
+<p>账户信息、API key、完整订单参数，写进日志就是安全隐患。建议在格式化阶段做脱敏，或者约定"敏感字段用 <code>***</code> 占位"。这一点在量化系统里尤其重要——日志文件经常被复制、上传、共享。</p>
+<h2 id="_4">六、小结</h2>
+<p>一套可用的日志系统，核心就四件事：</p>
+<ul>
+<li><strong>分级</strong>：logger 放开到 DEBUG，handler 按目标控制级别，控制台只看 INFO 以上</li>
+<li><strong>轮转</strong>：按大小兜底磁盘，按时间便于归档，两者可叠加</li>
+<li><strong>格式</strong>：时间戳到毫秒、级别、模块名、行号，一个都不能少</li>
+<li><strong>异常</strong>：用 <code>logger.exception()</code> 保留 traceback，入口处兜底 <code>excepthook</code></li>
+</ul>
+<p>多进程用队列，长期运行控磁盘，敏感信息做脱敏。把这几点做到位，排查线上问题时就不会对着空日志干瞪眼。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">日志系统</span><span class="tag-badge">logging</span><span class="tag-badge">文件轮转</span><span class="tag-badge">Python</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
