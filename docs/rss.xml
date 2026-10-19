@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>自动化系统监控面板：用Python搭建简单的健康看板</title>
+            <link>https://www.hkcode.dpdns.org/posts/49.html</link>
+            <description>自动化系统监控面板：用Python搭建简单的健康看板
+
+跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。数据源断了、API 超时了、定时任务没跑、缓存写爆了——这些问题不会主动报警，只会让你在复盘时发现“咦，昨天怎么没信号”。...</description>
+            <pubDate>2026-10-19</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>Python日志系统设计：分级输出与文件轮转</title>
             <link>https://www.hkcode.dpdns.org/posts/48.html</link>
             <description>Python日志系统设计：分级输出与文件轮转
@@ -165,13 +174,6 @@
             <link>https://www.hkcode.dpdns.org/posts/30.html</link>
             <description>问题的起点 几乎所有策略回测代码里都有这么一行： stop_loss_pct = 0.02 # 2%止损 写死一个百分比，简单、直观、能跑。但实盘跑一段时间就会发现两个问题： 低波动品种被频繁扫损。2% 对某些标的来说就是日常噪音，价格来回晃一圈，止损被打掉，然后行情按原方向走。 高波动品种止损形同虚设。同样是 2%，...</description>
             <pubDate>2026-09-29</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>RSI指标在风险控制中的实际应用</title>
-            <link>https://www.hkcode.dpdns.org/posts/29.html</link>
-            <description>RSI（Relative Strength Index）是最常用的动量指标之一。大多数人用它判断超买超卖，但真正有价值的地方在于：把RSI嵌入风控逻辑，而不是当作入场信号。这篇文章讲清楚三件事：RSI的计算原理、如何用它过滤开仓、如何用它做动态止损，并给出可直接运行的Python代码。 RSI的计算原理 RSI由Wil...</description>
-            <pubDate>2026-09-28</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
