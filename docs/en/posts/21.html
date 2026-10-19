@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generating Technical Blog Posts with the DeepSeek API - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why the Prompt Is the Whole QA Process A daily pipeline that publishes one or two articles per day in two languages, wit...">
+    <meta name="keywords" content="DeepSeek,LLM,prompt engineering,content pipeline,retry">
+    <meta property="og:title" content="Generating Technical Blog Posts with the DeepSeek API">
+    <meta property="og:description" content="Why the Prompt Is the Whole QA Process A daily pipeline that publishes one or two articles per day in two languages, wit...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/21.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Generating Technical Blog Posts with the DeepSeek API</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-19</span>
+                <span class="category"><span class="tag-badge">API Integration</span></span>
+            </div>
+            <div class="post-content">
+<p>A daily pipeline that publishes one or two articles per day in two languages, with no human in the loop, has an uncomfortable property: the prompt is not a suggestion, it is the specification. If the prompt is vague, the output is vague, and it goes live. There is no editor to catch a missing code block, an H1 that duplicates the page template, or a 400-word stub that technically satisfies "write an article."</p>
+<p>The setup I run is boring on purpose. A Python job assembles a prompt from three parts, calls the DeepSeek API, validates the result, derives an excerpt, and records the publication in a manifest. Everything below is about making each of those steps deterministic enough that "nobody reviews it" stops being a risk.</p>
+<h2 id="anatomy-of-the-prompt">Anatomy of the Prompt</h2>
+<p>The prompt has three layers, and the boundaries between them matter.</p>
+<h3 id="layer-1-the-fixed-persona">Layer 1: The fixed persona</h3>
+<p>The persona is a constant string shared by every article. It sets voice and, more importantly, sets constraints the model can't negotiate away. "Practical engineer, code-first, no fluff" is short, but it's doing real work: it biases the model toward concrete examples and away from the "in today's fast-paced world" register that LLMs default to.</p>
+<pre class="codehilite"><code class="language-python">PERSONA = (
+    &quot;You are a professional software engineer writing for a technical blog. &quot;
+    &quot;Your style is practical, concise, and code-first. You write real problems &quot;
+    &quot;and real fixes, never marketing copy. You never pad with filler sentences.&quot;
+)
+</code></pre>
+
+<p>Keep this in a module-level constant. If you edit it weekly, you can't attribute changes in output quality to anything.</p>
+<h3 id="layer-2-hard-requirements-numbered">Layer 2: Hard requirements, numbered</h3>
+<p>Numbered requirements are easier for the model to follow than prose paragraphs, and easier for you to diff when something goes wrong. Each one should be checkable by a script after the fact.</p>
+<pre class="codehilite"><code class="language-python">REQUIREMENTS = &quot;&quot;&quot;\
+1. Output pure Markdown. No HTML, no JSON wrapper, no preamble.
+2. Do not use a top-level # heading; the page template renders the title.
+3. Use ## and ### headings for structure.
+4. Length: 1200-1800 words.
+5. Include concrete Python code examples in ```python fenced blocks.
+6. Explain methodology only. No disclaimers, no investment advice.
+7. Do not recommend any specific trade, coin, or stock.
+8. Start directly with the subject; no greetings.
+9. Close with one short sentence.
+&quot;&quot;&quot;
+</code></pre>
+
+<p>Requirement 2 exists because the model will otherwise start with <code># {title}</code> roughly every time, and then your rendered page shows the title twice. Requirement 4 is a range, not a minimum, because "write at least 1200 words" invites padding. A range gives the model a ceiling too.</p>
+<h3 id="layer-3-topic-background">Layer 3: Topic background</h3>
+<p>This is the part that separates usable drafts from generic ones. If you prompt with only a title, the model writes from its prior — which means plausible-sounding, unspecific, and occasionally invented. A short paragraph of real context ("we run a pipeline that publishes daily in two languages with no reviewer; here's what broke and how we fixed it") anchors the article in evidence. The model stops inventing scenarios and starts explaining the one you handed it.</p>
+<pre class="codehilite"><code class="language-python">def build_prompt(title: str, category: str, keywords: list[str],
+                 background: str) -&gt; str:
+    kw = &quot;, &quot;.join(keywords)
+    return f&quot;&quot;&quot;{PERSONA}
+
+Write one blog post.
+
+Title: {title}
+Category: {category}
+Keywords: {kw}
+
+Requirements:
+{REQUIREMENTS}
+
+Topic background (write from this; do not invent facts beyond it):
+{background}
+&quot;&quot;&quot;
+</code></pre>
+
+<p>The background paragraph is the highest-leverage input you control. Write two or three sentences of genuine specifics — what the system does, what failed, what the constraint was — and the draft will carry those specifics through. Leave it out and you get an article about "LLM integration" in general, which nobody needs.</p>
+<h2 id="sampling-parameters">Sampling Parameters</h2>
+<p>Two knobs matter here: <code>temperature</code> and <code>max_tokens</code>.</p>
+<p>For this kind of structured, requirement-heavy output, <code>temperature</code> around 0.7 is the sweet spot. Lower (<code>0.2</code>–<code>0.4</code>) makes the model rigid; it follows the format but the prose flattens into a checklist. Higher (<code>1.0</code>+) starts drifting on the hard requirements — you'll see the H1 come back, or the word count overshoot. <code>0.7</code> keeps some variation between the two daily articles while staying compliant.</p>
+<p><code>max_tokens</code> needs headroom. 1200–1800 words is roughly 1600–2400 tokens for English; add the code blocks and you're looking at 3000+ tokens of output. Set <code>max_tokens</code> to <code>4096</code> and check the finish reason — if it's <code>length</code>, the article was truncated mid-sentence and must be retried, not published.</p>
+<pre class="codehilite"><code class="language-python">import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ[&quot;DEEPSEEK_API_KEY&quot;],
+    base_url=&quot;https://api.deepseek.com&quot;,
+)
+
+def call_model(prompt: str) -&gt; tuple[str, str]:
+    resp = client.chat.completions.create(
+        model=&quot;deepseek-chat&quot;,
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}],
+        temperature=0.7,
+        max_tokens=4096,
+    )
+    choice = resp.choices[0]
+    return choice.message.content, choice.finish_reason
+</code></pre>
+
+<p>The DeepSeek API is OpenAI-compatible, so the standard client works with a <code>base_url</code> override. That also means the retry logic below is portable to any compatible endpoint.</p>
+<h2 id="retries-with-backoff">Retries with Backoff</h2>
+<p>Timeouts and 5xx responses happen. What you cannot afford is a pipeline that either crashes the whole daily run or silently publishes a half-generated draft. The retry policy needs three properties: bounded attempts, exponential backoff with jitter, and a distinction between retryable and non-retryable failures.</p>
+<pre class="codehilite"><code class="language-python">import random
+import time
+
+RETRYABLE = (TimeoutError, ConnectionError)
+
+def call_with_retry(prompt: str, attempts: int = 4) -&gt; str:
+    last_err = None
+    for i in range(attempts):
+        try:
+            text, finish = call_model(prompt)
+            if finish == &quot;length&quot;:
+                raise ValueError(&quot;truncated output&quot;)
+            return text
+        except Exception as e:
+            last_err = e
+            retryable = isinstance(e, RETRYABLE) or &quot;rate&quot; in str(e).lower()
+            if not retryable or i == attempts - 1:
+                raise
+            delay = (2 ** i) + random.uniform(0, 0.5)
+            time.sleep(delay)
+    raise RuntimeError(&quot;unreachable&quot;) from last_err
+</code></pre>
+
+<p>Two details worth calling out. First, a truncated output (<code>finish_reason == "length"</code>) is treated as a failure and retried — publishing a 900-word article that ends mid-sentence is worse than publishing nothing. Second, jitter on the backoff prevents the two language variants from retrying in lockstep and hammering the API at the same instant.</p>
+<p>If you generate both languages concurrently, cap the concurrency (a <code>ThreadPoolExecutor(max_workers=2)</code> is fine for two). The rate limit is shared, and a burst of four retries across two languages is how you turn a transient 429 into a sustained one.</p>
+<h2 id="validating-the-draft">Validating the Draft</h2>
+<p>Requirements are only real if something checks them. A short validator catches the common failures before they reach the site.</p>
+<pre class="codehilite"><code class="language-python">import re
+
+def validate(text: str) -&gt; list[str]:
+    problems = []
+    if re.search(r&quot;^# &quot;, text, flags=re.MULTILINE):
+        problems.append(&quot;contains H1 heading&quot;)
+    words = len(re.findall(r&quot;\b\w+\b&quot;, text))
+    if not 1100 &lt;= words &lt;= 1900:
+        problems.append(f&quot;word count {words} out of range&quot;)
+    if &quot;```python&quot; not in text:
+        problems.append(&quot;no python code block&quot;)
+    return problems
+</code></pre>
+
+<p>The word-count bounds are slightly wider than the prompt's (1100–1900 vs. 1200–1800) to absorb tokenization differences between your counter and the model's. If validation fails, retry once with the problems appended to the prompt; if it fails again, skip the article and log it. A missing article is a recoverable state; a malformed one on the homepage is not.</p>
+<h2 id="deriving-the-excerpt">Deriving the Excerpt</h2>
+<p>You don't want to pay for a second API call to summarize each article, and you don't want raw Markdown in the meta description. Strip it.</p>
+<pre class="codehilite"><code class="language-python">def make_excerpt(markdown: str, limit: int = 160) -&gt; str:
+    text = re.sub(r&quot;```.*?```&quot;, &quot;&quot;, markdown, flags=re.DOTALL)  # drop code
+    text = re.sub(r&quot;^#{1,6}\s+.*$&quot;, &quot;&quot;, text, flags=re.MULTILINE)  # drop headings
+    text = re.sub(r&quot;!?\[([^\]]*)\]\([^)]*\)&quot;, r&quot;\1&quot;, text)  # keep link text
+    text = re.sub(r&quot;[*_`&gt;]&quot;, &quot;&quot;, text)
+    text = re.sub(r&quot;\s+&quot;, &quot; &quot;, text).strip()
+    if len(text) &lt;= limit:
+        return text
+    cut = text[:limit].rsplit(&quot; &quot;, 1)[0]
+    return cut.rstrip(&quot;,.;:&quot;) + &quot;…&quot;
+</code></pre>
+
+<p>Dropping code blocks and headings first matters: otherwise the excerpt often starts with a function signature or a section title, which reads badly in a search result. Cutting on a word boundary and trimming trailing punctuation avoids the "…fixes the retry lo…" look.</p>
+<h2 id="the-manifest">The Manifest</h2>
+<p>With no human reviewing, you need a record of what was published, when, and from which prompt. A <code>manifest.json</code> keyed by slug gives you idempotency (the job can check whether today's article already exists and skip), reproducibility (you can see which prompt version produced a given post), and a cheap audit trail.</p>
+<pre class="codehilite"><code class="language-python">import json
+from datetime import date
+from pathlib import Path
+
+MANIFEST = Path(&quot;manifest.json&quot;)
+
+def load_manifest() -&gt; dict:
+    if MANIFEST.exists():
+        return json.loads(MANIFEST.read_text(encoding=&quot;utf-8&quot;))
+    return {}
+
+def record(entry: dict) -&gt; None:
+    data = load_manifest()
+    data[entry[&quot;slug&quot;]] = entry
+    MANIFEST.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding=&quot;utf-8&quot;
+    )
+
+def already_published(slug: str) -&gt; bool:
+    return slug in load_manifest()
+</code></pre>
+
+<p>Each entry should carry at least: <code>slug</code>, <code>title</code>, <code>lang</code>, <code>published_at</code>, <code>word_count</code>, <code>prompt_hash</code>, and <code>model</code>. The <code>prompt_hash</code> is a SHA-256 of the assembled prompt — when a batch of articles suddenly reads differently, you can tell whether the prompt changed or the model did.</p>
+<pre class="codehilite"><code class="language-python">import hashlib
+
+def prompt_hash(prompt: str) -&gt; str:
+    return hashlib.sha256(prompt.encode(&quot;utf-8&quot;)).hexdigest()[:12]
+</code></pre>
+
+<p>Write the manifest after the article file is safely on disk, not before. If the process dies between the two writes, you'd rather re-generate than have a manifest entry pointing at nothing.</p>
+<h2 id="putting-the-pieces-together">Putting the Pieces Together</h2>
+<p>The daily job is then a straight line: for each (title, language) pair, check the manifest, build the prompt, call with retry, validate, write the file, derive the excerpt, record the entry. The whole thing is maybe 120 lines, and the only part that requires judgment is the topic background — which is exactly where your attention should go, because it's the one input that determines whether the draft is specific or generic.</p>
+<p>The pattern generalizes beyond blogging. Any unattended LLM pipeline that produces structured artifacts — reports, changelogs, documentation stubs — benefits from the same shape: fixed persona, numbered checkable requirements, evidence-based background, bounded retries, a validator, and a manifest. The model is the least predictable component, so everything around it should be the most.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-19 08:46:24</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SIREN</td>
+<td>短平快做多</td>
+<td>$0.0307</td>
+<td>$0.0316</td>
+<td>$0.0299</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">DeepSeek</span><span class="tag-badge">LLM</span><span class="tag-badge">prompt engineering</span><span class="tag-badge">content pipeline</span><span class="tag-badge">retry</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
