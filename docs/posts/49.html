@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自动化系统监控面板：用Python搭建简单的健康看板 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="自动化系统监控面板：用Python搭建简单的健康看板
+
+跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。...">
+    <meta name="keywords" content="监控面板,健康看板,Python,可视化">
+    <meta property="og:title" content="自动化系统监控面板：用Python搭建简单的健康看板">
+    <meta property="og:description" content="自动化系统监控面板：用Python搭建简单的健康看板
+
+跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/49.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>自动化系统监控面板：用Python搭建简单的健康看板</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-19</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。数据源断了、API 超时了、定时任务没跑、缓存写爆了——这些问题不会主动报警，只会让你在复盘时发现“咦，昨天怎么没信号”。</p>
+<p>这篇文章搭一个轻量级的健康看板，不依赖 Prometheus + Grafana 那套重型方案，纯 Python 搞定：数据采集、状态判定、Web 展示、定时刷新，一个文件能跑起来。适合个人或小团队的量化系统。</p>
+<h2 id="_1">整体设计</h2>
+<p>看板要展示五类信息：</p>
+<ul>
+<li><strong>模块运行状态</strong>：数据采集、策略计算、下单执行等核心模块是否存活</li>
+<li><strong>最近任务执行结果</strong>：定时任务的成功/失败/耗时</li>
+<li><strong>API 连接状态</strong>：交易所、行情源、数据库的连通性</li>
+<li><strong>缓存使用情况</strong>：Redis 或本地缓存的内存占用、命中率</li>
+<li><strong>错误统计</strong>：最近一段时间的异常数量与分类</li>
+</ul>
+<p>架构很简单：一个采集器负责收集指标写入内存/JSON 文件，一个 Flask 应用读取并渲染页面，前端用 JS 定时轮询刷新。不引入数据库，不引入消息队列，保持最小依赖。</p>
+<pre class="codehilite"><code>collector.py  →  metrics.json  →  app.py (Flask)  →  浏览器轮询刷新
+</code></pre>
+
+<h2 id="_2">数据采集层</h2>
+<p>先定义统一的数据结构。所有指标都收敛成一个 dict，方便序列化和前端渲染：</p>
+<pre class="codehilite"><code class="language-python"># collector.py
+import json
+import time
+import psutil
+import redis
+import requests
+from datetime import datetime
+from pathlib import Path
+
+METRICS_FILE = Path(&quot;metrics.json&quot;)
+
+def check_module(name, pid=None):
+    &quot;&quot;&quot;检查进程是否存活。pid 为 None 时视为外部模块，由心跳文件判定&quot;&quot;&quot;
+    if pid is None:
+        return {&quot;name&quot;: name, &quot;status&quot;: &quot;unknown&quot;, &quot;detail&quot;: &quot;no pid&quot;}
+    try:
+        proc = psutil.Process(pid)
+        return {
+            &quot;name&quot;: name,
+            &quot;status&quot;: &quot;alive&quot; if proc.is_running() else &quot;dead&quot;,
+            &quot;detail&quot;: f&quot;cpu={proc.cpu_percent():.1f}% mem={proc.memory_info().rss // 1024 // 1024}MB&quot;
+        }
+    except psutil.NoSuchProcess:
+        return {&quot;name&quot;: name, &quot;status&quot;: &quot;dead&quot;, &quot;detail&quot;: &quot;process not found&quot;}
+
+def check_api(name, url, timeout=3):
+    &quot;&quot;&quot;HTTP 探活，记录响应时间&quot;&quot;&quot;
+    start = time.time()
+    try:
+        r = requests.get(url, timeout=timeout)
+        cost = (time.time() - start) * 1000
+        ok = r.status_code &lt; 400
+        return {
+            &quot;name&quot;: name,
+            &quot;status&quot;: &quot;ok&quot; if ok else &quot;error&quot;,
+            &quot;detail&quot;: f&quot;{r.status_code} {cost:.0f}ms&quot;
+        }
+    except Exception as e:
+        cost = (time.time() - start) * 1000
+        return {&quot;name&quot;: name, &quot;status&quot;: &quot;error&quot;, &quot;detail&quot;: f&quot;{type(e).__name__} {cost:.0f}ms&quot;}
+
+def check_cache(host=&quot;localhost&quot;, port=6379):
+    &quot;&quot;&quot;Redis 内存与命中率&quot;&quot;&quot;
+    try:
+        r = redis.Redis(host=host, port=port, socket_timeout=2)
+        info = r.info(&quot;memory&quot;)
+        stats = r.info(&quot;stats&quot;)
+        hits = stats.get(&quot;keyspace_hits&quot;, 0)
+        misses = stats.get(&quot;keyspace_misses&quot;, 0)
+        total = hits + misses
+        hit_rate = hits / total * 100 if total else 0
+        return {
+            &quot;status&quot;: &quot;ok&quot;,
+            &quot;used_mb&quot;: round(info[&quot;used_memory&quot;] / 1024 / 1024, 2),
+            &quot;peak_mb&quot;: round(info[&quot;used_memory_peak&quot;] / 1024 / 1024, 2),
+            &quot;hit_rate&quot;: round(hit_rate, 1),
+            &quot;keys&quot;: r.dbsize()
+        }
+    except Exception as e:
+        return {&quot;status&quot;: &quot;error&quot;, &quot;detail&quot;: str(e)}
+</code></pre>
+
+<p>这里用 <code>psutil</code> 判断进程存活，<code>requests</code> 做 API 探活，<code>redis-py</code> 读缓存指标。三个库都是常规依赖，<code>pip install psutil requests redis</code> 即可。</p>
+<h3 id="_3">任务执行记录</h3>
+<p>定时任务的执行结果，最省事的做法是让任务本身写一条记录到 JSON Lines 文件，采集器只负责读取和聚合：</p>
+<pre class="codehilite"><code class="language-python"># 任务侧调用：记录一次执行
+def log_task(name, success, duration, error=None):
+    record = {
+        &quot;name&quot;: name,
+        &quot;success&quot;: success,
+        &quot;duration&quot;: round(duration, 2),
+        &quot;error&quot;: error,
+        &quot;ts&quot;: datetime.now().isoformat()
+    }
+    with open(&quot;tasks.jsonl&quot;, &quot;a&quot;) as f:
+        f.write(json.dumps(record) + &quot;\n&quot;)
+
+# 采集侧：读取最近 N 条，聚合成统计
+def summarize_tasks(path=&quot;tasks.jsonl&quot;, recent=50):
+    p = Path(path)
+    if not p.exists():
+        return {&quot;recent&quot;: [], &quot;stats&quot;: {}}
+    lines = p.read_text().strip().splitlines()[-recent:]
+    records = [json.loads(l) for l in lines if l.strip()]
+    total = len(records)
+    failed = sum(1 for r in records if not r[&quot;success&quot;])
+    return {
+        &quot;recent&quot;: records[-10:],  # 前端只展示最近 10 条
+        &quot;stats&quot;: {
+            &quot;total&quot;: total,
+            &quot;failed&quot;: failed,
+            &quot;fail_rate&quot;: round(failed / total * 100, 1) if total else 0,
+            &quot;avg_duration&quot;: round(sum(r[&quot;duration&quot;] for r in records) / total, 2) if total else 0
+        }
+    }
+</code></pre>
+
+<h3 id="_4">错误统计</h3>
+<p>错误同样走 JSONL，按类型聚合：</p>
+<pre class="codehilite"><code class="language-python">def summarize_errors(path=&quot;errors.jsonl&quot;, window_hours=24):
+    p = Path(path)
+    if not p.exists():
+        return {&quot;count&quot;: 0, &quot;by_type&quot;: {}}
+    cutoff = time.time() - window_hours * 3600
+    by_type = {}
+    count = 0
+    for line in p.read_text().strip().splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = datetime.fromisoformat(rec[&quot;ts&quot;]).timestamp()
+        if ts &lt; cutoff:
+            continue
+        count += 1
+        etype = rec.get(&quot;type&quot;, &quot;Unknown&quot;)
+        by_type[etype] = by_type.get(etype, 0) + 1
+    return {&quot;count&quot;: count, &quot;by_type&quot;: by_type}
+</code></pre>
+
+<h3 id="_5">汇总入口</h3>
+<p>把所有采集函数串起来，写成一个快照：</p>
+<pre class="codehilite"><code class="language-python">def collect_all():
+    snapshot = {
+        &quot;ts&quot;: datetime.now().isoformat(),
+        &quot;modules&quot;: [
+            check_module(&quot;data_feed&quot;, pid=12345),
+            check_module(&quot;strategy_engine&quot;, pid=12346),
+            check_module(&quot;order_executor&quot;, pid=12347),
+        ],
+        &quot;apis&quot;: [
+            check_api(&quot;exchange_rest&quot;, &quot;https://api.example.com/ping&quot;),
+            check_api(&quot;market_data&quot;, &quot;https://quote.example.com/health&quot;),
+        ],
+        &quot;cache&quot;: check_cache(),
+        &quot;tasks&quot;: summarize_tasks(),
+        &quot;errors&quot;: summarize_errors(),
+    }
+    METRICS_FILE.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2))
+    return snapshot
+
+if __name__ == &quot;__main__&quot;:
+    print(json.dumps(collect_all(), ensure_ascii=False, indent=2))
+</code></pre>
+
+<p>实际使用时，这个 <code>collect_all()</code> 挂到 cron 或 APScheduler 里，每 30 秒跑一次，把结果写入 <code>metrics.json</code>。采集和展示解耦，页面永远读的是最近一次快照，不会因为探活超时把页面卡住。</p>
+<h2 id="web">Web 展示层</h2>
+<p>用 Flask 做后端，一个路由返回 JSON，一个路由渲染页面：</p>
+<pre class="codehilite"><code class="language-python"># app.py
+import json
+from pathlib import Path
+from flask import Flask, jsonify, render_template_string
+
+app = Flask(__name__)
+METRICS_FILE = Path(&quot;metrics.json&quot;)
+
+@app.route(&quot;/api/metrics&quot;)
+def api_metrics():
+    if not METRICS_FILE.exists():
+        return jsonify({&quot;error&quot;: &quot;no data&quot;}), 503
+    return jsonify(json.loads(METRICS_FILE.read_text()))
+
+@app.route(&quot;/&quot;)
+def index():
+    return render_template_string(PAGE_HTML)
+
+if __name__ == &quot;__main__&quot;:
+    app.run(host=&quot;0.0.0.0&quot;, port=5000)
+</code></pre>
+
+<p>前端不引框架，原生 JS 轮询 <code>/api/metrics</code>，每 10 秒刷新一次，根据状态字段染色。核心是三个渲染函数：模块/API 状态用色块，任务表用表格，错误用柱状。</p>
+<pre class="codehilite"><code class="language-python">PAGE_HTML = &quot;&quot;&quot;
+&lt;!DOCTYPE html&gt;
+&lt;html lang=&quot;zh&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;系统健康看板&lt;/title&gt;
+&lt;style&gt;
+  body { font-family: -apple-system, &quot;Segoe UI&quot;, sans-serif; background:#f6f7f9;
+         margin:0; padding:24px; color:#222; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .ts { color:#888; font-size:12px; margin-bottom:20px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+          gap:16px; }
+  .card { background:#fff; border-radius:8px; padding:16px;
+          box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .card h2 { font-size:14px; margin:0 0 12px; color:#555; font-weight:600; }
+  .row { display:flex; justify-content:space-between; padding:6px 0;
+         border-bottom:1px solid #f0f0f0; font-size:13px; }
+  .row:last-child { border-bottom:none; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+         margin-right:6px; }
+  .ok { background:#22c55e; } .error { background:#ef4444; }
+  .alive { background:#22c55e; } .dead { background:#ef4444; }
+  .unknown { background:#f59e0b; }
+  .badge { font-size:11px; padding:2px 6px; border-radius:4px; }
+  .badge.ok { background:#dcfce7; color:#166534; }
+  .badge.fail { background:#fee2e2; color:#991b1b; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  td, th { text-align:left; padding:4px 6px; border-bottom:1px solid #f0f0f0; }
+  .bar { height:6px; background:#e5e7eb; border-radius:3px; overflow:hidden; }
+  .bar &gt; span { display:block; height:100%; background:#3b82f6; }
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;h1&gt;系统健康看板&lt;/h1&gt;
+&lt;div class=&quot;ts&quot; id=&quot;ts&quot;&gt;加载中…&lt;/div&gt;
+&lt;div class=&quot;grid&quot;&gt;
+  &lt;div class=&quot;card&quot;&gt;&lt;h2&gt;模块状态&lt;/h2&gt;&lt;div id=&quot;modules&quot;&gt;&lt;/div&gt;&lt;/div&gt;
+  &lt;div class=&quot;card&quot;&gt;&lt;h2&gt;API 连接&lt;/h2&gt;&lt;div id=&quot;apis&quot;&gt;&lt;/div&gt;&lt;/div&gt;
+  &lt;div class=&quot;card&quot;&gt;&lt;h2&gt;缓存使用&lt;/h2&gt;&lt;div id=&quot;cache&quot;&gt;&lt;/div&gt;&lt;/div&gt;
+  &lt;div class=&quot;card&quot;&gt;&lt;h2&gt;错误统计 (24h)&lt;/h2&gt;&lt;div id=&quot;errors&quot;&gt;&lt;/div&gt;&lt;/div&gt;
+  &lt;div class=&quot;card&quot; style=&quot;grid-column:1/-1&quot;&gt;
+    &lt;h2&gt;最近任务&lt;/h2&gt;&lt;div id=&quot;tasks&quot;&gt;&lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+&lt;script&gt;
+function dot(status) {
+  const cls = ['ok','alive'].includes(status) ? 'ok'
+            : ['error','dead'].includes(status) ? 'error' : 'unknown';
+  return `&lt;span class=&quot;dot ${cls}&quot;&gt;&lt;/span&gt;`;
+}
+function renderModules(list) {
+  document.getElementById('modules').innerHTML = list.map(m =&gt;
+    `&lt;div class=&quot;row&quot;&gt;&lt;span&gt;${dot(m.status)}${m.name}&lt;/span&gt;
+     &lt;span style=&quot;color:#888&quot;&gt;${m.detail}&lt;/span&gt;&lt;/div&gt;`).join('');
+}
+function renderApis(list) {
+  document.getElementById('apis').innerHTML = list.map(a =&gt;
+    `&lt;div class=&quot;row&quot;&gt;&lt;span&gt;${dot(a.status)}${a.name}&lt;/span&gt;
+     &lt;span style=&quot;color:#888&quot;&gt;${a.detail}&lt;/span&gt;&lt;/div&gt;`).join('');
+}
+function renderCache(c) {
+  const el = document.getElementById('cache');
+  if (c.status !== 'ok') { el.innerHTML = `&lt;div class=&quot;row&quot;&gt;连接失败: ${c.detail}&lt;/div&gt;`; return; }
+  const pct = Math.min(100, c.used_mb / c.peak_mb * 100 || 0);
+  el.innerHTML = `
+    &lt;div class=&quot;row&quot;&gt;&lt;span&gt;已用&lt;/span&gt;&lt;span&gt;${c.used_mb} MB / 峰值 ${c.peak_mb} MB&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;bar&quot; style=&quot;margin:8px 0&quot;&gt;&lt;span style=&quot;width:${pct}%&quot;&gt;&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;row&quot;&gt;&lt;span&gt;命中率&lt;/span&gt;&lt;span&gt;${c.hit_rate}%&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;row&quot;&gt;&lt;span&gt;Key 数量&lt;/span&gt;&lt;span&gt;${c.keys}&lt;/span&gt;&lt;/div&gt;`;
+}
+function renderErrors(e) {
+  const el = document.getElementById('errors');
+  if (!e.count) { el.innerHTML = '&lt;div class=&quot;row&quot;&gt;24h 内无错误&lt;/div&gt;'; return; }
+  const items = Object.entries(e.by_type).map(([k,v]) =&gt;
+    `&lt;div class=&quot;row&quot;&gt;&lt;span&gt;${k}&lt;/span&gt;&lt;span&gt;${v}&lt;/span&gt;&lt;/div&gt;`).join('');
+  el.innerHTML = `&lt;div class=&quot;row&quot;&gt;&lt;strong&gt;总计&lt;/strong&gt;&lt;strong&gt;${e.count}&lt;/strong&gt;&lt;/div&gt;` + items;
+}
+function renderTasks(t) {
+  const rows = t.recent.slice().reverse().map(r =&gt; {
+    const badge = r.success ? '&lt;span class=&quot;badge ok&quot;&gt;成功&lt;/span&gt;'
+                            : '&lt;span class=&quot;badge fail&quot;&gt;失败&lt;/span&gt;';
+    const err = r.error ? ` &lt;span style=&quot;color:#ef4444&quot;&gt;${r.error}&lt;/span&gt;` : '';
+    return `&lt;tr&gt;&lt;td&gt;${r.ts.slice(11,19)}&lt;/td&gt;&lt;td&gt;${r.name}&lt;/td&gt;
+            &lt;td&gt;${badge}${err}&lt;/td&gt;&lt;td&gt;${r.duration}s&lt;/td&gt;&lt;/tr&gt;`;
+  }).join('');
+  const s = t.stats;
+  document.getElementById('tasks').innerHTML = `
+    &lt;div style=&quot;font-size:12px;color:#666;margin-bottom:8px&quot;&gt;
+      近 ${s.total} 次执行，失败 ${s.failed} 次（${s.fail_rate}%），平均耗时 ${s.avg_duration}s
+    &lt;/div&gt;
+    &lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;时间&lt;/th&gt;&lt;th&gt;任务&lt;/th&gt;&lt;th&gt;结果&lt;/th&gt;&lt;th&gt;耗时&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+    &lt;tbody&gt;${rows}&lt;/tbody&gt;&lt;/table&gt;`;
+}
+async function refresh() {
+  try {
+    const r = await fetch('/api/metrics');
+    const d = await r.json();
+    if (d.error) return;
+    document.getElementById('ts').textContent = '最后更新: ' + d.ts;
+    renderModules(d.modules); renderApis(d.apis);
+    renderCache(d.cache); renderErrors(d.errors); renderTasks(d.tasks);
+  } catch (e) {
+    document.getElementById('ts').textContent = '拉取失败: ' + e;
+  }
+}
+refresh();
+setInterval(refresh, 10000);
+&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+&quot;&quot;&quot;
+</code></pre>
+
+<h2 id="_6">定时刷新与部署</h2>
+<p>采集和展示分开跑，两个进程各自独立：</p>
+<pre class="codehilite"><code class="language-bash"># 采集器：每 30 秒写一次快照
+while true; do python collector.py &gt;&gt; collector.log 2&gt;&amp;1; sleep 30; done
+
+# Web 服务
+python app.py
+</code></pre>
+
+<p>如果不想用 shell 循环，用 APScheduler 更规范：</p>
+<pre class="codehilite"><code class="language-python">from apscheduler.schedulers.blocking import BlockingScheduler
+from collector import collect_all
+
+sched = BlockingScheduler()
+sched.add_job(collect_all, &quot;interval&quot;, seconds=30)
+sched.start()
+</code></pre>
+
+<p>部署上，个人用 <code>nohup</code> 或 <code>systemd</code> 起两个服务即可。前端轮询间隔 10 秒，采集间隔 30 秒，页面最多看到 40 秒前的数据，对健康监控来说完全够用。如果希望更实时，把采集间隔调到 10 秒，代价是多几次 API 探活请求。</p>
+<h3 id="_7">几个实践细节</h3>
+<p><strong>探活别打真实业务接口。</strong> 给每个外部服务配一个轻量 <code>/ping</code> 或 <code>/health</code> 端点，别用下单或查询接口探活，避免产生副作用和限流。</p>
+<p><strong>状态判定要有阈值。</strong> 比如 API 响应时间超过 1 秒就标黄，连续 3 次失败才标红，避免单次网络抖动误报。可以在采集器里维护一个滑动窗口：</p>
+<pre class="codehilite"><code class="language-python">from collections import deque
+_api_history = {}
+
+def check_api_with_threshold(name, url, fail_threshold=3):
+    result = check_api(name, url)
+    hist = _api_history.setdefault(name, deque(maxlen=fail_threshold))
+    hist.append(result[&quot;status&quot;] == &quot;error&quot;)
+    if all(hist) and len(hist) == fail_threshold:
+        result[&quot;status&quot;] = &quot;error&quot;
+        result[&quot;detail&quot;] += &quot; (连续失败)&quot;
+    return result
+</code></pre>
+
+<p><strong>错误日志要带类型。</strong> 写 <code>errors.jsonl</code> 时，<code>type</code> 字段用异常类名（<code>TimeoutError</code>、<code>ConnectionError</code>），聚合出来的分布才有意义。</p>
+<p>**看</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">监控面板</span><span class="tag-badge">健康看板</span><span class="tag-badge">Python</span><span class="tag-badge">可视化</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
