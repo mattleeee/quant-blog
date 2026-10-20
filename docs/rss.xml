@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>从零搭建量化交易系统：50篇文章的总结与回顾</title>
+            <link>https://www.hkcode.dpdns.org/posts/50.html</link>
+            <description>从零搭建量化交易系统：50篇文章的总结与回顾
+
+50篇文章写下来，这套量化交易系统从一行pip install开始，到现在跑在实盘环境里稳定运行了几个月。这一篇做个系统性回顾，把架构全貌、模块设计、踩过的坑和后续方向一次讲清楚。代码细节前面都展开过，这里只提炼方法论。...</description>
+            <pubDate>2026-10-20</pubDate>
+            <category>系统运维</category>
+        </item>
+        <item>
             <title>自动化系统监控面板：用Python搭建简单的健康看板</title>
             <link>https://www.hkcode.dpdns.org/posts/49.html</link>
             <description>自动化系统监控面板：用Python搭建简单的健康看板
@@ -167,13 +176,6 @@
             <link>https://www.hkcode.dpdns.org/posts/31.html</link>
             <description>做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。 问题在于：这种弱信号到底值不值得执行？ 直接上实盘肯定不行，得先回测。但弱信号的回测和强信号不一样——强信号样本少但质量高，弱信...</description>
             <pubDate>2026-09-30</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>保底止损自适应阈值设计：不再硬编码百分比</title>
-            <link>https://www.hkcode.dpdns.org/posts/30.html</link>
-            <description>问题的起点 几乎所有策略回测代码里都有这么一行： stop_loss_pct = 0.02 # 2%止损 写死一个百分比，简单、直观、能跑。但实盘跑一段时间就会发现两个问题： 低波动品种被频繁扫损。2% 对某些标的来说就是日常噪音，价格来回晃一圈，止损被打掉，然后行情按原方向走。 高波动品种止损形同虚设。同样是 2%，...</description>
-            <pubDate>2026-09-29</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
