@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>从零搭建量化交易系统：50篇文章的总结与回顾 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="从零搭建量化交易系统：50篇文章的总结与回顾
+
+50篇文章写下来，这套量化交易系统从一行pip install开始，到现在跑在实盘环境里稳定运行了几个月。这一篇做个系统性回顾，把架构全貌、模块设计、踩过的坑和后续方向一次讲清楚。...">
+    <meta name="keywords" content="总结,回顾,量化交易,系统架构">
+    <meta property="og:title" content="从零搭建量化交易系统：50篇文章的总结与回顾">
+    <meta property="og:description" content="从零搭建量化交易系统：50篇文章的总结与回顾
+
+50篇文章写下来，这套量化交易系统从一行pip install开始，到现在跑在实盘环境里稳定运行了几个月。这一篇做个系统性回顾，把架构全貌、模块设计、踩过的坑和后续方向一次讲清楚。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/50.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>从零搭建量化交易系统：50篇文章的总结与回顾</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-20</span>
+                <span class="category"><span class="tag-badge">系统运维</span></span>
+            </div>
+            <div class="post-content">
+<p>50篇文章写下来，这套量化交易系统从一行<code>pip install</code>开始，到现在跑在实盘环境里稳定运行了几个月。这一篇做个系统性回顾，把架构全貌、模块设计、踩过的坑和后续方向一次讲清楚。代码细节前面都展开过，这里只提炼方法论。</p>
+<h2 id="_1">一、系统架构全貌</h2>
+<p>整套系统最终收敛成六个核心层，层与层之间通过明确的数据契约解耦：</p>
+<pre class="codehilite"><code>┌─────────────────────────────────────────────┐
+│  策略层 (Strategy)                            │
+│  - 信号生成 / 仓位决策 / 风控钩子              │
+├─────────────────────────────────────────────┤
+│  组合层 (Portfolio)                           │
+│  - 持仓管理 / 资金分配 / 再平衡                │
+├─────────────────────────────────────────────┤
+│  执行层 (Execution)                           │
+│  - 订单路由 / 撮合对接 / 成交回报              │
+├─────────────────────────────────────────────┤
+│  风控层 (Risk)                                │
+│  - 事前校验 / 事中监控 / 事后归因              │
+├─────────────────────────────────────────────┤
+│  数据层 (Data)                                │
+│  - 行情采集 / 清洗 / 存储 / 复权               │
+├─────────────────────────────────────────────┤
+│  运维层 (Ops)                                 │
+│  - 调度 / 日志 / 告警 / 状态持久化             │
+└─────────────────────────────────────────────┘
+</code></pre>
+
+<p>关键设计原则只有一条：<strong>任何一层挂掉，其他层要能感知并安全降级</strong>。数据层断了，策略层收到的是"数据陈旧"信号而不是脏数据；执行层超时，风控层要能强制平掉异常敞口。</p>
+<p>用配置驱动整个系统，是所有模块能拼起来的前提：</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+from typing import Dict, List
+
+@dataclass
+class SystemConfig:
+    data: Dict = field(default_factory=lambda: {
+        &quot;source&quot;: &quot;local&quot;,
+        &quot;bar_interval&quot;: &quot;1m&quot;,
+        &quot;stale_threshold_sec&quot;: 120,
+        &quot;adjust&quot;: &quot;qfq&quot;,
+    })
+    risk: Dict = field(default_factory=lambda: {
+        &quot;max_position_pct&quot;: 0.2,
+        &quot;max_drawdown_pct&quot;: 0.15,
+        &quot;max_order_notional&quot;: 1_000_000,
+        &quot;daily_loss_limit&quot;: 0.03,
+    })
+    execution: Dict = field(default_factory=lambda: {
+        &quot;order_timeout_sec&quot;: 5,
+        &quot;retry&quot;: 2,
+        &quot;mode&quot;: &quot;paper&quot;,  # paper / live
+    })
+    ops: Dict = field(default_factory=lambda: {
+        &quot;log_level&quot;: &quot;INFO&quot;,
+        &quot;alert_channel&quot;: &quot;webhook&quot;,
+        &quot;state_backend&quot;: &quot;sqlite&quot;,
+    })
+
+    def validate(self) -&gt; List[str]:
+        errors = []
+        if self.risk[&quot;max_position_pct&quot;] &lt;= 0 or self.risk[&quot;max_position_pct&quot;] &gt; 1:
+            errors.append(&quot;max_position_pct 必须在 (0, 1] 区间&quot;)
+        if self.execution[&quot;mode&quot;] not in (&quot;paper&quot;, &quot;live&quot;):
+            errors.append(&quot;execution.mode 非法&quot;)
+        return errors
+</code></pre>
+
+<p>配置校验放在启动阶段，比运行到一半才发现参数越界要省事得多。</p>
+<h2 id="_2">二、各模块关键设计总结</h2>
+<h3 id="_3">数据层：把"数据质量"当成一等公民</h3>
+<p>回测和实盘最大的差异往往不在策略，而在数据。数据层最终沉淀出三条铁律：</p>
+<ol>
+<li><strong>所有行情落库前先做完整性校验</strong>（时间戳单调、无重复、缺口标记），而不是在使用时临时判断；</li>
+<li><strong>复权因子单独存储</strong>，行情原始数据永远不动，复权在读取时计算；</li>
+<li><strong>数据陈旧检测前置到策略入口</strong>，超过阈值直接拒绝信号，而不是让策略拿着旧数据做决策。</li>
+</ol>
+<h3 id="_4">策略层：策略只做一件事——产出目标仓位</h3>
+<p>早期版本里策略直接调下单接口，后来全部改成策略只输出"目标仓位向量"，由组合层统一算差额、拆订单。这个改动让回测和实盘共用同一套信号逻辑，也让风控有了统一的介入点。</p>
+<pre class="codehilite"><code class="language-python">from abc import ABC, abstractmethod
+import pandas as pd
+
+class BaseStrategy(ABC):
+    @abstractmethod
+    def generate_targets(self, bars: pd.DataFrame) -&gt; pd.Series:
+        &quot;&quot;&quot;返回 index=symbol, value=目标权重，范围 [-1, 1]&quot;&quot;&quot;
+        ...
+
+class MovingAverageCross(BaseStrategy):
+    def __init__(self, fast: int = 10, slow: int = 30):
+        self.fast, self.slow = fast, slow
+
+    def generate_targets(self, bars: pd.DataFrame) -&gt; pd.Series:
+        # bars: 多标的收盘价，columns=symbol
+        fast_ma = bars.rolling(self.fast).mean()
+        slow_ma = bars.rolling(self.slow).mean()
+        signal = (fast_ma &gt; slow_ma).astype(float)
+        # 等权分配到有信号的标的
+        counts = signal.sum(axis=1).replace(0, 1)
+        return signal.div(counts, axis=0).iloc[-1]
+</code></pre>
+
+<h3 id="_5">执行层：幂等是第一要求</h3>
+<p>订单是整条链路里最容易出问题的地方——网络重试、接口超时、进程重启，都可能造成重复下单。执行层最终采用"客户端订单 ID + 状态机"的方案：每笔订单生成唯一 <code>client_order_id</code>，本地状态机记录 <code>PENDING → SUBMITTED → PARTIAL → FILLED / CANCELLED / REJECTED</code>，任何重试都先查状态再决定动作。</p>
+<h3 id="_6">风控层：三层拦截</h3>
+<ul>
+<li><strong>事前</strong>：下单前校验名义金额、仓位上限、单日亏损；</li>
+<li><strong>事中</strong>：定时扫描持仓，发现敞口超限或回撤触线直接生成减仓指令；</li>
+<li><strong>事后</strong>：每日收盘归因，把盈亏拆到策略/标的/交易成本上。</li>
+</ul>
+<h3 id="_7">运维层：状态必须可恢复</h3>
+<p>系统重启后要能"接着跑"，靠的是把持仓、挂单、当日已实现盈亏全部持久化。用 SQLite 足够，关键是<strong>每次状态变更和对应操作在同一事务语义内</strong>，避免出现"订单发了但状态没记"的幽灵单。</p>
+<h2 id="_8">三、踩过的坑汇总</h2>
+<p>按杀伤力排序，这几个坑值得每个自己搭系统的人提前看：</p>
+<ol>
+<li><strong>回测前视偏差</strong>：用当日收盘价算信号又用当日收盘价成交，回测曲线漂亮得离谱。修正方式是信号基于 <code>t</code> 收盘生成，成交按 <code>t+1</code> 开盘价。</li>
+<li><strong>复权方式混用</strong>：数据层用后复权，回测代码里又手动乘了一次复权因子，收益直接翻倍。教训是复权只在一个地方做。</li>
+<li><strong>浮点仓位误差</strong>：<code>0.1 + 0.2 != 0.3</code> 导致持仓校验频繁误报。所有仓位比较统一用 <code>abs(a - b) &lt; 1e-8</code>。</li>
+<li><strong>时间戳时区</strong>：行情源有的给 UTC 有的给本地时间，跨时区标的直接错位。全系统统一存 UTC，展示层再转。</li>
+<li><strong>重试风暴</strong>：接口超时后无退避地重试，把上游打挂。改为指数退避 + 熔断。</li>
+<li><strong>日志里泄露敏感信息</strong>：早期把完整请求体打进日志，包含密钥。日志脱敏要做在写入前。</li>
+<li><strong>进程无守护</strong>：半夜进程挂了没人知道。加心跳上报 + 告警是必须的，不能靠"每天早上看一眼"。</li>
+</ol>
+<h2 id="_9">四、后续优化方向</h2>
+<p>系统能跑不代表跑得好，接下来几个方向按优先级排：</p>
+<ul>
+<li><strong>执行质量评估</strong>：目前只记录成交价，缺少和 VWAP/TWAP 基准的对比，无法量化滑点成本；</li>
+<li><strong>策略组合层</strong>：现在多策略是简单资金切分，缺少相关性约束和动态权重；</li>
+<li><strong>回测引擎性能</strong>：向量化回测在标的数量上千后变慢，考虑引入事件驱动 + 增量计算；</li>
+<li><strong>配置热更新</strong>：风控阈值目前改配置要重启，改成运行时可调；</li>
+<li><strong>可观测性</strong>：加 Prometheus 指标，把延迟、成交率、拒单率做成看板。</li>
+</ul>
+<h2 id="_10">五、给新手的建议</h2>
+<ul>
+<li><strong>先跑通最小闭环，再谈优化</strong>：一条数据 → 一个信号 → 一笔纸面成交 → 一条日志，这个闭环通了，系统骨架就立住了。</li>
+<li><strong>回测和实盘共用代码路径</strong>，差异只允许出现在执行层的适配器里。两套代码是 bug 的温床。</li>
+<li><strong>把日志和状态持久化放在第一天做</strong>，不是"以后再补"。排查问题时你会感谢当时的自己。</li>
+<li><strong>风控先写，策略后写</strong>。没有风控的策略系统，实盘第一天就可能教你做人。</li>
+<li><strong>别迷信回测曲线</strong>，重点看交易成本敏感性、参数稳定性、极端行情下的表现。</li>
+<li><strong>小资金实盘验证</strong>，纸面交易和真金白银之间隔着流动性、滑点和心理，早发现早修。</li>
+</ul>
+<p>50 篇下来，最大的体会是：量化系统 80% 的工作量在数据和运维，策略本身反而是相对轻的部分。把工程底座打牢，策略迭代才有意义。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">总结</span><span class="tag-badge">回顾</span><span class="tag-badge">量化交易</span><span class="tag-badge">系统架构</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
