@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-Posting Automation: One Article, Three Platforms - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Publishing the same article to three places sounds trivial until you actually build it....">
+    <meta name="keywords" content="cross-posting,GitHub Pages,Juejin,CSDN,failure isolation">
+    <meta property="og:title" content="Cross-Posting Automation: One Article, Three Platforms">
+    <meta property="og:description" content="Publishing the same article to three places sounds trivial until you actually build it....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/22.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Cross-Posting Automation: One Article, Three Platforms</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-20</span>
+                <span class="category"><span class="tag-badge">API Integration</span></span>
+            </div>
+            <div class="post-content">
+<p>Publishing the same article to three places sounds trivial until you actually build it. The canonical copy lives on a self-hosted static site built from Markdown and pushed to GitHub Pages. Juejin accepts a bearer token and has an editor-friendly draft API. CSDN doesn't really offer a supported write API, so you drive it with cookies and the same internal endpoints the web editor uses. Three different auth models, three different content rules, three different ways to fail.</p>
+<p>The design principle that makes this manageable: <strong>the canonical copy is the source of truth, and every secondary platform is best-effort.</strong> If Juejin is down, that is a Juejin problem, not an article problem. The run should still succeed.</p>
+<h2 id="the-pipeline-shape">The pipeline shape</h2>
+<p>A publish run has four phases:</p>
+<ol>
+<li><strong>Render and verify</strong> — build the site locally, check the Markdown converts cleanly, confirm required front matter exists.</li>
+<li><strong>Publish canonical</strong> — commit and push to GitHub. This is the only step allowed to fail the run.</li>
+<li><strong>Fan out</strong> — attempt each secondary platform independently. Each returns a structured result, never raises.</li>
+<li><strong>Summarize</strong> — push one notification with per-platform status.</li>
+</ol>
+<p>The key word in phase 3 is <em>independently</em>. No shared try/except around the loop, no early exit on first failure. Each platform adapter gets its own attempt and its own timeout.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+from enum import Enum
+
+class Status(str, Enum):
+    OK = &quot;ok&quot;
+    SKIPPED = &quot;skipped&quot;
+    AUTH_EXPIRED = &quot;auth_expired&quot;
+    FAILED = &quot;failed&quot;
+    TIMEOUT = &quot;timeout&quot;
+
+@dataclass
+class PublishResult:
+    platform: str
+    status: Status
+    url: str | None = None
+    detail: str = &quot;&quot;
+
+    @property
+    def needs_attention(self) -&gt; bool:
+        return self.status in (Status.AUTH_EXPIRED, Status.FAILED, Status.TIMEOUT)
+</code></pre>
+
+<p>Adapters never raise past their boundary. They translate exceptions into a <code>Status</code>. That single rule removes most of the orchestration complexity downstream.</p>
+<h2 id="canonical-publish-first-and-only-it-can-fail-the-run">Canonical publish first, and only it can fail the run</h2>
+<p>The static site build is deterministic and cheap to verify. Render the article, check that the output HTML contains the expected title and at least one code block, then push.</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+from pathlib import Path
+
+def publish_canonical(article: Path) -&gt; PublishResult:
+    build = subprocess.run(
+        [&quot;python&quot;, &quot;-m&quot;, &quot;build_site&quot;, &quot;--strict&quot;, str(article)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if build.returncode != 0:
+        return PublishResult(&quot;github-pages&quot;, Status.FAILED,
+                             detail=build.stderr[-2000:])
+
+    commit = subprocess.run(
+        [&quot;git&quot;, &quot;add&quot;, &quot;-A&quot;], capture_output=True, text=True,
+    )
+    commit = subprocess.run(
+        [&quot;git&quot;, &quot;commit&quot;, &quot;-m&quot;, f&quot;publish: {article.stem}&quot;],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0 and &quot;nothing to commit&quot; not in commit.stdout:
+        return PublishResult(&quot;github-pages&quot;, Status.FAILED,
+                             detail=commit.stdout + commit.stderr)
+
+    push = subprocess.run(
+        [&quot;git&quot;, &quot;push&quot;], capture_output=True, text=True, timeout=120,
+    )
+    if push.returncode != 0:
+        return PublishResult(&quot;github-pages&quot;, Status.FAILED,
+                             detail=push.stderr[-2000:])
+
+    return PublishResult(&quot;github-pages&quot;, Status.OK,
+                         url=f&quot;https://example.dev/posts/{article.stem}/&quot;)
+</code></pre>
+
+<p>If this returns <code>FAILED</code>, the orchestrator stops and exits non-zero. Nothing gets posted anywhere else, because posting a secondary copy of an article that isn't live on your own site is backwards. Once canonical succeeds, the run is considered successful regardless of what happens next.</p>
+<h2 id="cookie-hygiene-for-csdn">Cookie hygiene for CSDN</h2>
+<p>The CSDN adapter needs a session cookie. The tempting shortcut is to paste the cookie string into a CI variable or a shell script. Don't. Cookie strings are long, contain characters that break shell quoting, rotate silently, and end up in logs. Keep them in a JSON file that is gitignored and injected at runtime.</p>
+<pre class="codehilite"><code class="language-json">{
+  &quot;cookies&quot;: [
+    {&quot;name&quot;: &quot;UserName&quot;, &quot;value&quot;: &quot;...&quot;},
+    {&quot;name&quot;: &quot;UserToken&quot;, &quot;value&quot;: &quot;...&quot;},
+    {&quot;name&quot;: &quot;SESSION&quot;, &quot;value&quot;: &quot;...&quot;}
+  ],
+  &quot;saved_at&quot;: &quot;2025-01-14T09:30:00Z&quot;
+}
+</code></pre>
+
+<p>Load it with a small helper that validates shape before use:</p>
+<pre class="codehilite"><code class="language-python">import json
+from pathlib import Path
+
+COOKIE_FILE = Path.home() / &quot;.config&quot; / &quot;crosspost&quot; / &quot;csdn.json&quot;
+
+def load_cookies(path: Path = COOKIE_FILE) -&gt; list[dict]:
+    if not path.exists():
+        raise FileNotFoundError(f&quot;cookie file missing: {path}&quot;)
+    data = json.loads(path.read_text(encoding=&quot;utf-8&quot;))
+    cookies = data.get(&quot;cookies&quot;)
+    if not isinstance(cookies, list) or not cookies:
+        raise ValueError(&quot;cookie file has no usable cookies&quot;)
+    for c in cookies:
+        if not {&quot;name&quot;, &quot;value&quot;} &lt;= c.keys():
+            raise ValueError(f&quot;malformed cookie entry: {c.get('name')!r}&quot;)
+    return cookies
+</code></pre>
+
+<p>Two rules that save pain later:</p>
+<ul>
+<li><strong>Never log cookie values.</strong> Log names and count only. When you debug, you need to know <em>which</em> cookie is missing, not its value.</li>
+<li><strong>Keep the file out of git and out of shell history.</strong> One file, one path, one loader. If you refresh cookies, you overwrite the file, and nothing else changes.</li>
+</ul>
+<h2 id="detect-expiry-before-you-publish">Detect expiry before you publish</h2>
+<p>The worst failure mode is a half-published article: the draft gets created, then the publish call fails because the session expired, leaving a broken draft behind. Check auth <em>first</em> with a cheap read call.</p>
+<p>For CSDN, hit an endpoint that requires the session and returns the current user. For Juejin, call the token-validated "me" endpoint. Both are cheap and both fail fast.</p>
+<pre class="codehilite"><code class="language-python">import httpx
+
+def check_csdn_session(cookies: list[dict]) -&gt; Status:
+    jar = {c[&quot;name&quot;]: c[&quot;value&quot;] for c in cookies}
+    try:
+        r = httpx.get(
+            &quot;https://bizapi.csdn.net/blog-console-api/v1/user/info&quot;,
+            cookies=jar,
+            headers={&quot;Referer&quot;: &quot;https://mp.csdn.net/&quot;},
+            timeout=15,
+        )
+    except httpx.TimeoutException:
+        return Status.TIMEOUT
+
+    if r.status_code in (401, 403):
+        return Status.AUTH_EXPIRED
+    if r.status_code != 200:
+        return Status.FAILED
+    body = r.json()
+    if body.get(&quot;code&quot;) != 200:
+        return Status.AUTH_EXPIRED
+    return Status.OK
+</code></pre>
+
+<p>When the check returns <code>AUTH_EXPIRED</code>, the adapter returns that status immediately and does not touch the article. The summary then tells you to refresh that one cookie file, and you don't have to clean up a stray draft.</p>
+<h2 id="content-rules-differ-so-normalize-once">Content rules differ, so normalize once</h2>
+<p>Juejin and CSDN both accept Markdown, but not the same Markdown. Differences that bite in practice:</p>
+<ul>
+<li><strong>Images.</strong> Juejin requires images to be hosted on its own CDN; external URLs render inconsistently. CSDN tolerates external images but strips some attributes. The safe move is to upload images once to each platform and rewrite URLs per target.</li>
+<li><strong>Code fences.</strong> Both handle fenced code, but CSDN's editor sometimes mangles nested fences. Flatten any triple-backtick-inside-triple-backtick before sending.</li>
+<li><strong>Front matter.</strong> Neither platform wants your YAML front matter. Strip it before the body leaves your pipeline.</li>
+<li><strong>Length and title limits.</strong> Both truncate long titles silently. Validate title length before the call, not after.</li>
+</ul>
+<p>Do the normalization in one place, keyed by platform, so the adapters stay dumb:</p>
+<pre class="codehilite"><code class="language-python">import re
+
+FRONT_MATTER = re.compile(r&quot;\A---\n.*?\n---\n&quot;, re.DOTALL)
+NESTED_FENCE = re.compile(r&quot;````.*?````&quot;, re.DOTALL)
+
+def normalize(markdown: str, platform: str) -&gt; str:
+    body = FRONT_MATTER.sub(&quot;&quot;, markdown, count=1)
+    body = NESTED_FENCE.sub(lambda m: m.group(0).replace(&quot;````&quot;, &quot;```&quot;), body)
+    if platform in (&quot;juejin&quot;, &quot;csdn&quot;):
+        body = rewrite_images(body, platform)
+    return body.strip()
+</code></pre>
+
+<p><code>rewrite_images</code> uploads each referenced image to the platform's image API and swaps the URL. Cache the mapping by content hash so a re-run doesn't re-upload the same image.</p>
+<h2 id="the-orchestrator">The orchestrator</h2>
+<p>With adapters that never raise, the fan-out is a short loop. The one thing worth adding is a per-platform timeout so a hanging CSDN request can't stall the run.</p>
+<pre class="codehilite"><code class="language-python">import concurrent.futures as cf
+
+ADAPTERS = {
+    &quot;juejin&quot;: publish_juejin,
+    &quot;csdn&quot;: publish_csdn,
+}
+
+def fan_out(markdown: str, meta: dict) -&gt; list[PublishResult]:
+    results: list[PublishResult] = []
+    with cf.ThreadPoolExecutor(max_workers=len(ADAPTERS)) as pool:
+        futures = {
+            pool.submit(safe_publish, name, fn, markdown, meta): name
+            for name, fn in ADAPTERS.items()
+        }
+        for fut in cf.as_completed(futures, timeout=180):
+            results.append(fut.result())
+    return results
+
+def safe_publish(name, fn, markdown, meta) -&gt; PublishResult:
+    try:
+        return fn(markdown, meta)
+    except Exception as exc:
+        return PublishResult(name, Status.FAILED, detail=repr(exc)[:500])
+</code></pre>
+
+<p><code>safe_publish</code> is the backstop. Adapters should already handle their own errors, but if one slips through, the run still finishes and the summary still reflects reality.</p>
+<h2 id="the-summary-push">The summary push</h2>
+<p>This is the part people skip, and it's the part that makes the system usable. One notification, per-platform status, links where available.</p>
+<pre class="codehilite"><code class="language-python">def format_summary(results: list[PublishResult]) -&gt; str:
+    lines = []
+    for r in sorted(results, key=lambda x: (not x.needs_attention, x.platform)):
+        icon = {Status.OK: &quot;OK&quot;, Status.SKIPPED: &quot;--&quot;,
+                Status.AUTH_EXPIRED: &quot;AUTH&quot;, Status.FAILED: &quot;FAIL&quot;,
+                Status.TIMEOUT: &quot;TIME&quot;}[r.status]
+        line = f&quot;[{icon}] {r.platform}&quot;
+        if r.url:
+            line += f&quot; -&gt; {r.url}&quot;
+        if r.detail:
+            line += f&quot; ({r.detail[:120]})&quot;
+        lines.append(line)
+    return &quot;\n&quot;.join(lines)
+</code></pre>
+
+<p>Sort attention-needed platforms to the top. If the first line says <code>[AUTH] csdn</code>, you know exactly what to do before reading anything else. The notification goes through whatever channel you already use — a webhook, a bot, an email — and the payload is just this string plus the canonical URL.</p>
+<p>Exit code logic is one line:</p>
+<pre class="codehilite"><code class="language-python">canonical_ok = canonical.status == Status.OK
+sys.exit(0 if canonical_ok else 1)
+</code></pre>
+
+<p>Secondary failures never affect the exit code. They affect the summary, which is where you want them.</p>
+<h2 id="what-this-buys-you">What this buys you</h2>
+<p>The pipeline now has one hard dependency (your own site) and two soft ones. A Juejin outage costs you nothing. An expired CSDN cookie costs you one line in a notification and one file refresh. The article is never half-published, because auth is checked before any write, and the canonical copy is always live first.</p>
+<p>The pattern generalizes: any time you fan out to external services with unequal reliability, make the reliable step gate the run, make the unreliable steps independent, and put the truth in one summary instead of scattered logs.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-20 08:46:52</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PUMP</td>
+<td>高质量标的做多</td>
+<td>$0.0044</td>
+<td>$0.0046</td>
+<td>$0.0044</td>
+<td>1:1.6</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">cross-posting</span><span class="tag-badge">GitHub Pages</span><span class="tag-badge">Juejin</span><span class="tag-badge">CSDN</span><span class="tag-badge">failure isolation</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
