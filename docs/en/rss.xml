@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Cross-Posting Automation: One Article, Three Platforms</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/22.html</link>
+            <description>Publishing the same article to three places sounds trivial until you actually build it....</description>
+            <pubDate>2026-10-20</pubDate>
+            <category>API Integration</category>
+        </item>
+        <item>
             <title>Generating Technical Blog Posts with the DeepSeek API</title>
             <link>https://www.hkcode.dpdns.org/en/posts/21.html</link>
             <description>Why the Prompt Is the Whole QA Process A daily pipeline that publishes one or two articles per day in two languages, with no human in the loop, has an uncomfort...</description>
@@ -138,13 +145,6 @@
             <description>Scheduled Python jobs on a shared box have a nasty habit of fighting each other....</description>
             <pubDate>2026-10-06</pubDate>
             <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Surviving Corporate HTTPS Interception: Life Behind Sangfor aTrust</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/9.html</link>
-            <description>Corporate laptops are strange machines. You have admin rights on paper, but every outbound TLS connection is terminated and re-originated by a local agent....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Network &amp; Security</category>
         </item>
     </channel>
 </rss>
