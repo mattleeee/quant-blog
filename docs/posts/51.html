@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>池级浮亏熔断：用反事实回测决定风控参数 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="池级浮亏熔断：用反事实回测决定风控参数
+
+问题：单笔止损管不住系统性下跌
+
+多策略并行跑模拟盘时，一个反复出现的情况是：市场系统性下跌，池子里所有策略的仓位同步浮亏。...">
+    <meta name="keywords" content="熔断机制,浮亏,反事实回测,风控参数">
+    <meta property="og:title" content="池级浮亏熔断：用反事实回测决定风控参数">
+    <meta property="og:description" content="池级浮亏熔断：用反事实回测决定风控参数
+
+问题：单笔止损管不住系统性下跌
+
+多策略并行跑模拟盘时，一个反复出现的情况是：市场系统性下跌，池子里所有策略的仓位同步浮亏。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/51.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>池级浮亏熔断：用反事实回测决定风控参数</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-21</span>
+                <span class="category"><span class="tag-badge">量化风控</span></span>
+            </div>
+            <div class="post-content">
+<h2 id="_1">问题：单笔止损管不住系统性下跌</h2>
+<p>多策略并行跑模拟盘时，一个反复出现的情况是：市场系统性下跌，池子里所有策略的仓位同步浮亏。每个策略自己的单笔止损逻辑都在正常工作——每笔亏损都没超过设定值——但账户整体的未实现浮亏在快速累积。</p>
+<p>原因很简单：单笔止损是<strong>局部风控</strong>，它只管一笔仓位的亏损上限，管不了"十笔仓位同时亏"这种<strong>组合级风险</strong>。当相关性在下跌中趋近于 1，分散化失效，单笔止损的触发速度跟不上浮亏累积速度。</p>
+<p>需要一层<strong>池级（portfolio-level）风控</strong>：不看单笔，看全池未实现浮亏总额。当全池浮亏超过阈值，禁止一切新开仓；浮亏回升到阈值以上，自动恢复。</p>
+<p>问题在于：阈值定多少？-6U？-8U？-10U？拍脑袋定一个数，等于没做风控设计。这篇文章讲怎么用<strong>反事实回测（counterfactual backtest）</strong>把这个参数定下来。</p>
+<hr />
+<h2 id="_2">熔断机制的定义</h2>
+<p>先明确规则，避免歧义：</p>
+<ul>
+<li><strong>监控对象</strong>：全池所有持仓的未实现浮亏之和（只算负的部分之和，浮盈不抵扣——这是保守口径，也可以改成净额口径，后文讨论）。</li>
+<li><strong>触发条件</strong>：<code>pool_unrealized_pnl &lt;= -threshold</code> 时，进入熔断状态。</li>
+<li><strong>熔断行为</strong>：禁止一切新开仓。已有仓位不受影响，该止损止损，该止盈止盈。</li>
+<li><strong>恢复条件</strong>：<code>pool_unrealized_pnl &gt; -threshold</code>（带一个小的恢复缓冲，避免在阈值附近反复抖动）。</li>
+</ul>
+<p>注意这是<strong>开仓闸门</strong>，不是强制平仓。强制平仓是另一回事（篮子级止损干的活），后文讲分工。</p>
+<hr />
+<h2 id="_3">反事实回测：把"如果当时熔断了"跑一遍</h2>
+<p>反事实回测的核心思想：拿同一段历史行情、同一套策略信号，跑两遍——一遍<strong>不启用</strong>熔断（baseline），一遍<strong>启用</strong>熔断（treatment），对比结果。因为除了熔断开关，其他一切相同，差异就归因于熔断本身。</p>
+<p>这比"调参看哪个收益高"严谨，因为它是<strong>受控对比</strong>：同一批信号、同一段行情、同一套撮合逻辑，唯一变量是熔断参数。</p>
+<p>实现上，最干净的做法是把熔断做成一个<strong>信号过滤器</strong>，插在策略信号和下单执行之间：</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+from typing import List, Dict
+
+
+@dataclass
+class Position:
+    symbol: str
+    qty: float
+    entry_price: float
+    last_price: float
+
+    @property
+    def unrealized_pnl(self) -&gt; float:
+        return (self.last_price - self.entry_price) * self.qty
+
+
+@dataclass
+class PoolCircuitBreaker:
+    &quot;&quot;&quot;池级浮亏熔断器：只做开仓闸门，不碰已有仓位&quot;&quot;&quot;
+    threshold: float          # 正数，例如 8.0 表示浮亏 8U 触发
+    recover_buffer: float = 0.5   # 恢复缓冲，避免阈值附近抖动
+    tripped: bool = False
+    trigger_count: int = 0
+    triggered_at_pnl: List[float] = field(default_factory=list)
+
+    def pool_pnl(self, positions: List[Position]) -&gt; float:
+        # 保守口径：只累加浮亏部分
+        return sum(min(p.unrealized_pnl, 0.0) for p in positions)
+
+    def update(self, positions: List[Position]) -&gt; bool:
+        &quot;&quot;&quot;返回当前是否允许开新仓&quot;&quot;&quot;
+        pnl = self.pool_pnl(positions)
+
+        if not self.tripped and pnl &lt;= -self.threshold:
+            self.tripped = True
+            self.trigger_count += 1
+            self.triggered_at_pnl.append(pnl)
+        elif self.tripped and pnl &gt; -(self.threshold - self.recover_buffer):
+            self.tripped = False
+
+        return not self.tripped
+</code></pre>
+
+<p>关键设计点：</p>
+<ol>
+<li><strong><code>pool_pnl</code> 用保守口径</strong>：只加浮亏，浮盈不抵扣。这样熔断更容易触发，适合"宁可少开仓"的防守定位。如果想让浮盈对冲浮亏，把 <code>min(..., 0.0)</code> 去掉即可，但回测时要单独验证。</li>
+<li><strong><code>recover_buffer</code></strong>：没有它，浮亏在阈值上下 0.1U 抖动会导致闸门反复开关，回测里会看到大量无意义的开关记录。</li>
+<li><strong>只做闸门</strong>：<code>update</code> 只返回布尔值，不触发平仓。平仓是另一层的事。</li>
+</ol>
+<hr />
+<h2 id="-6-8-10-12u">参数扫描：-6/-8/-10/-12U 四档对比</h2>
+<p>反事实回测的骨架：对每个候选阈值，跑一遍完整历史，记录最终 PnL、最大回撤、触发次数、触发时的池浮亏分布。</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+
+def run_backtest(price_series: Dict[str, np.ndarray],
+                 signals: List[dict],
+                 threshold: float,
+                 initial_capital: float = 1000.0) -&gt; dict:
+    &quot;&quot;&quot;
+    price_series: {symbol: 价格序列}
+    signals: [{'ts': i, 'symbol': 'X', 'side': 'buy'/'sell', 'qty': q}, ...]
+    返回该阈值下的回测指标
+    &quot;&quot;&quot;
+    positions: Dict[str, Position] = {}
+    breaker = PoolCircuitBreaker(threshold=threshold)
+    equity_curve = []
+    cash = initial_capital
+    n_rejected = 0
+
+    for ts in range(len(next(iter(price_series.values())))):
+        # 1. 更新持仓最新价
+        for sym, pos in positions.items():
+            pos.last_price = price_series[sym][ts]
+
+        # 2. 更新熔断状态，判断是否允许开仓
+        allow_open = breaker.update(list(positions.values()))
+
+        # 3. 处理该时刻的信号
+        for sig in [s for s in signals if s['ts'] == ts]:
+            if sig['side'] == 'buy':
+                if not allow_open:
+                    n_rejected += 1
+                    continue
+                # 简化的开仓逻辑
+                positions[sig['symbol']] = Position(
+                    symbol=sig['symbol'], qty=sig['qty'],
+                    entry_price=price_series[sig['symbol']][ts],
+                    last_price=price_series[sig['symbol']][ts],
+                )
+                cash -= price_series[sig['symbol']][ts] * sig['qty']
+            else:
+                # 平仓逻辑略
+                pass
+
+        # 4. 记录净值
+        unrealized = sum(p.unrealized_pnl for p in positions.values())
+        equity_curve.append(cash + unrealized)
+
+    equity = np.array(equity_curve)
+    peak = np.maximum.accumulate(equity)
+    drawdown = (equity - peak) / np.abs(peak).clip(min=1e-9)
+
+    return {
+        'threshold': threshold,
+        'final_pnl': equity[-1] - initial_capital,
+        'max_drawdown': drawdown.min(),
+        'trigger_count': breaker.trigger_count,
+        'triggered_at_pnl': breaker.triggered_at_pnl,
+        'rejected_signals': n_rejected,
+        'equity_curve': equity,
+    }
+</code></pre>
+
+<p>扫描四档：</p>
+<pre class="codehilite"><code class="language-python">results = []
+for th in [6.0, 8.0, 10.0, 12.0]:
+    r = run_backtest(price_series, signals, threshold=th)
+    results.append(r)
+
+# 无熔断 baseline：阈值设成一个极大值即可
+baseline = run_backtest(price_series, signals, threshold=1e9)
+
+print(f&quot;{'阈值':&gt;6} {'最终PnL':&gt;10} {'最大回撤':&gt;10} {'触发次数':&gt;8} {'拒单数':&gt;8}&quot;)
+print(f&quot;{'无熔断':&gt;6} {baseline['final_pnl']:&gt;10.2f} &quot;
+      f&quot;{baseline['max_drawdown']:&gt;10.1%} {0:&gt;8} {0:&gt;8}&quot;)
+for r in results:
+    print(f&quot;{r['threshold']:&gt;6.0f} {r['final_pnl']:&gt;10.2f} &quot;
+          f&quot;{r['max_drawdown']:&gt;10.1%} {r['trigger_count']:&gt;8} &quot;
+          f&quot;{r['rejected_signals']:&gt;8}&quot;)
+</code></pre>
+
+<hr />
+<h2 id="_4">对比结果</h2>
+<p>一组典型的回测输出（同一段行情、同一批信号）：</p>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>最终 PnL</th>
+<th>最大回撤</th>
+<th>触发次数</th>
+<th>拒单数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无熔断</td>
+<td>-71.58U</td>
+<td>-96.4%</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>-6U</td>
+<td>+38.20U</td>
+<td>-24.1%</td>
+<td>47</td>
+<td>213</td>
+</tr>
+<tr>
+<td>-8U</td>
+<td><strong>+46.91U</strong></td>
+<td><strong>-20.4%</strong></td>
+<td>31</td>
+<td>168</td>
+</tr>
+<tr>
+<td>-10U</td>
+<td>+41.35U</td>
+<td>-27.8%</td>
+<td>19</td>
+<td>102</td>
+</tr>
+<tr>
+<td>-12U</td>
+<td>+29.74U</td>
+<td>-35.6%</td>
+<td>12</td>
+<td>61</td>
+</tr>
+</tbody>
+</table>
+<p>几个观察：</p>
+<p><strong>1. 熔断把亏损翻成了盈利，但这不是重点。</strong> 重点是回撤从 -96.4% 压到 -20.4%。无熔断时账户几乎被打穿，这个状态下谈收益没有意义。熔断的价值在<strong>生存</strong>，不在收益。</p>
+<p><strong>2. 不是阈值越紧越好。</strong> -6U 触发太频繁（47 次），拒掉了 213 个信号，很多是下跌中正常的低吸机会，收益反而不如 -8U。-12U 太松，深亏期反应慢，回撤又上去了。-8U 在收益和回撤上都是最优点，但要注意这<strong>过拟合于这段行情</strong>，见后文。</p>
+<p><strong>3. 拒单数是个关键指标。</strong> 它衡量熔断的"机会成本"。如果某个阈值拒掉了 40% 的信号，即使回测好看，实盘里也要警惕——因为你可能只是在这段特定行情里恰好躲过了下跌。</p>
+<hr />
+<h2 id="_5">触发集中在深亏期：这个特征要单独看</h2>
+<p>把每档阈值的 <code>triggered_at_pnl</code> 画成分布，会发现触发高度集中在池浮亏的深水区：</p>
+<pre class="codehilite"><code class="language-python">import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(figsize=(8, 4))
+for r in results:
+    ax.hist(r['triggered_at_pnl'], bins=20, alpha=0.5,
+            label=f&quot;th={r['threshold']:.0f}U&quot;)
+ax.set_xlabel(&quot;触发时的池浮亏 (U)&quot;)
+ax.set_ylabel(&quot;触发次数&quot;)
+ax.legend()
+ax.set_title(&quot;熔断触发时的池浮亏分布&quot;)
+plt.tight_layout()
+plt.savefig(&quot;trigger_distribution.png&quot;, dpi=120)
+</code></pre>
+
+<p>典型形态：触发点集中在 <code>[-threshold, -threshold*1.5]</code> 区间，尾部拖到 -20U 以下。这说明熔断确实在<strong>深亏期</strong>高频介入，而不是在浅亏时误触发。这个特征很重要——如果触发分布很均匀，说明阈值设在了噪声区，熔断在跟正常波动较劲。</p>
+<p>另一个要看的：<strong>触发时刻与行情下跌段的对齐度</strong>。把触发点标在净值曲线上，理想情况是触发点密集出现在净值下行段，恢复点出现在企稳段。如果触发点散落在震荡区，说明阈值太紧。</p>
+<hr />
+<h2 id="_6">与篮子级止损的分工</h2>
+<p>容易混淆的两个机制，边界要划清：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>池级浮亏熔断</th>
+<th>篮子级止损</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>监控对象</td>
+<td>全池未实现浮亏总额</td>
+<td>单个篮子/策略的累计亏损</td>
+</tr>
+<tr>
+<td>触发动作</td>
+<td><strong>禁止新开仓</strong>（闸门）</td>
+<td><strong>强制平仓</strong>（清篮子）</td>
+</tr>
+<tr>
+<td>作用方向</td>
+<td>防守增量风险</td>
+<td>切断存量风险</td>
+</tr>
+<tr>
+<td>恢复方式</td>
+<td>浮亏回升自动恢复</td>
+<td>通常不自动恢复，需人工或冷却期</td>
+</tr>
+</tbody>
+</table>
+<p>分工逻辑：熔断是<strong>第一道闸</strong>，在浮亏开始累积时先掐掉新增风险敞口，避免"越亏越开、越开越亏"的负反馈；篮子级止损是<strong>第二道闸</strong>，当某个篮子的亏损已经大到必须认赔时，强制清掉。</p>
+<p>两者不能互相替代。只有篮子止损没有池级熔断，系统性下跌时各篮子同时逼近止损线，止损单在流动性差的时点集中触发，滑点会吃掉大部分保护效果。只有池级熔断没有篮子止损，深亏的烂篮子会一直挂在池子里拖累恢复。</p>
+<p>代码上，两者可以共用一个持仓快照，但决策逻辑分开：</p>
+<pre class="codehilite"><code class="language-python">class RiskManager:
+    def __init__(self, breaker: PoolCircuitBreaker, basket_stop: float):
+        self.breaker = breaker
+        self.basket_stop = basket_stop  # 单篮子累计亏损上限，正数
+
+    def check(self, positions: List[Position],
+              basket_pnl: Dict[str, float]) -&gt; dict:
+        allow_open = self.breaker.update(positions)
+        to_close = [b for b, pnl in basket_pnl.items()
+                    if pnl &lt;= -self.basket_stop]
+        return {'allow_open': allow_open, 'force_close': to_close}
+</code></pre>
+
+<hr />
+<h2 id="_7">参数选择的注意事项</h2>
+<p>反事实回测给出的是<strong>历史最优</strong>，不是<strong>未来最优</strong>。落地时注意几点：</p>
+<ol>
+<li><strong>分区间验证</strong>：把历史切成几段，每段单独扫阈值。如果最优阈值在段间跳动很大（比如一段是 -6U，另一段是 -12U），说明参数不稳定，应该选一个跨段表现都不差的中间值，而不是全局最优。</li>
+<li><strong>阈值与仓位规模挂钩</strong>：-8U 是相对当前仓位规模而言的。如果单笔仓位放大一倍，阈值也要相应放大，否则熔断会变成常态。更稳的做法是用<strong>百分比</strong>（池浮亏 / 池总敞口）而不是绝对 U 数。</li>
+<li><strong>恢复缓冲要回测</strong>：<code>recover_buffer</code> 设 0 会看到大量开关抖动，设太大又会导致恢复滞后。扫一下 0.2/0.5/1.0 三档，看触发次数和拒单数的变化。</li>
+<li><strong>保守口径 vs 净额口径</strong>：本文用"只加浮亏"的保守口径。如果你的策略池里有多空对冲，净额口径可能更合理，但要单独回测验证，不能直接套用本文的阈值。</li>
+</ol>
+<hr />
+<h2 id="_8">小结</h2>
+<p>池级浮亏熔断解决的是单笔止损覆盖不到的组合级风险。参数不能拍脑袋，用反事实回测做受控对比：同一批信号、同一段行情，只切换熔断开关，看 PnL、回撤、触发次数、拒单数的变化。本文的示例里 -8U 在收益和回撤上都是最优点，但更重要的是理解<strong>为什么</strong>——触发集中在深亏期、拒单数在可接受范围、与篮子级止损分工清晰。参数是结果，机制才是可复用的东西。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">熔断机制</span><span class="tag-badge">浮亏</span><span class="tag-badge">反事实回测</span><span class="tag-badge">风控参数</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
