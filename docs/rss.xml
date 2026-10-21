@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>池级浮亏熔断：用反事实回测决定风控参数</title>
+            <link>https://www.hkcode.dpdns.org/posts/51.html</link>
+            <description>池级浮亏熔断：用反事实回测决定风控参数
+
+问题：单笔止损管不住系统性下跌
+
+多策略并行跑模拟盘时，一个反复出现的情况是：市场系统性下跌，池子里所有策略的仓位同步浮亏。每个策略自己的单笔止损逻辑都在正常工作——每笔亏损都没超过设定值——但账户整体的未实现浮亏在快速累积。...</description>
+            <pubDate>2026-10-21</pubDate>
+            <category>量化风控</category>
+        </item>
+        <item>
             <title>从零搭建量化交易系统：50篇文章的总结与回顾</title>
             <link>https://www.hkcode.dpdns.org/posts/50.html</link>
             <description>从零搭建量化交易系统：50篇文章的总结与回顾
@@ -169,13 +180,6 @@
             <link>https://www.hkcode.dpdns.org/posts/32.html</link>
             <description>MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。 本文记录一个MACD背离策略从实现到否决的完整过程,包含三层验证:信号触发率稳定性、参数敏感性、以及在不同市场状态下的表现。结论是:这个策略被否决,不是因为亏钱,而是因为不...</description>
             <pubDate>2026-10-01</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>弱信号回测：2个月窗口+70%胜率门槛+3连败拉黑</title>
-            <link>https://www.hkcode.dpdns.org/posts/31.html</link>
-            <description>做量化的人迟早会碰到一类信号：逻辑上说得通，但强度不够。比如均线刚粘合、MACD 柱状体缩短、成交量温和放大——这些条件单独拿出来都不足以构成一个&quot;强信号&quot;，但组合起来可能有一定的统计优势。 问题在于：这种弱信号到底值不值得执行？ 直接上实盘肯定不行，得先回测。但弱信号的回测和强信号不一样——强信号样本少但质量高，弱信...</description>
-            <pubDate>2026-09-30</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
