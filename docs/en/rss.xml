@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Free Domain Options in 2026: From eu.org to DigitalPlat dpdns.org</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/23.html</link>
+            <description>The 2026 Free Domain Landscape If you run static sites for side projects, a domain is the one recurring cost you can usually avoid....</description>
+            <pubDate>2026-10-21</pubDate>
+            <category>Domains &amp; Deployment</category>
+        </item>
+        <item>
             <title>Cross-Posting Automation: One Article, Three Platforms</title>
             <link>https://www.hkcode.dpdns.org/en/posts/22.html</link>
             <description>Publishing the same article to three places sounds trivial until you actually build it....</description>
@@ -136,13 +143,6 @@
             <title>Health Checks for a Fleet of Scheduled Tasks</title>
             <link>https://www.hkcode.dpdns.org/en/posts/7.html</link>
             <description>Nine unattended scheduled tasks is a fleet, whether you call it that or not....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Taming BLAS Threads in Scheduled Python Jobs</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/8.html</link>
-            <description>Scheduled Python jobs on a shared box have a nasty habit of fighting each other....</description>
             <pubDate>2026-10-06</pubDate>
             <category>Windows Automation</category>
         </item>
