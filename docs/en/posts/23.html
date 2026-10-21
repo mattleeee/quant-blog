@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Free Domain Options in 2026: From eu.org to DigitalPlat dpdns.org - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The 2026 Free Domain Landscape If you run static sites for side projects, a domain is the one recurring cost you can usu...">
+    <meta name="keywords" content="free domain,eu.org,dpdns.org,DigitalPlat,DNS">
+    <meta property="og:title" content="Free Domain Options in 2026: From eu.org to DigitalPlat dpdns.org">
+    <meta property="og:description" content="The 2026 Free Domain Landscape If you run static sites for side projects, a domain is the one recurring cost you can usu...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/23.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Free Domain Options in 2026: From eu.org to DigitalPlat dpdns.org</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-21</span>
+                <span class="category"><span class="tag-badge">Domains &amp; Deployment</span></span>
+            </div>
+            <div class="post-content">
+<p>If you run static sites for side projects, a domain is the one recurring cost you can usually avoid. The catch is that free domain providers are unstable in a way paid registries are not. Programs open, close, change terms, or quietly stop approving applications. Planning around them means treating the domain as a replaceable pointer, not as permanent infrastructure.</p>
+<p>The 2026 situation, based on what actually happened over the past couple of years:</p>
+<ul>
+<li><strong>eu.org</strong> still works and is still free, but manual review can take months. It is fine for a project you are just starting; it is not a tool for a site that needs to be live this week.</li>
+<li><strong>DigitalPlat's <code>.us.kg</code> and <code>.xx.kg</code></strong> paused new registrations after abuse problems. Existing domains kept resolving, but you could not onboard.</li>
+<li><strong><code>.qzz.io</code></strong>, also run under the DigitalPlat umbrella, moved to paid-only.</li>
+<li><strong><code>dpdns.org</code></strong> stayed open for new registrations and became the default choice for people who needed a free subdomain quickly.</li>
+</ul>
+<p>The pattern is obvious: subdomain programs are cheap to launch and expensive to police. Expect any free suffix to have a finite lifespan. The engineering response is to make migration cheap, which is what most of this post is about.</p>
+<h2 id="why-dpdnsorg-became-the-default">Why dpdns.org Became the Default</h2>
+<p><code>dpdns.org</code> is a subdomain service, not a registrar. You get something like <code>yourname.dpdns.org</code>, and the provider runs the authoritative nameservers for the zone. You control the records beneath your label.</p>
+<p>What makes it usable for static hosting:</p>
+<ul>
+<li>New registrations are open, so you can get a name in minutes rather than months.</li>
+<li>You can delegate to external nameservers if you want, which matters if you already run DNS elsewhere.</li>
+<li>It works with GitHub Pages, Cloudflare Pages, Netlify, and Vercel without special handling, because those platforms only care about a CNAME pointing at their edge.</li>
+<li>HTTPS works through the hosting platform's certificate automation, so you do not need to manage TLS for the subdomain yourself.</li>
+</ul>
+<p>The trade-offs are the same as any free subdomain. You do not own the name. The zone owner can change rules. There is no EPP transfer, so you cannot move the domain to another registrar—only the records inside it. And whois is essentially meaningless: the registrant is the provider, and your identity lives only in their control panel.</p>
+<p>That is acceptable for a portfolio, a documentation mirror, or a demo site. It is not acceptable for anything where losing the hostname breaks users, email, or payments.</p>
+<h2 id="the-digitalplat-registration-flow">The DigitalPlat Registration Flow</h2>
+<p>The flow is short, but the DNS step is where people get stuck.</p>
+<h3 id="1-register-the-label">1. Register the label</h3>
+<p>Sign in to the DigitalPlat panel, pick the suffix (<code>dpdns.org</code>), and enter the label you want. Registration is effectively first-come-first-served, so short labels go fast. Once accepted, the subdomain appears in your dashboard.</p>
+<p>At this point the domain exists but resolves to nothing useful. You have to point it somewhere.</p>
+<h3 id="2-choose-between-provider-dns-and-external-nameservers">2. Choose between provider DNS and external nameservers</h3>
+<p>Two paths:</p>
+<ul>
+<li><strong>Use DigitalPlat's nameservers.</strong> You add A, AAAA, or CNAME records in their panel. Simplest option, and fine for a single static site.</li>
+<li><strong>Delegate to external nameservers.</strong> You set NS records for your subdomain to, say, Cloudflare's nameservers, then manage everything there. More control, and it makes the next migration easier because your records live in a zone you can export.</li>
+</ul>
+<p>For static sites, the second path is worth the extra ten minutes. Keeping records in a zone you control means that when <code>dpdns.org</code> changes terms, you only need to repoint the NS delegation—your A records, CNAMEs, and TXT records stay put.</p>
+<h3 id="3-point-the-records-at-your-host">3. Point the records at your host</h3>
+<p>For GitHub Pages, the pattern is a CNAME from your subdomain to <code>&lt;user&gt;.github.io</code>, plus the custom domain set in the repository settings. For Cloudflare Pages or Netlify, it is a CNAME to the project's assigned hostname. Either way, the record is a single CNAME and the platform handles the certificate.</p>
+<p>If you are delegating to external nameservers, you create that CNAME in the external zone, not in the DigitalPlat panel. Doing it in both places causes conflicting answers and confusing propagation behavior.</p>
+<h3 id="4-verify-resolution-before-you-announce-anything">4. Verify resolution before you announce anything</h3>
+<p>Do not trust the panel's "active" status. Query the authoritative servers directly:</p>
+<pre class="codehilite"><code class="language-python">import dns.resolver
+
+def check_subdomain(name: str, record_type: str = &quot;CNAME&quot;) -&gt; None:
+    &quot;&quot;&quot;Query the authoritative chain for a subdomain and print what it returns.&quot;&quot;&quot;
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = [&quot;1.1.1.1&quot;, &quot;8.8.8.8&quot;]
+    resolver.lifetime = 5.0
+
+    try:
+        answers = resolver.resolve(name, record_type)
+    except dns.resolver.NoAnswer:
+        print(f&quot;{name} {record_type}: no answer&quot;)
+        return
+    except dns.resolver.NXDOMAIN:
+        print(f&quot;{name}: NXDOMAIN&quot;)
+        return
+
+    for rdata in answers:
+        print(f&quot;{name} {record_type} -&gt; {rdata}&quot;)
+
+check_subdomain(&quot;yourname.dpdns.org&quot;, &quot;CNAME&quot;)
+</code></pre>
+
+<p>If you delegated NS records, also confirm the delegation itself took effect:</p>
+<pre class="codehilite"><code class="language-python">import dns.resolver
+
+def check_delegation(name: str) -&gt; None:
+    &quot;&quot;&quot;Print the NS records that the parent zone actually serves for a subdomain.&quot;&quot;&quot;
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = [&quot;1.1.1.1&quot;]
+    try:
+        for ns in resolver.resolve(name, &quot;NS&quot;):
+            print(f&quot;NS: {ns.target}&quot;)
+    except dns.resolver.NoAnswer:
+        print(f&quot;{name}: no NS records served by parent&quot;)
+
+check_delegation(&quot;yourname.dpdns.org&quot;)
+</code></pre>
+
+<p>If the NS query returns nothing, the delegation has not propagated or was never saved. Fix that before touching anything downstream—a CNAME in a zone nobody is querying will never resolve.</p>
+<h2 id="what-you-give-up">What You Give Up</h2>
+<p>Be explicit about the costs, because they shape how you should use these domains.</p>
+<p><strong>Stability risk.</strong> The zone owner can change policy at any time. <code>.qzz.io</code> going paid-only is the concrete example; <code>.us.kg</code> pausing registrations is another. Your domain is not a contract, it is a courtesy.</p>
+<p><strong>No whois control.</strong> The registrant record belongs to the provider. You cannot prove ownership through whois, which rules out some verification workflows and makes disputes unwinnable.</p>
+<p><strong>No transfer.</strong> There is no EPP code, so you cannot move the name to another registrar. Migration means registering a new name and repointing traffic.</p>
+<p><strong>Certificate and email constraints.</strong> Let's Encrypt issuance works fine for the web hostname, but you should not build email on a free subdomain. SPF, DKIM, and DMARC on a name you do not own is a deliverability problem waiting to happen.</p>
+<p><strong>Search and reputation.</strong> Shared suffixes carry the reputation of everyone else on them. A subdomain on a suffix with heavy abuse gets treated worse by filters and some mail systems.</p>
+<p>None of this is a reason to avoid free domains for hobby work. It is a reason to keep the domain layer thin, documented, and easy to swap.</p>
+<h2 id="migration-checklist-for-near-zero-downtime">Migration Checklist for Near-Zero Downtime</h2>
+<p>The goal is to move from <code>old-free-domain</code> to <code>new-free-domain</code> without a visible gap for visitors. The trick is to run both names in parallel for a while and cut over only when the new one is fully verified.</p>
+<h3 id="1-register-the-new-name-and-set-up-records-first">1. Register the new name and set up records first</h3>
+<p>Register the new subdomain and configure its records to point at the same origin as the old one. Your host should accept both hostnames—GitHub Pages and Cloudflare Pages both let you attach multiple custom domains to one project, which is what makes this painless.</p>
+<h3 id="2-verify-the-new-name-end-to-end">2. Verify the new name end to end</h3>
+<p>Check DNS, then check HTTPS and content:</p>
+<pre class="codehilite"><code class="language-python">import ssl
+import urllib.request
+
+def verify_site(url: str, expected_marker: str) -&gt; bool:
+    &quot;&quot;&quot;Fetch a URL with certificate validation and confirm a marker string is present.&quot;&quot;&quot;
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(url, context=ctx, timeout=10) as resp:
+            body = resp.read().decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)
+            status = resp.status
+    except Exception as exc:
+        print(f&quot;{url}: FAILED ({exc})&quot;)
+        return False
+
+    ok = status == 200 and expected_marker in body
+    print(f&quot;{url}: status={status} marker_found={expected_marker in body}&quot;)
+    return ok
+
+verify_site(&quot;https://newname.dpdns.org&quot;, &quot;your-site-title&quot;)
+</code></pre>
+
+<p>Do not skip this. A CNAME that resolves but serves a certificate error or a 404 from the wrong project is worse than a domain that has not propagated yet.</p>
+<h3 id="3-audit-the-old-domain-for-hardcoded-references">3. Audit the old domain for hardcoded references</h3>
+<p>Anything that embeds the old hostname needs updating: canonical tags, Open Graph URLs, sitemap entries, RSS feeds, API base URLs in frontend code, and webhook callbacks. A quick scan over a built static site:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+OLD = &quot;oldname.dpdns.org&quot;
+NEW = &quot;newname.dpdns.org&quot;
+
+def find_references(root: str) -&gt; None:
+    &quot;&quot;&quot;Scan built output for the old hostname and report file and line.&quot;&quot;&quot;
+    for path in Path(root).rglob(&quot;*&quot;):
+        if not path.is_file() or path.suffix not in {&quot;.html&quot;, &quot;.xml&quot;, &quot;.json&quot;, &quot;.js&quot;, &quot;.css&quot;}:
+            continue
+        try:
+            text = path.read_text(encoding=&quot;utf-8&quot;, errors=&quot;ignore&quot;)
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if OLD in line:
+                print(f&quot;{path}:{lineno}: {line.strip()[:120]}&quot;)
+
+find_references(&quot;public&quot;)
+</code></pre>
+
+<p>Fix these in source, rebuild, and redeploy. If you rely on canonical URLs for search indexing, update them before the cutover so the new domain is the one being indexed.</p>
+<h3 id="4-keep-the-old-domain-alive-as-a-redirect">4. Keep the old domain alive as a redirect</h3>
+<p>Leave the old records in place and configure your host to redirect the old hostname to the new one with a 301. This preserves inbound links and search signals. On GitHub Pages you get this by keeping both custom domains attached and adding a redirect at the edge; on Cloudflare you can do it with a redirect rule.</p>
+<h3 id="5-cut-over-traffic-sources">5. Cut over traffic sources</h3>
+<p>Update anything you control that points at the old name: bookmarks in docs, links in README files, profile URLs, and any CI jobs that curl the site for smoke tests. This is the slow part, and it is why step 4 matters—the redirect covers the tail.</p>
+<h3 id="6-retire-the-old-name-later-not-immediately">6. Retire the old name later, not immediately</h3>
+<p>Keep the redirect for at least a few months. Free domains can be reclaimed if the provider changes policy, so do not assume the redirect will live forever. The point is to make the new name fully self-sufficient before the old one disappears.</p>
+<h2 id="keeping-the-next-migration-cheap">Keeping the Next Migration Cheap</h2>
+<p>Two habits make all of this much easier:</p>
+<ul>
+<li><strong>Put records in a zone you control.</strong> Delegate NS from the free subdomain to a DNS provider you can export from. When the suffix changes, you repoint one delegation instead of rebuilding every record.</li>
+<li><strong>Never hardcode the hostname.</strong> Use a single config value for the site origin and derive canonical URLs, sitemaps, and feeds from it. The scan script above exists because this rule gets broken; a build-time constant means it only has to be changed once.</li>
+</ul>
+<p>Free domains are a reasonable choice for hobby infrastructure as long as you treat them as a pointer you can move. The providers will keep changing; your build process should not care.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-21 08:46:52</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>JCT</td>
+<td>热点跟涨</td>
+<td>$0.0047</td>
+<td>$0.0043</td>
+<td>$0.0048</td>
+<td>1:1.9</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">free domain</span><span class="tag-badge">eu.org</span><span class="tag-badge">dpdns.org</span><span class="tag-badge">DigitalPlat</span><span class="tag-badge">DNS</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
