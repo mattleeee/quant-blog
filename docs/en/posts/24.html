@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The CNAME Trailing Dot: One Character That Broke the Domain - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The CNAME Trailing Dot: One Character That Broke the Domain The migration was supposed to take ten minutes....">
+    <meta name="keywords" content="CNAME,trailing dot,FQDN,DNS debugging,GitHub Pages">
+    <meta property="og:title" content="The CNAME Trailing Dot: One Character That Broke the Domain">
+    <meta property="og:description" content="The CNAME Trailing Dot: One Character That Broke the Domain The migration was supposed to take ten minutes....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/24.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>The CNAME Trailing Dot: One Character That Broke the Domain</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-22</span>
+                <span class="category"><span class="tag-badge">Domains &amp; Deployment</span></span>
+            </div>
+            <div class="post-content">
+<p>The migration was supposed to take ten minutes. New domain registered on a free-tier registrar, GitHub Pages already serving the site on <code>mattlee.github.io</code>, so all that remained was a CNAME record pointing <code>www.example.dev</code> at the GitHub Pages hostname. I typed <code>mattlee.github.io</code> into the panel's value field, saved, and waited. Then I waited some more.</p>
+<p><code>dig</code> returned <code>NXDOMAIN</code> for the apex and <code>SERVFAIL</code> for <code>www</code>. GitHub Pages reported no custom domain configured. The DNS panel insisted the record existed, and it did — just not the record anyone intended to create.</p>
+<p>The fix was a single character. The value needed to be <code>mattlee.github.io.</code>, with the trailing dot. Without it, the registrar stored a <em>relative</em> name, and the record resolved to <code>mattlee.github.io.example.dev.</code> — a hostname inside my own zone that points at nothing.</p>
+<h3 id="what-the-trailing-dot-actually-means">What the trailing dot actually means</h3>
+<p>DNS has two kinds of names: absolute (fully qualified) and relative. The distinction is encoded in the presentation format by a terminal dot. <code>mattlee.github.io.</code> is an absolute name — it is fully specified and the resolver stops there. <code>mattlee.github.io</code> is a relative name — it is a <em>prefix</em> to be completed by appending an origin.</p>
+<p>This is not a quirk of one vendor. RFC 1034 and RFC 1035 define the master file format with this convention: a domain name that does not end in a dot is interpreted relative to the current origin. In a zone file, the origin is the zone itself. So inside the zone for <code>example.dev</code>, the relative name <code>mattlee.github.io</code> expands to <code>mattlee.github.io.example.dev.</code></p>
+<p>A zone file makes this visible:</p>
+<pre class="codehilite"><code class="language-dns">$ORIGIN example.dev.
+www     IN  CNAME  mattlee.github.io.      ; absolute: mattlee.github.io.
+blog    IN  CNAME  mattlee.github.io       ; relative: mattlee.github.io.example.dev.
+</code></pre>
+
+<p>Both lines look plausible in a web form. Only the first one does what the author meant. The second creates a CNAME that points back into the same zone, to a name that has no A record. Resolvers chase it, find nothing, and return <code>NXDOMAIN</code> or <code>SERVFAIL</code> depending on how far the chain gets.</p>
+<p>Why does the protocol work this way at all? Because relative names are useful. Zone files are full of them — <code>www</code>, <code>mail</code>, <code>api</code> — and appending the origin keeps configuration short and portable across zones. The trailing dot is the escape hatch that says "I am done, this is complete." The format is terse by design, and the dot is the only signal that distinguishes the two cases.</p>
+<h3 id="why-some-panels-add-the-dot-and-some-dont">Why some panels add the dot and some don't</h3>
+<p>Registrar and DNS-provider UIs sit on a spectrum between two philosophies.</p>
+<p><strong>Zone-file faithful.</strong> Some panels treat the value field exactly as a zone file would. If you omit the dot, you get a relative name. These panels are technically correct and operationally hostile — most users typing a CNAME value mean an absolute hostname, because they copied it from a documentation page or a hosting dashboard where the trailing dot is usually omitted.</p>
+<p><strong>Lenient normalizers.</strong> Other panels assume every value is absolute and append the dot for you on save. Many also strip a dot you type in, then re-add it, so the stored record is always fully qualified. These panels hide the problem entirely, which is why the same record that works on one provider fails on another.</p>
+<p><strong>Hybrid.</strong> A third class stores what you type but normalizes on display, so the panel shows <code>mattlee.github.io</code> whether or not the dot is present. You cannot tell from the UI what was actually written to the zone. This is the worst case for debugging, because the panel's appearance actively misleads you.</p>
+<p>The practical consequence: a CNAME value that works on your old registrar may break on your new one, even though both panels display the same string. The record is not the string you see. The record is what the provider serialized into the zone.</p>
+<h3 id="how-to-verify-what-was-actually-stored">How to verify what was actually stored</h3>
+<p>Never trust the panel. Query the authoritative nameservers directly and read the <code>ANSWER</code> section.</p>
+<pre class="codehilite"><code class="language-bash">dig www.example.dev CNAME +short
+</code></pre>
+
+<p>If the record is correct, you get:</p>
+<pre class="codehilite"><code>mattlee.github.io.
+</code></pre>
+
+<p>Note the trailing dot in the output. <code>dig</code> always prints absolute names with the dot, because that is what the wire format contains — DNS messages carry fully qualified names, and the presentation layer adds the dot back on output.</p>
+<p>If the record is broken, you get something like:</p>
+<pre class="codehilite"><code>mattlee.github.io.example.dev.
+</code></pre>
+
+<p>That is the smoking gun. The resolver is telling you the stored name is relative and the origin was appended. If you see the zone name glued onto the end of your intended target, the value field is missing its dot.</p>
+<p>You can also query the authoritative server directly, bypassing caching and any recursive resolver behavior:</p>
+<pre class="codehilite"><code class="language-bash">dig @ns1.registrar.net www.example.dev CNAME +noall +answer
+</code></pre>
+
+<p>The <code>+noall +answer</code> flags trim the output to just the answer section, which is where the CNAME target lives. If the answer section is empty and the authority section shows <code>NXDOMAIN</code>, the name may not exist at all — check that the record saved and that the zone is active.</p>
+<p><code>nslookup</code> works too, though its output is noisier:</p>
+<pre class="codehilite"><code class="language-bash">nslookup -type=CNAME www.example.dev ns1.registrar.net
+</code></pre>
+
+<p>Look at the <code>canonical name =</code> line. Same rule: a trailing dot means absolute, no trailing dot in a zone-file-style answer means relative.</p>
+<p>For a full trace of the resolution chain, including where it fails:</p>
+<pre class="codehilite"><code class="language-bash">dig www.example.dev +trace
+</code></pre>
+
+<p><code>+trace</code> walks from the root down. If the delegation to your zone succeeds but the CNAME target never resolves, the failure is inside your zone — almost always the missing dot.</p>
+<h3 id="automating-the-check">Automating the check</h3>
+<p>Once you know what to look for, the check is trivial to script. This is worth wiring into your deploy pipeline, because a broken CNAME is invisible until someone tries to load the site.</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import sys
+
+
+def get_cname(name: str, server: str | None = None) -&gt; str | None:
+    &quot;&quot;&quot;Return the CNAME target for `name`, or None if no CNAME exists.&quot;&quot;&quot;
+    cmd = [&quot;dig&quot;, &quot;+short&quot;, &quot;CNAME&quot;, name]
+    if server:
+        cmd.insert(1, f&quot;@{server}&quot;)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    target = result.stdout.strip()
+    return target or None
+
+
+def check_cname(name: str, expected: str, server: str | None = None) -&gt; bool:
+    &quot;&quot;&quot;
+    Verify that `name` is a CNAME to `expected`.
+
+    `expected` should be given without a trailing dot; the comparison
+    normalizes both sides so the check is independent of presentation.
+    &quot;&quot;&quot;
+    target = get_cname(name, server)
+    if target is None:
+        print(f&quot;FAIL: no CNAME record for {name}&quot;)
+        return False
+
+    normalized = target.rstrip(&quot;.&quot;)
+    if normalized != expected.rstrip(&quot;.&quot;):
+        print(f&quot;FAIL: {name} -&gt; {target} (expected {expected}.)&quot;)
+        print(&quot;      If the target ends in your zone name, the value is&quot;)
+        print(&quot;      relative and is missing its trailing dot.&quot;)
+        return False
+
+    print(f&quot;OK: {name} -&gt; {target}&quot;)
+    return True
+
+
+if __name__ == &quot;__main__&quot;:
+    ok = check_cname(&quot;www.example.dev&quot;, &quot;mattlee.github.io&quot;)
+    sys.exit(0 if ok else 1)
+</code></pre>
+
+<p>The <code>rstrip(".")</code> normalization matters: <code>dig +short</code> prints the absolute form with a dot, but you will often pass the expected value without one, as copied from a dashboard. Comparing the normalized forms avoids false alarms while still catching the real failure — a target that has your zone name appended.</p>
+<p>If you want to detect the relative-name bug specifically, check whether the target ends with the zone:</p>
+<pre class="codehilite"><code class="language-python">def looks_relative(target: str, zone: str) -&gt; bool:
+    &quot;&quot;&quot;Heuristic: a CNAME target that ends in the zone is probably relative.&quot;&quot;&quot;
+    return target.rstrip(&quot;.&quot;).endswith(zone.rstrip(&quot;.&quot;))
+</code></pre>
+
+<p>This is a heuristic, not a proof — a legitimate CNAME can point into your own zone, and internal service records often do. But for a public web CNAME pointing at an external host, a target that ends in your own zone name is a near-certain sign of a missing dot.</p>
+<h3 id="the-general-lesson">The general lesson</h3>
+<p>DNS tools are literal and unapologetic. There is no fuzzy matching, no "did you mean," no warning when you save a relative name where you meant an absolute one. The zone is a text format with a precise grammar, and the provider either follows it or silently normalizes it for you. When it follows it, you get exactly what you typed, including the consequences.</p>
+<p>This bites in predictable places:</p>
+<ul>
+<li><strong>CNAME and MX values</strong> are the most common victims, because they are the record types where you type a hostname rather than an IP address.</li>
+<li><strong>Copy-paste from documentation</strong> usually drops the trailing dot, because docs are written for humans and the dot is noise to most readers.</li>
+<li><strong>Provider migration</strong> surfaces latent bugs, because the new panel may interpret the value differently from the old one.</li>
+<li><strong>TXT records</strong> are not affected the same way — the content is an opaque string, not a domain name — but SPF and DKIM records that embed domain names inside the string can carry the same confusion.</li>
+</ul>
+<p>The habit that prevents all of it: when a record value is a hostname, type the trailing dot. It is harmless on panels that normalize, and load-bearing on panels that don't. Then verify with <code>dig</code> and read the <code>ANSWER</code> section, because the panel is a UI and the zone is the truth.</p>
+<p>The domain came up the moment the dot was added. The record had been "correct" in the panel for an hour. It had never been correct in the zone.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-22 08:46:44</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ARIA</td>
+<td>短平快做空</td>
+<td>$0.0655</td>
+<td>$0.0635</td>
+<td>$0.0671</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">CNAME</span><span class="tag-badge">trailing dot</span><span class="tag-badge">FQDN</span><span class="tag-badge">DNS debugging</span><span class="tag-badge">GitHub Pages</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
