@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>The CNAME Trailing Dot: One Character That Broke the Domain</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/24.html</link>
+            <description>The CNAME Trailing Dot: One Character That Broke the Domain The migration was supposed to take ten minutes....</description>
+            <pubDate>2026-10-22</pubDate>
+            <category>Domains &amp; Deployment</category>
+        </item>
+        <item>
             <title>Free Domain Options in 2026: From eu.org to DigitalPlat dpdns.org</title>
             <link>https://www.hkcode.dpdns.org/en/posts/23.html</link>
             <description>The 2026 Free Domain Landscape If you run static sites for side projects, a domain is the one recurring cost you can usually avoid....</description>
@@ -136,13 +143,6 @@
             <title>Migrating a Python Automation Stack to a New Windows Server</title>
             <link>https://www.hkcode.dpdns.org/en/posts/6.html</link>
             <description>Migrating a Python automation stack between Windows machines looks trivial until it isn&#x27;t....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Health Checks for a Fleet of Scheduled Tasks</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/7.html</link>
-            <description>Nine unattended scheduled tasks is a fleet, whether you call it that or not....</description>
             <pubDate>2026-10-06</pubDate>
             <category>Windows Automation</category>
         </item>
