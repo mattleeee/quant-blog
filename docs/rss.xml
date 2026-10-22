@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>蒙特卡洛置换检验：给交易策略做一次压力审计</title>
+            <link>https://www.hkcode.dpdns.org/posts/52.html</link>
+            <description>蒙特卡洛置换检验：给交易策略做一次压力审计
+
+回测报告上那串漂亮的净值曲线，往往藏着一个被忽略的事实：总盈亏与交易顺序无关，但最大回撤和爆仓概率完全由顺序决定。
+
+同一个盈亏序列，先赚后亏和先亏后赚，最终收益一模一样，可中间的最大回撤（Maximum Drawdown, MDD）能差出好几倍。...</description>
+            <pubDate>2026-10-22</pubDate>
+            <category>量化风控</category>
+        </item>
+        <item>
             <title>池级浮亏熔断：用反事实回测决定风控参数</title>
             <link>https://www.hkcode.dpdns.org/posts/51.html</link>
             <description>池级浮亏熔断：用反事实回测决定风控参数
@@ -173,13 +184,6 @@
             <link>https://www.hkcode.dpdns.org/posts/33.html</link>
             <description>策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。这篇文章讲一个简单的工程手段：3连败熔断——当策略连续3次交易亏损时，自动暂停该策略，进入冷却期，避免情绪化或系统性失效下的持续失血。 为什么是&quot;连败&quot;而不是&quot;总亏损&quot; 单笔亏损是随机的，连...</description>
             <pubDate>2026-10-02</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>MACD背离策略回测分析：为什么最终被否决</title>
-            <link>https://www.hkcode.dpdns.org/posts/32.html</link>
-            <description>MACD背离是技术分析里被讲得最多的形态之一。顶背离看跌、底背离看涨，逻辑直观,画图也好看。但把主观判断翻译成可回测的规则后,结论往往不那么美好。 本文记录一个MACD背离策略从实现到否决的完整过程,包含三层验证:信号触发率稳定性、参数敏感性、以及在不同市场状态下的表现。结论是:这个策略被否决,不是因为亏钱,而是因为不...</description>
-            <pubDate>2026-10-01</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
