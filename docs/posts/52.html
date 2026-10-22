@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>蒙特卡洛置换检验：给交易策略做一次压力审计 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="蒙特卡洛置换检验：给交易策略做一次压力审计
+
+回测报告上那串漂亮的净值曲线，往往藏着一个被忽略的事实：总盈亏与交易顺序无关，但最大回撤和爆仓概率完全由顺序决定。...">
+    <meta name="keywords" content="蒙特卡洛,置换检验,最大回撤,爆仓率">
+    <meta property="og:title" content="蒙特卡洛置换检验：给交易策略做一次压力审计">
+    <meta property="og:description" content="蒙特卡洛置换检验：给交易策略做一次压力审计
+
+回测报告上那串漂亮的净值曲线，往往藏着一个被忽略的事实：总盈亏与交易顺序无关，但最大回撤和爆仓概率完全由顺序决定。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/52.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>蒙特卡洛置换检验：给交易策略做一次压力审计</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-22</span>
+                <span class="category"><span class="tag-badge">量化风控</span></span>
+            </div>
+            <div class="post-content">
+<p>回测报告上那串漂亮的净值曲线，往往藏着一个被忽略的事实：<strong>总盈亏与交易顺序无关，但最大回撤和爆仓概率完全由顺序决定</strong>。</p>
+<p>同一个盈亏序列，先赚后亏和先亏后赚，最终收益一模一样，可中间的最大回撤（Maximum Drawdown, MDD）能差出好几倍。更极端的情况：一个总盈利的策略，如果连续亏损集中在前面，可能在回本之前就已经触及强平线。</p>
+<p>这篇文章介绍用蒙特卡洛置换检验（Monte Carlo Permutation Test）审计策略的真实风险：把真实盈亏序列随机打乱数千次，统计 MDD 分布和各爆仓线的触及概率，判断回测报告是否低估了风险。</p>
+<h2 id="_1">一、问题的本质：顺序决定风险</h2>
+<p>假设一个策略跑了 200 笔交易，胜率 55%，盈亏比 1.2，总收益 +38%。回测报告显示最大回撤 12%。看起来不错。</p>
+<p>但回测只跑出了一条路径。市场恰好按这个顺序给出盈亏，不代表换个顺序策略还能活着。把同样的 200 个盈亏数字重新排列，会得到 200! 种可能的路径，回测只是其中一条。</p>
+<p>关键点：</p>
+<ul>
+<li><strong>总盈亏对顺序不变</strong>：求和与排列无关，这是置换检验的理论基础</li>
+<li><strong>MDD 对顺序极度敏感</strong>：最大回撤取决于亏损的聚集程度</li>
+<li><strong>爆仓率对顺序极度敏感</strong>：触及强平线只需要一段连续亏损，不需要总亏损</li>
+</ul>
+<p>所以正确的问法不是"这个策略回撤多少"，而是"在所有可能的交易顺序中，回撤的分布是什么样，触及爆仓线的概率有多大"。</p>
+<h2 id="_2">二、置换检验的逻辑</h2>
+<p>蒙特卡洛置换检验的做法很直接：</p>
+<ol>
+<li>拿到真实的逐笔盈亏序列 <code>pnl = [r1, r2, ..., rn]</code></li>
+<li>随机打乱顺序，得到一条新路径</li>
+<li>在新路径上计算 MDD、是否触及爆仓线</li>
+<li>重复 N 次（通常 5000 次以上）</li>
+<li>统计 MDD 的分位数分布、各爆仓线的触及频率</li>
+</ol>
+<p>这本质上是<strong>在保持盈亏分布不变的前提下，对路径做重采样</strong>。它回答的问题：如果市场以另一种（同样合理的）顺序给出这些盈亏，我的账户会怎样。</p>
+<p>注意它不改变盈亏的分布，只改变顺序。所以它审计的是<strong>路径风险</strong>，不是策略的 edge 是否存在。edge 的显著性检验是另一个话题（bootstrap、t 检验等），这里不展开。</p>
+<h2 id="numpy">三、numpy 向量化实现</h2>
+<p>核心是 MDD 的计算和批量置换。numpy 的 <code>cumsum</code> 加 <code>maximum.accumulate</code> 可以一次性算出所有路径的回撤。</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def max_drawdown_from_equity(equity: np.ndarray) -&gt; np.ndarray:
+    &quot;&quot;&quot;
+    equity: shape (n_paths, n_steps) 或 (n_steps,)
+    返回每条路径的最大回撤（正数表示回撤幅度）
+    &quot;&quot;&quot;
+    equity = np.atleast_2d(equity)
+    running_max = np.maximum.accumulate(equity, axis=1)
+    drawdown = running_max - equity
+    return drawdown.max(axis=1)
+
+
+def permutation_test(pnl: np.ndarray,
+                     n_sim: int = 5000,
+                     initial_capital: float = 1_000_000.0,
+                     ruin_levels=(0.2, 0.3, 0.5),
+                     seed: int = 42) -&gt; dict:
+    &quot;&quot;&quot;
+    pnl: 逐笔盈亏（金额），shape (n_trades,)
+    ruin_levels: 相对初始资金的回撤阈值，如 0.3 表示亏掉 30% 视为爆仓
+    &quot;&quot;&quot;
+    pnl = np.asarray(pnl, dtype=float)
+    n = pnl.size
+    rng = np.random.default_rng(seed)
+
+    # 生成 n_sim 条置换路径，shape (n_sim, n)
+    # 对索引做置换，再取 pnl
+    idx = rng.permuted(np.tile(np.arange(n), (n_sim, 1)), axis=1)
+    paths = pnl[idx]
+
+    # 累计盈亏 -&gt; 净值
+    equity = initial_capital + np.cumsum(paths, axis=1)
+    # 在起点插入初始资金，用于计算第一笔就亏损的情况
+    equity = np.concatenate(
+        [np.full((n_sim, 1), initial_capital), equity], axis=1
+    )
+
+    mdd_abs = max_drawdown_from_equity(equity)          # 绝对金额回撤
+    mdd_pct = mdd_abs / initial_capital                 # 相对初始资金
+
+    result = {
+        &quot;n_trades&quot;: n,
+        &quot;n_sim&quot;: n_sim,
+        &quot;mdd_pct&quot;: {
+            &quot;mean&quot;: float(mdd_pct.mean()),
+            &quot;p50&quot;: float(np.percentile(mdd_pct, 50)),
+            &quot;p90&quot;: float(np.percentile(mdd_pct, 90)),
+            &quot;p95&quot;: float(np.percentile(mdd_pct, 95)),
+            &quot;p99&quot;: float(np.percentile(mdd_pct, 99)),
+            &quot;max&quot;: float(mdd_pct.max()),
+        },
+        &quot;ruin_prob&quot;: {},
+        &quot;final_pnl&quot;: float(pnl.sum()),
+        &quot;final_pnl_pct&quot;: float(pnl.sum() / initial_capital),
+    }
+
+    for lv in ruin_levels:
+        result[&quot;ruin_prob&quot;][lv] = float((mdd_pct &gt;= lv).mean())
+
+    return result
+</code></pre>
+
+<p>几个实现细节值得说明：</p>
+<ul>
+<li><strong>起点要插入初始资金</strong>：如果第一笔就是大额亏损，不插入起点会漏算这段回撤。</li>
+<li><strong><code>rng.permuted</code> 比循环 <code>rng.permutation</code> 快一个数量级</strong>：<code>np.tile</code> 复制索引矩阵后整体置换，n_sim=5000、n=200 时内存约 5000×200×8 字节 = 8MB，完全可控。</li>
+<li><strong>MDD 用 <code>maximum.accumulate</code> 计算</strong>：<code>running_max - equity</code> 的逐点最大值即为最大回撤，避免循环。</li>
+</ul>
+<p>跑一下：</p>
+<pre class="codehilite"><code class="language-python"># 模拟一个策略的逐笔盈亏：55% 胜率，盈亏比 1.2
+rng = np.random.default_rng(0)
+n = 200
+wins = rng.random(n) &lt; 0.55
+pnl = np.where(wins, 1.2, -1.0) * rng.uniform(0.8, 1.2, n) * 5000
+
+res = permutation_test(pnl, n_sim=5000, initial_capital=1_000_000,
+                       ruin_levels=(0.2, 0.3, 0.5))
+print(f&quot;总盈亏: {res['final_pnl']:,.0f} ({res['final_pnl_pct']:.1%})&quot;)
+print(f&quot;MDD P50: {res['mdd_pct']['p50']:.2%}&quot;)
+print(f&quot;MDD P95: {res['mdd_pct']['p95']:.2%}&quot;)
+print(f&quot;MDD P99: {res['mdd_pct']['p99']:.2%}&quot;)
+for lv, p in res[&quot;ruin_prob&quot;].items():
+    print(f&quot;触及 {lv:.0%} 回撤概率: {p:.2%}&quot;)
+</code></pre>
+
+<p>典型输出（数值随随机种子变化）：</p>
+<pre class="codehilite"><code>总盈亏: 138,500 (13.9%)
+MDD P50: 4.2%
+MDD P95: 7.8%
+MDD P99: 10.1%
+触及 20% 回撤概率: 0.02%
+触及 30% 回撤概率: 0.00%
+触及 50% 回撤概率: 0.00%
+</code></pre>
+
+<p>这个策略在 200 笔、单笔风险 0.5% 左右的设定下，置换后 MDD 的 P95 是 7.8%，但回测报告可能只显示某一条路径的 4%~5%。<strong>这就是被低估的部分</strong>。</p>
+<h2 id="python">四、纯 Python 回退实现</h2>
+<p>numpy 不可用（比如某些嵌入式或受限环境）时的等价实现。速度慢很多，但逻辑一致，适合小样本校验。</p>
+<pre class="codehilite"><code class="language-python">import random
+
+def max_drawdown_py(equity: list) -&gt; float:
+    peak = equity[0]
+    mdd = 0.0
+    for v in equity:
+        if v &gt; peak:
+            peak = v
+        dd = peak - v
+        if dd &gt; mdd:
+            mdd = dd
+    return mdd
+
+
+def permutation_test_py(pnl: list,
+                        n_sim: int = 5000,
+                        initial_capital: float = 1_000_000.0,
+                        ruin_levels=(0.2, 0.3, 0.5),
+                        seed: int = 42) -&gt; dict:
+    rnd = random.Random(seed)
+    n = len(pnl)
+    mdds = []
+    ruin_hits = {lv: 0 for lv in ruin_levels}
+
+    for _ in range(n_sim):
+        path = pnl[:]
+        rnd.shuffle(path)
+        equity = [initial_capital]
+        acc = initial_capital
+        for x in path:
+            acc += x
+            equity.append(acc)
+        mdd = max_drawdown_py(equity) / initial_capital
+        mdds.append(mdd)
+        for lv in ruin_levels:
+            if mdd &gt;= lv:
+                ruin_hits[lv] += 1
+
+    mdds.sort()
+    def pct(p):
+        k = max(0, min(len(mdds) - 1, int(round(p / 100 * (len(mdds) - 1)))))
+        return mdds[k]
+
+    return {
+        &quot;n_trades&quot;: n,
+        &quot;n_sim&quot;: n_sim,
+        &quot;mdd_pct&quot;: {
+            &quot;mean&quot;: sum(mdds) / len(mdds),
+            &quot;p50&quot;: pct(50), &quot;p90&quot;: pct(90),
+            &quot;p95&quot;: pct(95), &quot;p99&quot;: pct(99),
+            &quot;max&quot;: mdds[-1],
+        },
+        &quot;ruin_prob&quot;: {lv: ruin_hits[lv] / n_sim for lv in ruin_levels},
+        &quot;final_pnl&quot;: sum(pnl),
+        &quot;final_pnl_pct&quot;: sum(pnl) / initial_capital,
+    }
+</code></pre>
+
+<p><code>random.shuffle</code> 是原地 Fisher-Yates，复杂度 O(n)，n=200、n_sim=5000 时纯 Python 大约几秒到十几秒，numpy 版本在 0.1 秒内。两者在种子相同时结果不同（因为置换算法不同），但统计结论应一致，可以互相校验。</p>
+<h2 id="_3">五、结果怎么读</h2>
+<p>置换检验的输出不是单一数字，是一组分布。解读要抓住三个维度。</p>
+<h3 id="51-mdd">5.1 MDD 分位数</h3>
+<ul>
+<li><strong>P50（中位数）</strong>：所有可能顺序里，一半的路径回撤不超过这个值。它比回测单条路径的 MDD 更有代表性。</li>
+<li><strong>P95</strong>：极端但合理的坏情况。风控上通常把 P95 当作"应该能扛住"的线。</li>
+<li><strong>P99 / max</strong>：接近最坏顺序。max 对应"所有亏损集中在前面"的极端排列，几乎不可能发生但可以看上限。</li>
+</ul>
+<p><strong>判定规则</strong>：如果回测报告的 MDD 明显低于置换分布的 P50，说明回测路径偏"幸运"，报告低估了常态风险；如果低于 P95 较多，说明策略在不利顺序下会显著更难看。</p>
+<h3 id="52">5.2 爆仓率</h3>
+<p>爆仓率是比 MDD 更硬的指标。它回答"在 N 次模拟中，有多少比例的路径会触及强平线"。</p>
+<p><strong>判定规则</strong>（经验阈值，按策略类型可调）：</p>
+<table>
+<thead>
+<tr>
+<th>触及概率</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>&lt; 0.1%</td>
+<td>安全边际充足</td>
+</tr>
+<tr>
+<td>0.1% ~ 1%</td>
+<td>可接受，需关注杠杆与强平线设置</td>
+</tr>
+<tr>
+<td>1% ~ 5%</td>
+<td>风险偏高，应降杠杆或提高强平缓冲</td>
+</tr>
+<tr>
+<td>&gt; 5%</td>
+<td>不可接受，策略在不利顺序下大概率爆仓</td>
+</tr>
+</tbody>
+</table>
+<p>注意爆仓线要按实际账户规则设定：期货有维持保证金，股票有融资平仓线，这里用相对初始资金的回撤阈值近似。</p>
+<h3 id="53">5.3 与回测的对比</h3>
+<p>把回测实际 MDD 放进置换分布里看它的分位位置。如果实际 MDD 落在 P10 以下，说明这条回测路径属于"顺风局"，实盘大概率会遇到更差的顺序。这是最需要警惕的信号——不是策略不好，是回测运气好。</p>
+<pre class="codehilite"><code class="language-python">def audit_conclusion(mdd_pct_dist: np.ndarray,
+                     backtest_mdd: float,
+                     ruin_prob: float,
+                     ruin_line: float = 0.3) -&gt; str:
+    rank = (mdd_pct_dist &lt; backtest_mdd).mean()  # 回测 MDD 的分位
+    p95 = np.percentile(mdd_pct_dist, 95)
+    lines = []
+    lines.append(f&quot;回测 MDD 位于置换分布 P{rank*100:.0f}&quot;)
+    if rank &lt; 0.10:
+        lines.append(&quot;⚠ 回测路径偏乐观，实盘顺序风险被低估&quot;)
+    elif rank &gt; 0.90:
+        lines.append(&quot;回测路径偏保守，实际可能好于报告&quot;)
+    else:
+        lines.append(&quot;回测 MDD 处于合理区间&quot;)
+
+    lines.append(f&quot;P95 MDD = {p95:.2%}，建议以此为风控基准&quot;)
+    if ruin_prob &gt; 0.05:
+        lines.append(f&quot;⚠ 触及 {ruin_line:.0%} 回撤概率 {ruin_prob:.2%}，超阈值&quot;)
+    elif ruin_prob &gt; 0.01:
+        lines.append(f&quot;触及 {ruin_line:.0%} 回撤概率 {ruin_prob:.2%}，需关注&quot;)
+    else:
+        lines.append(f&quot;触及 {ruin_line:.0%} 回撤概率 {ruin_prob:.2%}，安全&quot;)
+    return &quot;\n&quot;.join(lines)
+</code></pre>
+
+<h2 id="_4">六、几个容易踩的坑</h2>
+<p><strong>样本量太小时分布不可信。</strong> 少于 30 笔交易，置换出来的 MDD 分布很粗，分位数意义有限。这时候应该扩大回测区间或做交易级别的 bootstrap 合成更多样本。</p>
+<p><strong>盈亏金额 vs 收益率。</strong> 上面用固定金额的逐笔盈亏，隐含"仓位恒定"。如果策略是复利或动态仓位，应该用收益率序列，并把净值计算改成累乘 <code>np.cumprod(1 + returns)</code>，MDD 用净值序列算。两种写法不能混用。</p>
+<p><strong>置换不改变盈亏分布。</strong> 它只重排顺序。如果你的策略存在明显的盈亏自相关（比如趋势策略连亏连赢是常态），纯随机置换会低估尾部风险，因为它打散了真实的聚集结构。这种情况下应该用 block permutation（分块置换），保留局部相关性。一个简单做法是按固定窗口切块后整块打乱：</p>
+<pre class="codehilite"><code class="language-python">def block_permutation(pnl: np.ndarray, block: int, n_sim: int, seed: int = 42):
+    rng = np.random.default_rng(seed)
+    n = pnl.size
+    n_blocks = n // block
+    blocks = pnl[:n_blocks * block].reshape(n_blocks, block)
+    out = np.empty((n_sim, n_blocks * block))
+    for i in range(n_sim):
+        order = rng.permutation(n_blocks)
+        out[i] = blocks[order].ravel()
+    return out
+</code></pre>
+
+<p><strong>强平线不是回撤线。</strong> 实际爆仓取决于保证金制度和持仓结构，置换检验给出的是"回撤触及某阈值"的概率，作为爆仓风险的代理指标。真实爆仓率需要结合杠杆、保证金比例换算。</p>
+<h2 id="_5">七、放进日常工作流</h2>
+<p>置换检验适合作为策略上线前的一道审计关卡，成本低、信息量大。建议做法：</p>
+<ol>
+<li>回测结束后导出逐笔盈亏序列（金额或收益率）</li>
+<li>跑 5000 次置换，记录 MDD 的 P50/P95/P99 和关键回撤线的触及概率</li>
+<li>把 P95 MDD 写进策略的风控参数，而不是回测报告的 MDD</li>
+<li>爆仓率超过 1% 的策略，降杠杆重跑，直到进入安全区间</li>
+<li>定期重跑，因为交易笔数增长后分布会变化</li>
+</ol>
+<p>这套流程不需要额外数据，不依赖市场假设，纯靠策略自身的盈亏序列就能完成。它的价值在于把"回测显示回撤 8%"这种单点结论，换成"回撤分布在 4%~15% 之间，P95 是 12%"这种分布结论——后者才是风控能用的东西。</p>
+<p>回测是一条路径，置换检验看的是所有路径。策略能不能活下来，取决于最差的那批路径，而不是最幸运的那条。</p>
+<hr />
+<p>更多量化风控与自动化实战内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">蒙特卡洛</span><span class="tag-badge">置换检验</span><span class="tag-badge">最大回撤</span><span class="tag-badge">爆仓率</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
