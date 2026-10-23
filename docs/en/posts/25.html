@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Why You Cannot Put a CNAME on the Apex Domain - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The zone apex is not like other names The apex of a zone — the bare domain itself, hkcode.dpdns.org in this case — is wh...">
+    <meta name="keywords" content="apex domain,CNAME,RFC,www subdomain,ALIAS record">
+    <meta property="og:title" content="Why You Cannot Put a CNAME on the Apex Domain">
+    <meta property="og:description" content="The zone apex is not like other names The apex of a zone — the bare domain itself, hkcode.dpdns.org in this case — is wh...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/25.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Why You Cannot Put a CNAME on the Apex Domain</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-23</span>
+                <span class="category"><span class="tag-badge">Domains &amp; Deployment</span></span>
+            </div>
+            <div class="post-content">
+<p>The apex of a zone — the bare domain itself, <code>hkcode.dpdns.org</code> in this case — is where the DNS machinery for the entire zone lives. It must carry an SOA record and a set of NS records. That single fact is the reason you cannot point the apex at a CNAME, and it is not a limitation of GitHub Pages or of any registrar. It is baked into the DNS standard.</p>
+<p>When we set up GitHub Pages for a custom domain, GitHub's documentation asks for a CNAME record. The natural reading is "point the domain at <code>username.github.io</code>." For the apex, that request cannot be satisfied literally. The site ends up at <code>www.hkcode.dpdns.org</code>, and the bare name is handled by a redirect or a set of A/AAAA records. Here is why, and how to wire it up without creating a resolver loop or a broken zone.</p>
+<h2 id="why-a-cname-cannot-live-at-the-apex">Why a CNAME cannot live at the apex</h2>
+<h3 id="the-problem-a-cname-claims-the-whole-name">The problem: a CNAME claims the whole name</h3>
+<p>RFC 1034, section 3.6.2 is explicit: a CNAME record is an alias for a <em>domain name</em>, and that name must not have any other data. The text says that if a CNAME RR is present at a node, no other data should be present. RFC 2181, section 10.1 reinforces it: a CNAME record cannot coexist with any other record type at the same owner name, with a narrow exception for DNSSEC-related records (RRSIG, NSEC, and similar).</p>
+<p>So the rule is: at a node, either a CNAME, or everything else. Not both.</p>
+<p>Now look at the apex. Every zone needs:</p>
+<ul>
+<li>An <strong>SOA</strong> record, which describes the zone's primary server, serial number, refresh/retry/expire timers, and negative-caching TTL.</li>
+<li>At least one <strong>NS</strong> record set, listing the authoritative name servers.</li>
+</ul>
+<p>Those records must exist at the apex by definition — the SOA names the zone origin, and the NS set tells the world who is authoritative for it. If you also tried to place a CNAME at the apex, you would be asking the zone to hold a CNAME <em>and</em> an SOA <em>and</em> NS records at the same owner name. That directly violates RFC 1034/2181.</p>
+<h3 id="what-happens-if-a-provider-lets-you-try">What happens if a provider lets you try</h3>
+<p>Many authoritative servers will simply reject the zone file at load time with an error like <code>CNAME and other data</code>. Some permissive servers accept it, and the result is worse: resolvers receive an answer where the CNAME and the SOA/NS coexist. Behavior becomes undefined. Some resolvers will follow the CNAME and discard the SOA; some will treat the zone as lame. Recursive resolvers that cache the CNAME may return it for queries that should have hit the NS set. You end up with intermittent resolution failures, and the failure mode differs by resolver — the hardest kind of bug to diagnose.</p>
+<p>There is also a subtler issue. A CNAME at the apex would alias the <em>entire zone's identity</em> to another name. Queries for the SOA at the apex would be answered with a CNAME, and the resolver would chase it to the target, which has no authority over your zone. The delegation chain breaks.</p>
+<h3 id="the-mx-and-txt-trap">The MX and TXT trap</h3>
+<p>Even if the RFC allowed it, the apex usually carries more than SOA and NS. Email routing records (MX) and domain-verification or SPF/DKIM records (TXT) commonly live at the bare domain. A CNAME at the apex would make all of those illegal too. For <code>hkcode.dpdns.org</code>, any TXT record used to verify ownership with a third-party service would collide with the CNAME. This is why the "just CNAME the apex" idea fails beyond the pure DNS mechanics: real zones have real records at the apex.</p>
+<h2 id="what-flattening-providers-actually-do">What "flattening" providers actually do</h2>
+<p>Several DNS providers (Cloudflare, DNSimple, Route 53 with alias records, and others) offer a record type called <code>ALIAS</code>, <code>ANAME</code>, or a "CNAME flattening" feature. This is the workaround people reach for, but it is not a CNAME at the apex. It is a server-side behavior.</p>
+<p>Here is the mechanism. You create an ALIAS/ANAME record at the apex pointing to a target name. The provider's authoritative servers do not publish a CNAME. Instead, when a query for the apex arrives, the authoritative server:</p>
+<ol>
+<li>Resolves the target name itself (or uses its cached answer).</li>
+<li>Returns the resulting A/AAAA records directly, as if they were A/AAAA records at the apex.</li>
+</ol>
+<p>The zone on disk still has SOA and NS at the apex; the ALIAS is a provider-specific synthetic record. To the outside world, the apex answers with address records, not a CNAME, so the RFC constraint is respected. The provider has effectively flattened the indirection.</p>
+<p>This works, but it is not portable. The ALIAS record type is not standardized in the way A and CNAME are; its semantics differ between providers. If you export the zone and move to a provider that does not support it, the record either disappears or is written out as a literal CNAME, which then breaks the zone. Also, the target's TTL becomes the provider's resolution TTL, not the original CNAME TTL, so you lose some control over caching.</p>
+<p>For GitHub Pages specifically, the target <code>username.github.io</code> resolves to GitHub's CDN addresses. Flattening works, but you are pinning the apex to whatever those addresses are at query time. If GitHub rotates them, your provider's cached resolution handles it, but you are trusting the provider's resolver behavior.</p>
+<h2 id="how-github-pages-handles-www-versus-apex">How GitHub Pages handles www versus apex</h2>
+<p>GitHub Pages has a specific model for custom domains:</p>
+<ul>
+<li><strong><code>www</code> subdomain</strong>: GitHub recommends a CNAME record pointing <code>www.hkcode.dpdns.org</code> to <code>hkcode.github.io</code> (or <code>username.github.io</code>). This is the canonical setup. GitHub's servers see the <code>Host: www.hkcode.dpdns.org</code> header, match it against the configured custom domain, and serve the site.</li>
+<li><strong>Apex domain</strong>: GitHub documents A records (and AAAA records for IPv6) pointing the apex at GitHub's published IP addresses. These are static addresses that GitHub maintains. The apex is not a CNAME; it is a set of address records.</li>
+</ul>
+<p>When you configure a custom domain in the repository settings, GitHub stores it and serves requests whose <code>Host</code> header matches. If you set the custom domain to <code>www.hkcode.dpdns.org</code>, requests to the apex <code>hkcode.dpdns.org</code> will not match unless GitHub also handles the redirect.</p>
+<p>GitHub Pages does provide an HTTP-level redirect from the apex to the <code>www</code> host when the custom domain is configured as the <code>www</code> name and the apex resolves to GitHub. The redirect is a 301 served by GitHub's front end, not a DNS-level redirect. For that to work, the apex must still resolve to GitHub's servers — via A/AAAA records — so the request reaches GitHub and gets redirected. If the apex has no records at all, the browser never reaches GitHub and there is no redirect.</p>
+<p>So the practical split is:</p>
+<ul>
+<li>DNS for <code>www</code> → CNAME to <code>username.github.io</code>.</li>
+<li>DNS for apex → A/AAAA records to GitHub's addresses (or a provider redirect).</li>
+<li>GitHub config → custom domain set to the <code>www</code> name; GitHub 301s the bare name to <code>www</code>.</li>
+</ul>
+<h2 id="the-practical-setup">The practical setup</h2>
+<h3 id="step-1-cname-the-www-subdomain">Step 1: CNAME the www subdomain</h3>
+<p>At your DNS provider, create:</p>
+<pre class="codehilite"><code>www.hkcode.dpdns.org.  3600  IN  CNAME  hkcode.github.io.
+</code></pre>
+
+<p>No other records at <code>www</code>. If you previously had an A record there, remove it. A CNAME and an A record at the same name is the same violation as at the apex, just at a different node.</p>
+<h3 id="step-2-handle-the-apex">Step 2: Handle the apex</h3>
+<p>Two options, depending on your provider.</p>
+<p><strong>Option A — GitHub's A/AAAA records.</strong> Create A records (and AAAA if you want IPv6) at the apex pointing to GitHub's published addresses. These are documented by GitHub and change rarely, but check them before you paste. The apex then answers with addresses, and GitHub's front end 301s to <code>www</code>.</p>
+<p><strong>Option B — provider redirect.</strong> If your provider offers an HTTP redirect service for the apex (some registrars and DNS hosts do), point the apex at that redirect and send it to <code>https://www.hkcode.dpdns.org</code>. This avoids hardcoding GitHub's IPs. The tradeoff is that the redirect is handled by the provider, so you depend on their uptime and their support for HTTPS on the redirect.</p>
+<p>Do not use an ALIAS/ANAME at the apex unless you have verified the provider's implementation and are comfortable with the non-portability. It works, but it is a provider feature, not a DNS standard.</p>
+<h3 id="step-3-verify-with-code">Step 3: Verify with code</h3>
+<p>Do not trust the control panel. Query the records directly and check the invariants. A small script using <code>dnspython</code> catches the common mistakes: a stray CNAME at the apex, a missing SOA, or a CNAME and A record coexisting at <code>www</code>.</p>
+<pre class="codehilite"><code class="language-python">import dns.resolver
+import dns.exception
+
+APEX = &quot;hkcode.dpdns.org&quot;
+WWW = f&quot;www.{APEX}&quot;
+
+def query(name, rtype):
+    try:
+        answer = dns.resolver.resolve(name, rtype, lifetime=5)
+        return [r.to_text() for r in answer]
+    except dns.resolver.NoAnswer:
+        return []
+    except dns.resolver.NXDOMAIN:
+        return [&quot;NXDOMAIN&quot;]
+    except dns.exception.Timeout:
+        return [&quot;TIMEOUT&quot;]
+
+def check_zone(apex, www):
+    problems = []
+
+    # The apex must have SOA and NS. A CNAME here is illegal.
+    apex_cname = query(apex, &quot;CNAME&quot;)
+    if apex_cname and apex_cname != [&quot;NXDOMAIN&quot;]:
+        problems.append(f&quot;apex has a CNAME: {apex_cname}&quot;)
+
+    if not query(apex, &quot;SOA&quot;):
+        problems.append(&quot;apex has no SOA&quot;)
+    if not query(apex, &quot;NS&quot;):
+        problems.append(&quot;apex has no NS&quot;)
+
+    # The www node should be a CNAME and nothing else.
+    www_cname = query(www, &quot;CNAME&quot;)
+    www_a = query(www, &quot;A&quot;)
+    if not www_cname:
+        problems.append(&quot;www has no CNAME&quot;)
+    if www_a and www_cname:
+        problems.append(&quot;www has both CNAME and A records&quot;)
+
+    return problems
+
+if __name__ == &quot;__main__&quot;:
+    issues = check_zone(APEX, WWW)
+    if issues:
+        for issue in issues:
+            print(&quot;FAIL:&quot;, issue)
+    else:
+        print(&quot;zone looks consistent&quot;)
+</code></pre>
+
+<p>Run it against the authoritative servers, not just your local resolver, so you see what the world sees. You can set the resolver explicitly:</p>
+<pre class="codehilite"><code class="language-python">import dns.resolver
+
+resolver = dns.resolver.Resolver(configure=False)
+# Use the provider's authoritative nameservers, from the NS set.
+resolver.nameservers = [&quot;ns1.example.net&quot;, &quot;ns2.example.net&quot;]
+resolver.lifetime = 5
+</code></pre>
+
+<h3 id="step-4-check-the-http-redirect">Step 4: Check the HTTP redirect</h3>
+<p>Once DNS is correct, confirm the redirect behavior with a request that does not follow redirects:</p>
+<pre class="codehilite"><code class="language-python">import urllib.request
+import urllib.error
+
+def check_redirect(url):
+    req = urllib.request.Request(url, method=&quot;HEAD&quot;)
+    opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+    try:
+        # Prevent automatic following so we can inspect the 301.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+        opener = urllib.request.build_opener(NoRedirect)
+        resp = opener.open(req, timeout=10)
+        print(url, &quot;-&gt;&quot;, resp.status)
+    except urllib.error.HTTPError as e:
+        location = e.headers.get(&quot;Location&quot;)
+        print(url, &quot;-&gt;&quot;, e.code, &quot;Location:&quot;, location)
+    except Exception as e:
+        print(url, &quot;-&gt; error:&quot;, e)
+
+check_redirect(&quot;http://hkcode.dpdns.org/&quot;)
+check_redirect(&quot;https://hkcode.dpdns.org/&quot;)
+</code></pre>
+
+<p>You want a 301 (or 308) with <code>Location: https://www.hkcode.dpdns.org/</code>. If you get a connection error, the apex has no address records and the redirect never happens. If you get a 200, GitHub is serving the apex directly — check whether the custom domain in the repo settings is set to the bare name, which changes the canonical host.</p>
+<h2 id="common-failure-modes">Common failure modes</h2>
+<ul>
+<li><strong>CNAME at the apex "because the provider allowed it."</strong> The zone loads, but some resolvers fail on the SOA or NS query. Symptom: intermittent <code>SERVFAIL</code> from specific networks.</li>
+<li><strong>CNAME at <code>www</code> plus an A record "for safety."</strong> Same violation, smaller blast radius. Remove the A record.</li>
+<li><strong>Apex A records but no <code>www</code> CNAME.</strong> The site works at the bare name but not at <code>www</code>, or vice versa, and the canonical URL drifts.</li>
+<li><strong>Provider redirect without HTTPS.</strong> The apex redirects over HTTP only, and browsers block or warn. Make sure the redirect target uses <code>https://</code>.</li>
+<li><strong>Stale TTLs during migration.</strong> Lower the TTL on the old records to 300 seconds a day before the change, then raise it after the switch settles.</li>
+</ul>
+<h2 id="summary">Summary</h2>
+<p>A CNAME at the apex is not a configuration choice; it is a contradiction of the zone's required SOA and NS records under RFC 1034 and 2181. ALIAS/ANAME records are a provider-side flattening trick that returns address records instead of a CNAME, and they work but do not travel. GitHub Pages expects a CNAME on <code>www</code> and either A/AAAA records or a provider redirect on the apex, with an HTTP 301 from the bare name to <code>www</code>. Set the CNAME on the subdomain, give the apex address records or a redirect, and verify both the DNS invariants and the redirect with a script rather than the control panel.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-23 08:46:52</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BTW</td>
+<td>高质量标的做多</td>
+<td>$1.8281</td>
+<td>$1.9561</td>
+<td>$1.7641</td>
+<td>1:2.0</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">apex domain</span><span class="tag-badge">CNAME</span><span class="tag-badge">RFC</span><span class="tag-badge">www subdomain</span><span class="tag-badge">ALIAS record</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
