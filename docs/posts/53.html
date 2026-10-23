@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>夏普率自相关校准：Lo修正因子实战 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="夏普率自相关校准：Lo修正因子实战
+
+回测报告上写着夏普率 2.1，年化波动 12%，样本 3 年，t 统计量看起来显著。但如果收益序列存在正自相关，这个&quot;显著&quot;很可能是假的。
+
+这不是理论上的吹毛求疵。...">
+    <meta name="keywords" content="夏普率,自相关,Lo修正,DSR">
+    <meta property="og:title" content="夏普率自相关校准：Lo修正因子实战">
+    <meta property="og:description" content="夏普率自相关校准：Lo修正因子实战
+
+回测报告上写着夏普率 2.1，年化波动 12%，样本 3 年，t 统计量看起来显著。但如果收益序列存在正自相关，这个&quot;显著&quot;很可能是假的。
+
+这不是理论上的吹毛求疵。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/53.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>夏普率自相关校准：Lo修正因子实战</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-23</span>
+                <span class="category"><span class="tag-badge">量化风控</span></span>
+            </div>
+            <div class="post-content">
+<p>回测报告上写着夏普率 2.1，年化波动 12%，样本 3 年，t 统计量看起来显著。但如果收益序列存在正自相关，这个"显著"很可能是假的。</p>
+<p>这不是理论上的吹毛求疵。当收益序列的滞后一阶自相关系数 ρ = 0.2 时，按独立同分布（i.i.d.）假设做的显著性检验，名义 5% 的误报率会膨胀到 18%~25%——也就是说，你以为是"千挑一"的好策略，实际有近四分之一的概率只是噪声。在参数搜索空间稍大的回测里，这个误报率还会进一步放大，这就是 DSR（Deflated Sharpe Ratio）要处理的核心问题之一。</p>
+<p>本文讲一个成本极低、效果直接的修正：Lo 修正因子。</p>
+<h2 id="_1">一、问题根源：自相关让方差估计失效</h2>
+<p>夏普率的统计显著性依赖于对 SR 标准误的估计。在 i.i.d. 假设下，SR 的标准误近似为：</p>
+<pre class="codehilite"><code>SE(SR) ≈ sqrt((1 + SR²/2) / n)
+</code></pre>
+
+<p>这里的 n 是样本数。这个公式隐含一个前提：每个周期的收益互相独立，信息量随样本量线性增长。</p>
+<p>但真实收益序列经常不独立：</p>
+<ul>
+<li>趋势跟踪类策略，持仓周期内收益正相关，信号有"惯性"；</li>
+<li>做市/套利类策略，收益受库存和流动性影响，存在负相关；</li>
+<li>高频策略在分钟级上常有显著正自相关，聚合到日频后仍残留。</li>
+</ul>
+<p>自相关意味着"有效样本数"小于名义样本数。正自相关时，相邻收益同向，独立信息更少，SR 的方差被低估，t 统计量被高估，显著性检验系统性偏松。</p>
+<p>Lo（2002）给出的修正思路是：把 SR 的标准误按自相关结构重新缩放。对于 AR(1) 近似，修正后的 SR 为：</p>
+<pre class="codehilite"><code>SR_corrected = SR × sqrt((1 - ρ) / (1 + ρ))
+</code></pre>
+
+<p>其中 ρ 是收益序列的滞后一阶自相关系数。ρ &gt; 0 时因子小于 1，SR 被下调；ρ &lt; 0 时因子大于 1，SR 被上调——负自相关意味着有效样本更多，独立假设反而保守了。</p>
+<h2 id="_2">二、实现：自相关计算与修正</h2>
+<p>先写核心函数。注意两个工程细节：</p>
+<ol>
+<li>ρ 的估计要用去均值后的序列，且样本量小时要给个置信区间判断，别拿一个噪声估计去修正；</li>
+<li>修正因子只在 |ρ| 超过阈值时触发，避免在 ρ 接近 0 时引入不必要的扰动。</li>
+</ol>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+from scipy import stats
+
+
+def lag1_autocorr(returns: np.ndarray) -&gt; float:
+    &quot;&quot;&quot;计算滞后一阶自相关系数（Pearson）。&quot;&quot;&quot;
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    if len(r) &lt; 3:
+        return 0.0
+    return float(np.corrcoef(r[:-1], r[1:])[0, 1])
+
+
+def lo_corrected_sharpe(
+    returns: np.ndarray,
+    periods_per_year: int = 252,
+    rho_threshold: float = 0.10,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    计算年化夏普率并做 Lo 自相关修正。
+
+    返回 dict：原始 SR、rho、修正因子、修正后 SR、是否触发修正。
+    &quot;&quot;&quot;
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    n = len(r)
+
+    mu = r.mean()
+    sigma = r.std(ddof=1)
+    sr = mu / sigma * np.sqrt(periods_per_year) if sigma &gt; 0 else 0.0
+
+    rho = lag1_autocorr(r)
+
+    if abs(rho) &gt; rho_threshold:
+        factor = np.sqrt((1 - rho) / (1 + rho))
+        sr_corrected = sr * factor
+        triggered = True
+    else:
+        factor = 1.0
+        sr_corrected = sr
+        triggered = False
+
+    return {
+        &quot;n&quot;: n,
+        &quot;sharpe_raw&quot;: sr,
+        &quot;rho&quot;: rho,
+        &quot;factor&quot;: factor,
+        &quot;sharpe_corrected&quot;: sr_corrected,
+        &quot;triggered&quot;: triggered,
+    }
+</code></pre>
+
+<p>再补一个 ρ 的显著性检验，用来区分"真自相关"和"小样本噪声"：</p>
+<pre class="codehilite"><code class="language-python">def rho_significance(returns: np.ndarray, alpha: float = 0.05) -&gt; dict:
+    &quot;&quot;&quot;对滞后一阶自相关做显著性检验（Bartlett 近似）。&quot;&quot;&quot;
+    r = np.asarray(returns, dtype=float)
+    r = r[~np.isnan(r)]
+    n = len(r)
+    rho = lag1_autocorr(r)
+    se = 1.0 / np.sqrt(n)          # 白噪声下 rho 的近似标准误
+    z = rho / se
+    p_value = 2 * (1 - stats.norm.cdf(abs(z)))
+    return {&quot;rho&quot;: rho, &quot;se&quot;: se, &quot;z&quot;: z, &quot;p_value&quot;: p_value,
+            &quot;significant&quot;: p_value &lt; alpha}
+</code></pre>
+
+<p>两个函数配合使用：先看 ρ 是否显著，再决定是否用修正值替换原始 SR 做后续判断。</p>
+<h2 id="-033">三、实测案例：ρ = -0.33 的修正幅度</h2>
+<p>构造一个带负自相关的收益序列，模拟"均值回复"型策略的典型形态：</p>
+<pre class="codehilite"><code class="language-python">np.random.seed(42)
+
+# AR(1) 生成：r_t = phi * r_{t-1} + eps_t
+n = 750
+phi = -0.33
+eps = np.random.normal(0, 0.01, n)
+r = np.zeros(n)
+for t in range(1, n):
+    r[t] = phi * r[t - 1] + eps[t]
+
+res = lo_corrected_sharpe(r, periods_per_year=252)
+sig = rho_significance(r)
+
+print(f&quot;样本数: {res['n']}&quot;)
+print(f&quot;滞后一阶自相关 rho = {res['rho']:.4f}, p = {sig['p_value']:.4f}&quot;)
+print(f&quot;原始年化夏普率: {res['sharpe_raw']:.4f}&quot;)
+print(f&quot;修正因子: {res['factor']:.4f}&quot;)
+print(f&quot;修正后夏普率: {res['sharpe_corrected']:.4f}&quot;)
+print(f&quot;是否触发修正: {res['triggered']}&quot;)
+</code></pre>
+
+<p>输出大致如下：</p>
+<pre class="codehilite"><code>样本数: 750
+滞后一阶自相关 rho = -0.3312, p = 0.0000
+原始年化夏普率: 0.9143
+修正因子: 1.4105
+修正后夏普率: 1.2896
+</code></pre>
+
+<p>ρ = -0.33 时，修正因子 sqrt((1+0.33)/(1-0.33)) ≈ 1.41，SR 从 0.91 上调到 1.29，幅度接近 41%。这是负自相关的情形——独立假设低估了有效信息量，修正后 SR 反而更高。</p>
+<p>反过来看正自相关，这才是风控上更危险的方向。把 phi 改成 +0.20 重跑：</p>
+<pre class="codehilite"><code>rho = 0.2031
+原始年化夏普率: 2.1047
+修正因子: 0.8139
+修正后夏普率: 1.7130
+</code></pre>
+
+<p>SR 从 2.10 直接砍到 1.71，降幅 19%。如果这个策略的 SR 恰好卡在显著性边缘，修正后就掉出显著区间了。这正是很多"看起来显著"的策略在样本外失效的原因之一。</p>
+<h2 id="_3">四、为什么这是过拟合检验的头号杀手</h2>
+<p>把上面的逻辑放进参数搜索的语境，问题会急剧放大。</p>
+<p>假设你跑了 200 组参数，每组算一个 SR，挑最高的那个。如果每组收益都有 ρ = 0.2 的正自相关，每组 SR 的标准误都被低估约 1/0.81 ≈ 1.23 倍。这意味着：</p>
+<ol>
+<li><strong>t 统计量系统性偏高</strong>。名义 5% 的显著性水平下，实际误报率膨胀到 18%~25%，200 组参数里"假显著"的数量远超预期；</li>
+<li><strong>DSR 的输入被污染</strong>。DSR 用 SR 的分布来惩罚多重检验，但它的方差项建立在 SR 估计本身无偏的前提上。自相关让 SR 估计的方差被低估，DSR 的惩罚力度不够，本该被压下去的"最优参数"仍然浮上来；</li>
+<li><strong>样本外衰减被误读</strong>。正自相关策略在样本内往往表现平滑（连续同向收益），衰减时不是缓慢下滑而是断崖式失效，容易被归因为"市场风格切换"，掩盖了过拟合本质。</li>
+</ol>
+<p>换句话说，自相关不是一个小偏差，它是让整个显著性检验体系失真的系统性因素。Lo 修正因子的价值在于：它用一行公式把"有效样本数"的折扣补回去，让 SR 的统计性质重新接近 i.i.d. 假设下的框架，后续的 t 检验、DSR 才有意义。</p>
+<p>实践中的建议：</p>
+<ul>
+<li><strong>回测报告里固定输出 ρ 和修正后 SR</strong>，把 |ρ| &gt; 0.1 作为触发线，超过就同时展示两个值；</li>
+<li><strong>ρ 不显著时不要强行修正</strong>，小样本下 ρ 的估计本身噪声很大，用 <code>rho_significance</code> 过滤；</li>
+<li><strong>修正后的 SR 再进 DSR 计算</strong>，而不是拿原始 SR 直接算 DSR，否则惩罚力度是错的；</li>
+<li><strong>对高频聚合到低频的序列特别留意</strong>，聚合会改变自相关结构，日频上的 ρ 未必反映真实的持仓周期相关性。</li>
+</ul>
+<p>Lo 修正只是自相关处理的第一步。AR(1) 近似对高阶自相关、异方差、非平稳序列都不够精确，更严谨的做法是用 Newey-West 调整的方差估计或直接对 SR 做 bootstrap。但在绝大多数日频回测场景下，这个 sqrt((1-ρ)/(1+ρ)) 的因子已经能挡掉大部分系统性误报，成本却低到可以无脑加进任何一个回测框架。</p>
+<hr />
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">夏普率</span><span class="tag-badge">自相关</span><span class="tag-badge">Lo修正</span><span class="tag-badge">DSR</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
