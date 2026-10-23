@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>夏普率自相关校准：Lo修正因子实战</title>
+            <link>https://www.hkcode.dpdns.org/posts/53.html</link>
+            <description>夏普率自相关校准：Lo修正因子实战
+
+回测报告上写着夏普率 2.1，年化波动 12%，样本 3 年，t 统计量看起来显著。但如果收益序列存在正自相关，这个&quot;显著&quot;很可能是假的。
+
+这不是理论上的吹毛求疵。...</description>
+            <pubDate>2026-10-23</pubDate>
+            <category>量化风控</category>
+        </item>
+        <item>
             <title>蒙特卡洛置换检验：给交易策略做一次压力审计</title>
             <link>https://www.hkcode.dpdns.org/posts/52.html</link>
             <description>蒙特卡洛置换检验：给交易策略做一次压力审计
@@ -177,13 +188,6 @@
             <link>https://www.hkcode.dpdns.org/posts/34.html</link>
             <description>做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。 原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。 一、为什么仓位控制比择时更重要 先看一个简单的数学事实。假设账户回撤 50%，需要...</description>
             <pubDate>2026-10-03</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>3连败熔断机制：保护资金的自动停损设计</title>
-            <link>https://www.hkcode.dpdns.org/posts/33.html</link>
-            <description>策略连续亏损是每个量化交易者都会遇到的事。问题不在于亏损本身，而在于亏损之后的处理方式。很多人会选择&quot;再扛一扛&quot;，结果小亏变大亏。这篇文章讲一个简单的工程手段：3连败熔断——当策略连续3次交易亏损时，自动暂停该策略，进入冷却期，避免情绪化或系统性失效下的持续失血。 为什么是&quot;连败&quot;而不是&quot;总亏损&quot; 单笔亏损是随机的，连...</description>
-            <pubDate>2026-10-02</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
