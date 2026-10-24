@@ -7,6 +7,21 @@
         <language>zh-CN</language>
         
         <item>
+            <title>回撤断路器的盲区：已实现盈亏遮住的眼睛</title>
+            <link>https://www.hkcode.dpdns.org/posts/54.html</link>
+            <description>回撤断路器的盲区：已实现盈亏遮住的眼睛
+
+一、盲区的本质
+
+大多数回撤保护模块的设计逻辑是这样的：
+
+
+
+这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。但它有一个根本性的盲区：所有判断都基于 on_trade_closed，也就是已实现盈亏（realized PnL）。...</description>
+            <pubDate>2026-10-24</pubDate>
+            <category>量化风控</category>
+        </item>
+        <item>
             <title>夏普率自相关校准：Lo修正因子实战</title>
             <link>https://www.hkcode.dpdns.org/posts/53.html</link>
             <description>夏普率自相关校准：Lo修正因子实战
@@ -181,13 +196,6 @@
             <link>https://www.hkcode.dpdns.org/posts/35.html</link>
             <description>做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。 这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。全部用可运行的Python代码演示。 一、先搞清楚数据长什么样 拿到一份K...</description>
             <pubDate>2026-10-04</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>资金管理：仓位控制的核心原则</title>
-            <link>https://www.hkcode.dpdns.org/posts/34.html</link>
-            <description>做量化策略的人，迟早会撞上同一个问题：策略信号对了，钱却没赚到，甚至亏了。 原因通常不在信号本身，而在仓位。同一个策略，仓位管理不同，收益曲线可以差出几倍，回撤可以差出十倍。信号决定&quot;往哪打&quot;，资金管理决定&quot;打多重&quot;。这篇文章只讲后者。 一、为什么仓位控制比择时更重要 先看一个简单的数学事实。假设账户回撤 50%，需要...</description>
-            <pubDate>2026-10-03</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
