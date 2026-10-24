@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serving a Bilingual Static Site on GitHub Pages - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why one repo, two sites A Chinese blog already lived at the domain root: example.com/....">
+    <meta name="keywords" content="multilingual site,GitHub Pages,directory layout,sitemap,hreflang">
+    <meta property="og:title" content="Serving a Bilingual Static Site on GitHub Pages">
+    <meta property="og:description" content="Why one repo, two sites A Chinese blog already lived at the domain root: example.com/....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/26.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Serving a Bilingual Static Site on GitHub Pages</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-24</span>
+                <span class="category"><span class="tag-badge">Domains &amp; Deployment</span></span>
+            </div>
+            <div class="post-content">
+<p>A Chinese blog already lived at the domain root: <code>example.com/</code>. The goal was an English sibling at <code>example.com/en/</code> without a second repository, a second domain, or a second deploy pipeline. That constraint drives every decision below.</p>
+<p>The layout that ended up working:</p>
+<pre class="codehilite"><code>repo/
+├── CNAME                 # single domain for both languages
+├── published/            # Chinese article manifests (one JSON per post)
+├── published_en/         # English article manifests
+├── templates/            # shared design system, Jinja2
+├── static/               # shared CSS, JS, fonts
+├── build.py              # generator for the root site
+├── build_en.py           # generator for /en
+└── docs/                 # GitHub Pages output (root = Chinese, /en = English)
+    ├── index.html
+    ├── sitemap.xml
+    ├── rss.xml
+    └── en/
+        ├── index.html
+        ├── sitemap.xml
+        └── rss.xml
+</code></pre>
+
+<p>GitHub Pages serves <code>docs/</code> from the branch, so the directory tree <em>is</em> the URL tree. The Chinese site is the root; the English site is a subdirectory. One <code>CNAME</code> file, one certificate, one <code>git push</code>.</p>
+<h2 id="separate-manifests-prevent-cross-language-idempotency-bugs">Separate manifests prevent cross-language idempotency bugs</h2>
+<p>The first version kept one manifest directory with a <code>lang</code> field per article. Generation was supposed to be idempotent: run <code>build.py</code> twice, get identical output. It wasn't. The bug came from how the generator picked slugs and resolved "previous/next" links.</p>
+<p>With a single pool, the Chinese generator saw English articles as candidates for adjacency and for slug-collision checks. A Chinese post at <code>2024/03/foo</code> and an English post at <code>2024/03/foo</code> (same slug, different language) would race for the same output path. Whichever ran second silently overwrote the first. Worse, rerunning the build could change <em>which</em> one won if the manifest glob order shifted. Non-deterministic output from deterministic input is the worst class of build bug: it looks fine locally, then a post disappears in production a week later.</p>
+<p>The fix is boring and total: two manifest directories, <code>published/</code> and <code>published_en/</code>, and each generator reads only its own. No <code>lang</code> filter, no shared slug namespace, no cross-language adjacency. The English generator cannot see Chinese manifests, so it cannot be affected by them.</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+import json
+
+MANIFEST_DIRS = {
+    &quot;zh&quot;: Path(&quot;published&quot;),
+    &quot;en&quot;: Path(&quot;published_en&quot;),
+}
+
+def load_manifests(lang: str) -&gt; list[dict]:
+    &quot;&quot;&quot;Load only this language's manifests, sorted newest first.&quot;&quot;&quot;
+    posts = []
+    for path in MANIFEST_DIRS[lang].glob(&quot;*.json&quot;):
+        with path.open(encoding=&quot;utf-8&quot;) as f:
+            post = json.load(f)
+        post[&quot;_source&quot;] = path.name
+        posts.append(post)
+    posts.sort(key=lambda p: p[&quot;date&quot;], reverse=True)
+
+    slugs = [p[&quot;slug&quot;] for p in posts]
+    if len(slugs) != len(set(slugs)):
+        raise ValueError(f&quot;duplicate slug in {lang} manifests&quot;)
+
+    return posts
+</code></pre>
+
+<p>The duplicate-slug check now guards a single language, which is exactly the invariant you want: slugs must be unique <em>within</em> a site, not across sites, because the two sites live at different URL prefixes.</p>
+<p>The generators share the design system but nothing else. <code>build.py</code> and <code>build_en.py</code> both import <code>templates/</code> and <code>static/</code>, both write into <code>docs/</code>, but each owns its manifest set and its own URL prefix. If the English site needs a different layout tweak later, it can diverge without touching the Chinese build.</p>
+<h2 id="one-prefix-constant-keeps-links-consistent">One prefix constant keeps links consistent</h2>
+<p>Every internal link needs two pieces: the site root (<code>""</code> for Chinese, <code>"en"</code> for English) and the article path. Hardcoding either one is how you end up with an English page linking to a Chinese article, or a link that works locally (<code>/en/...</code>) but 404s under a project-page base path.</p>
+<p>The fix is a single constant per build plus a helper that joins them. Nothing else in the codebase constructs internal URLs by string concatenation.</p>
+<pre class="codehilite"><code class="language-python"># In build.py
+SITE_PREFIX = &quot;&quot;          # Chinese site at the domain root
+LANG = &quot;zh&quot;
+
+# In build_en.py
+SITE_PREFIX = &quot;en&quot;        # English site under /en
+LANG = &quot;en&quot;
+</code></pre>
+
+<p>Both files import one shared module for URL construction:</p>
+<pre class="codehilite"><code class="language-python"># urls.py
+def site_url(prefix: str, path: str = &quot;&quot;) -&gt; str:
+    &quot;&quot;&quot;Absolute-path URL for an internal page.
+
+    site_url(&quot;&quot;, &quot;about/&quot;)      -&gt; &quot;/about/&quot;
+    site_url(&quot;en&quot;, &quot;about/&quot;)    -&gt; &quot;/en/about/&quot;
+    &quot;&quot;&quot;
+    parts = [p.strip(&quot;/&quot;) for p in (prefix, path) if p.strip(&quot;/&quot;)]
+    return &quot;/&quot; + &quot;/&quot;.join(parts) + (&quot;/&quot; if path.endswith(&quot;/&quot;) or not path else &quot;&quot;)
+</code></pre>
+
+<p>Then the templates never see raw paths. The build passes a <code>url</code> function into the Jinja2 environment:</p>
+<pre class="codehilite"><code class="language-python">from jinja2 import Environment, FileSystemLoader
+from urls import site_url
+
+def make_env(prefix: str) -&gt; Environment:
+    env = Environment(loader=FileSystemLoader(&quot;templates&quot;), autoescape=True)
+    env.globals[&quot;url&quot;] = lambda path=&quot;&quot;: site_url(prefix, path)
+    return env
+</code></pre>
+
+<p>In templates, links become <code>{{ url('posts/' + post.slug + '/') }}</code> and assets become <code>{{ url('static/main.css') }}</code>. Because <code>url</code> closes over the prefix, the same template renders correct links for both languages. A Chinese page emits <code>/posts/foo/</code>; an English page emits <code>/en/posts/foo/</code>. There is no branch in the template and no opportunity to forget the prefix.</p>
+<h3 id="the-asset-trap">The asset trap</h3>
+<p>Shared assets under <code>static/</code> are the one place where a prefix-relative link is wrong. If the English page links to <code>/en/static/main.css</code> but the file only exists at <code>/static/main.css</code>, you get a 404 on every English page. Two options: emit absolute asset URLs from the domain root, or mirror the assets under both prefixes. Mirroring doubles the files and the cache entries. The cleaner choice is a separate helper for assets that ignores the language prefix:</p>
+<pre class="codehilite"><code class="language-python">env.globals[&quot;asset&quot;] = lambda path: &quot;/static/&quot; + path.lstrip(&quot;/&quot;)
+</code></pre>
+
+<p>Templates use <code>{{ asset('main.css') }}</code> for CSS/JS/fonts and <code>{{ url(...) }}</code> for anything that belongs to a language. One rule, applied consistently, and the asset 404s stop.</p>
+<h2 id="cross-language-navigation-in-both-navs">Cross-language navigation in both navs</h2>
+<p>Each nav needs a link to the <em>equivalent</em> page in the other language, not just the other homepage. On an article page, "English" should go to that article's English version if it exists; otherwise fall back to the English index.</p>
+<p>That requires a mapping between the two manifest sets. The simplest reliable key is an explicit <code>translation_key</code> field present in both manifests for paired articles:</p>
+<pre class="codehilite"><code class="language-python">def build_translation_map(zh_posts, en_posts):
+    &quot;&quot;&quot;Map (lang, translation_key) -&gt; slug for cross-language links.&quot;&quot;&quot;
+    mapping = {}
+    for lang, posts in ((&quot;zh&quot;, zh_posts), (&quot;en&quot;, en_posts)):
+        for post in posts:
+            key = post.get(&quot;translation_key&quot;)
+            if key:
+                mapping[(lang, key)] = post[&quot;slug&quot;]
+    return mapping
+</code></pre>
+
+<p>When rendering a Chinese post with <code>translation_key: "gh-pages-bilingual"</code>, the nav looks up <code>("en", "gh-pages-bilingual")</code>. If found, the link points to <code>/en/posts/&lt;slug&gt;/</code>; if not, it points to <code>/en/</code>. Same logic in reverse for the English site. Articles without a translation still get a working language switch, just at the section root.</p>
+<pre class="codehilite"><code class="language-python">def alt_lang_href(post, mapping, target_lang, target_prefix):
+    key = post.get(&quot;translation_key&quot;)
+    slug = mapping.get((target_lang, key)) if key else None
+    if slug:
+        return site_url(target_prefix, f&quot;posts/{slug}/&quot;)
+    return site_url(target_prefix)
+</code></pre>
+
+<p>The <code>hreflang</code> tags in <code>&lt;head&gt;</code> use the same function, so the machine-readable and human-readable links can't drift apart:</p>
+<pre class="codehilite"><code class="language-python">def hreflang_links(post, mapping):
+    links = [(&quot;zh&quot;, site_url(&quot;&quot;, f&quot;posts/{post['slug']}/&quot;) if post[&quot;lang&quot;] == &quot;zh&quot;
+              else site_url(&quot;&quot;, f&quot;posts/{mapping[('zh', post['translation_key'])]}/&quot;))]
+    # ... same for en, plus x-default pointing at the Chinese page
+</code></pre>
+
+<p>In practice it's cleaner to compute both URLs once and pass a small dict into the template, but the principle holds: cross-language links are derived from the translation map, never typed by hand.</p>
+<h2 id="per-language-sitemaps-and-feeds">Per-language sitemaps and feeds</h2>
+<p>A single root <code>sitemap.xml</code> listing both languages is legal, but it makes Search Console reporting muddy and forces every URL to carry <code>hreflang</code> annotations in one file. Since the two sites already have separate manifests and separate generators, each generator writes its own sitemap and feed under its own prefix:</p>
+<ul>
+<li><code>docs/sitemap.xml</code> and <code>docs/rss.xml</code> — Chinese</li>
+<li><code>docs/en/sitemap.xml</code> and <code>docs/en/rss.xml</code> — English</li>
+</ul>
+<pre class="codehilite"><code class="language-python">from xml.sax.saxutils import escape
+from datetime import datetime
+
+def write_sitemap(posts, prefix: str, out_path: Path, base: str = &quot;https://example.com&quot;):
+    urls = [f&quot;{base}{site_url(prefix)}&quot;]
+    urls += [f&quot;{base}{site_url(prefix, f'posts/{p[\&quot;slug\&quot;]}/')}&quot; for p in posts]
+
+    body = &quot;\n&quot;.join(
+        f&quot;  &lt;url&gt;&lt;loc&gt;{escape(u)}&lt;/loc&gt;&lt;/url&gt;&quot; for u in urls
+    )
+    xml = (
+        '&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;\n'
+        '&lt;urlset xmlns=&quot;http://www.sitemaps.org/schemas/sitemap/0.9&quot;&gt;\n'
+        f&quot;{body}\n&lt;/urlset&gt;\n&quot;
+    )
+    out_path.write_text(xml, encoding=&quot;utf-8&quot;)
+</code></pre>
+
+<p>The RSS feed follows the same shape, reading <code>&lt;link&gt;</code> values from <code>site_url(prefix, ...)</code>. Because both use the same prefix constant, a feed can never contain a URL from the wrong language.</p>
+<p>If you want the sitemaps discoverable without submitting each one manually, add a sitemap index at the root:</p>
+<pre class="codehilite"><code class="language-python">def write_sitemap_index(base: str, out_path: Path):
+    entries = [
+        f&quot;{base}/sitemap.xml&quot;,
+        f&quot;{base}/en/sitemap.xml&quot;,
+    ]
+    body = &quot;\n&quot;.join(
+        f&quot;  &lt;sitemap&gt;&lt;loc&gt;{escape(u)}&lt;/loc&gt;&lt;/sitemap&gt;&quot; for u in entries
+    )
+    out_path.write_text(
+        '&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;\n'
+        '&lt;sitemapindex xmlns=&quot;http://www.sitemaps.org/schemas/sitemap/0.9&quot;&gt;\n'
+        f&quot;{body}\n&lt;/sitemapindex&gt;\n&quot;,
+        encoding=&quot;utf-8&quot;,
+    )
+</code></pre>
+
+<h2 id="after-the-domain-switch-submit-the-second-sitemap">After the domain switch: submit the second sitemap</h2>
+<p>The domain move is where this layout earns its keep. When the site moved to a custom domain, the <code>CNAME</code> file changed once and both languages moved together. GitHub Pages issued the certificate for the new domain, and the root site's URLs redirected cleanly because they were always relative to the domain root.</p>
+<p>The English site needed one extra step. Search Console properties are per-domain (or per-URL-prefix), and the new domain was verified fresh. The root <code>sitemap.xml</code> was submitted immediately, but <code>/en/sitemap.xml</code> sat unsubmitted for a week. English pages were indexed slowly and with stale titles. The fix was to open the new property's Sitemaps report and add <code>https://example.com/en/sitemap.xml</code> as a second sitemap. Within days the English pages were crawled at the same rate as the Chinese ones.</p>
+<p>Two practical notes from that episode. First, submit the sitemap index if you wrote one; Search Console will follow it. Second, the <code>hreflang</code> annotations matter more after a domain change, because the crawler is re-evaluating which URLs are alternates of which. If your language switch links were broken by the move, the annotations would point at dead URLs and the English pages would be treated as orphans. Keeping the language switch derived from the translation map, as above, means a domain change doesn't touch link logic at all.</p>
+<h2 id="what-the-layout-buys-you">What the layout buys you</h2>
+<p>The whole design rests on three invariants: one manifest directory per language, one prefix constant per build, one URL helper used everywhere. Everything else — sitemaps, feeds, <code>hreflang</code>, cross-language nav — falls out of those. The build is idempotent because the two generators can't see each other's inputs. Links are consistent because no template constructs a URL by hand. And adding a third language later is a matter of a new manifest directory, a new prefix, and a new generator file, not a refactor.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-24 08:47:12</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BIRB</td>
+<td>弱做多</td>
+<td>$0.1706</td>
+<td>$0.1835</td>
+<td>$0.1621</td>
+<td>1:1.5</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">multilingual site</span><span class="tag-badge">GitHub Pages</span><span class="tag-badge">directory layout</span><span class="tag-badge">sitemap</span><span class="tag-badge">hreflang</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
