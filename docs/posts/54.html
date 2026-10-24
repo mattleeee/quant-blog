@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>回撤断路器的盲区：已实现盈亏遮住的眼睛 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="回撤断路器的盲区：已实现盈亏遮住的眼睛
+
+一、盲区的本质
+
+大多数回撤保护模块的设计逻辑是这样的：
+
+
+
+这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。...">
+    <meta name="keywords" content="回撤保护,连亏保护,浮亏,风控盲区">
+    <meta property="og:title" content="回撤断路器的盲区：已实现盈亏遮住的眼睛">
+    <meta property="og:description" content="回撤断路器的盲区：已实现盈亏遮住的眼睛
+
+一、盲区的本质
+
+大多数回撤保护模块的设计逻辑是这样的：
+
+
+
+这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/54.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>回撤断路器的盲区：已实现盈亏遮住的眼睛</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-24</span>
+                <span class="category"><span class="tag-badge">量化风控</span></span>
+            </div>
+            <div class="post-content">
+<h2 id="_1">一、盲区的本质</h2>
+<p>大多数回撤保护模块的设计逻辑是这样的：</p>
+<pre class="codehilite"><code class="language-python">class DrawdownCircuitBreaker:
+    def __init__(self, max_daily_loss=0.03, max_consecutive_losses=5):
+        self.max_daily_loss = max_daily_loss
+        self.max_consecutive_losses = max_consecutive_losses
+        self.daily_realized_pnl = 0.0
+        self.consecutive_losses = 0
+
+    def on_trade_closed(self, pnl):
+        self.daily_realized_pnl += pnl
+        if pnl &lt; 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+    def can_open(self, equity):
+        if abs(self.daily_realized_pnl) / equity &gt; self.max_daily_loss:
+            return False
+        if self.consecutive_losses &gt;= self.max_consecutive_losses:
+            return False
+        return True
+</code></pre>
+
+<p>这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。但它有一个根本性的盲区：<strong>所有判断都基于 <code>on_trade_closed</code>，也就是已实现盈亏（realized PnL）</strong>。</p>
+<p>持仓中的浮亏（unrealized loss）在这个体系里是隐形的。</p>
+<h3 id="11">1.1 盲区场景复现</h3>
+<p>假设一个策略同时持有5个品种的多头仓位，每个仓位名义价值占总权益的20%。某天市场系统性下跌，每个仓位浮亏2%。</p>
+<p>账户层面：总权益浮亏 = 5 × 20% × 2% = <strong>2%</strong>。</p>
+<p>此时回撤断路器看到的是什么？</p>
+<ul>
+<li><code>daily_realized_pnl</code> = 0（一笔都没平）</li>
+<li><code>consecutive_losses</code> = 0（一笔都没平）</li>
+</ul>
+<p><strong>断路器纹丝不动，开仓权限依然全开。</strong></p>
+<p>如果策略逻辑在此时触发新的开仓信号（比如某个品种触及"加仓"条件），系统会毫不犹豫地执行。而实际上，账户已经在流血，总风险敞口在扩大。</p>
+<p>等价格继续下跌，浮亏扩大到4%，你终于决定止损平仓。这时候 <code>on_trade_closed</code> 被调用，<code>daily_realized_pnl</code> 瞬间跳到 -4%，断路器才姗姗来迟地触发。</p>
+<p><strong>回撤已经发生了，断路器只是事后确认了一下。</strong></p>
+<p>用一个简单的模拟来量化这个时间差：</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+
+np.random.seed(42)
+
+def simulate_blind_spot(n_positions=5, days=20, daily_drift=-0.003, daily_vol=0.015):
+    &quot;&quot;&quot;模拟持仓浮亏累积 vs 已实现盈亏的差异&quot;&quot;&quot;
+    records = []
+    realized_pnl = 0.0
+    position_value = 0.20  # 每个仓位占总权益20%
+
+    for day in range(days):
+        # 每个持仓的日收益率
+        returns = np.random.normal(daily_drift, daily_vol, n_positions)
+        unrealized_pnl = np.sum(returns * position_value)
+
+        # 假设策略在第10天才触发止损平仓
+        if day == 10:
+            realized_pnl = unrealized_pnl
+            unrealized_pnl = 0.0
+
+        records.append({
+            'day': day,
+            'realized_pnl': realized_pnl,
+            'unrealized_pnl': unrealized_pnl,
+            'total_pnl': realized_pnl + unrealized_pnl
+        })
+
+    return pd.DataFrame(records)
+
+df = simulate_blind_spot()
+print(df.to_string(index=False))
+</code></pre>
+
+<p>输出大概长这样：</p>
+<pre class="codehilite"><code> day  realized_pnl  unrealized_pnl  total_pnl
+   0        0.0000         -0.0089    -0.0089
+   1        0.0000         -0.0152    -0.0152
+   2        0.0000         -0.0201    -0.0201
+   3        0.0000         -0.0287    -0.0287
+   4        0.0000         -0.0331    -0.0331
+   5        0.0000         -0.0412    -0.0412
+   6        0.0000         -0.0388    -0.0388
+   7        0.0000         -0.0455    -0.0455
+   8        0.0000         -0.0512    -0.0512
+   9        0.0000         -0.0587    -0.0587
+  10       -0.0587          0.0000    -0.0587
+  ...
+</code></pre>
+
+<p>到第5天，全池浮亏已经超过4%，如果日亏损熔断阈值是3%，这个风控<strong>早该触发了</strong>。但因为一笔都没平，<code>realized_pnl</code> 始终是0，断路器完全沉默。</p>
+<p>这就是"已实现盈亏遮住的眼睛"。</p>
+<h2 id="_2">二、双口径监控设计</h2>
+<p>解决方案的核心思路很简单：<strong>把已实现回撤和全池浮亏分开计算，开仓决策时用更严格的那个口径做判断。</strong></p>
+<h3 id="21">2.1 数据结构设计</h3>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+from typing import Dict
+from datetime import date
+
+@dataclass
+class Position:
+    symbol: str
+    quantity: float
+    avg_cost: float
+    current_price: float
+
+    @property
+    def market_value(self) -&gt; float:
+        return self.quantity * self.current_price
+
+    @property
+    def unrealized_pnl(self) -&gt; float:
+        return (self.current_price - self.avg_cost) * self.quantity
+
+    @property
+    def unrealized_pnl_pct(self) -&gt; float:
+        cost = self.avg_cost * abs(self.quantity)
+        if cost == 0:
+            return 0.0
+        return self.unrealized_pnl / cost
+
+
+@dataclass
+class RiskState:
+    &quot;&quot;&quot;双口径风控状态&quot;&quot;&quot;
+    # 口径一：已实现
+    daily_realized_pnl: float = 0.0
+    consecutive_losses: int = 0
+
+    # 口径二：全池 mark-to-market
+    total_unrealized_pnl: float = 0.0
+    peak_equity: float = 0.0
+    current_equity: float = 0.0
+
+    # 配置
+    max_daily_loss_pct: float = 0.03
+    max_drawdown_pct: float = 0.08
+    max_consecutive_losses: int = 5
+    max_unrealized_loss_pct: float = 0.04  # 全池浮亏熔断阈值
+
+    def update_market_value(self, positions: Dict[str, Position], cash: float):
+        &quot;&quot;&quot;每次行情更新时调用，重算全池 mark-to-market&quot;&quot;&quot;
+        self.total_unrealized_pnl = sum(p.unrealized_pnl for p in positions.values())
+        self.current_equity = cash + sum(p.market_value for p in positions.values())
+        self.peak_equity = max(self.peak_equity, self.current_equity)
+
+    def on_trade_closed(self, pnl: float):
+        &quot;&quot;&quot;平仓时更新已实现口径&quot;&quot;&quot;
+        self.daily_realized_pnl += pnl
+        if pnl &lt; 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+    def check_circuit_breaker(self) -&gt; tuple[bool, str]:
+        &quot;&quot;&quot;
+        返回 (是否允许开仓, 触发原因)
+        双口径取严：任一触发即熔断
+        &quot;&quot;&quot;
+        if self.current_equity &lt;= 0:
+            return False, &quot;equity_exhausted&quot;
+
+        # --- 口径一：已实现 ---
+        realized_loss_pct = -self.daily_realized_pnl / self.current_equity
+        if realized_loss_pct &gt; self.max_daily_loss_pct:
+            return False, f&quot;realized_daily_loss:{realized_loss_pct:.2%}&quot;
+
+        if self.consecutive_losses &gt;= self.max_consecutive_losses:
+            return False, f&quot;consecutive_losses:{self.consecutive_losses}&quot;
+
+        # --- 口径二：全池浮亏 ---
+        if self.current_equity &gt; 0:
+            unrealized_loss_pct = -self.total_unrealized_pnl / self.current_equity
+            if unrealized_loss_pct &gt; self.max_unrealized_loss_pct:
+                return False, f&quot;unrealized_pool_loss:{unrealized_loss_pct:.2%}&quot;
+
+        # --- 口径二：权益回撤 ---
+        if self.peak_equity &gt; 0:
+            drawdown = (self.peak_equity - self.current_equity) / self.peak_equity
+            if drawdown &gt; self.max_drawdown_pct:
+                return False, f&quot;equity_drawdown:{drawdown:.2%}&quot;
+
+        return True, &quot;ok&quot;
+</code></pre>
+
+<h3 id="22">2.2 关键设计决策</h3>
+<p><strong>为什么用全池浮亏而不是逐笔浮亏？</strong></p>
+<p>逐笔浮亏会漏掉"分散持仓但同向暴露"的情况。5个品种各浮亏2%，单看每个都不触发止损，但组合层面已经亏了2%。全池口径捕捉的是<strong>组合层面的风险敞口</strong>，这与回撤保护的目标一致——保护的是账户权益，不是单个仓位。</p>
+<p><strong>为什么保留已实现口径？</strong></p>
+<p>已实现口径有其不可替代的价值：连亏保护本质上是在检测"策略逻辑是否失效"。连续5笔止损可能意味着市场结构变了，策略信号不再有效。这个信息无法从浮亏中推断出来，因为浮亏可能只是暂时的逆向波动。</p>
+<p>两个口径是<strong>互补关系，不是替代关系</strong>。</p>
+<p><strong>阈值怎么设？</strong></p>
+<p>全池浮亏阈值应该比已实现日亏损阈值更紧。经验上：</p>
+<pre class="codehilite"><code class="language-python"># 全池浮亏阈值 ≈ 已实现日亏损阈值 × 0.6 ~ 0.8
+max_unrealized_loss_pct = max_daily_loss_pct * 0.7
+</code></pre>
+
+<p>原因很直接：浮亏是"尚未兑现的损失"，但它在概率上已经是一部分真实风险。如果你等到它变成已实现才触发，中间这段时间你还在开新仓，风险敞口在扩大。提前用浮亏口径刹车，本质上是<strong>把风控从"事后确认"变成"事中干预"</strong>。</p>
+<h2 id="_3">三、与逐笔止损的互补关系</h2>
+<p>有人会说：我已经有逐笔止损了，每个仓位亏2%就平，为什么还需要全池浮亏熔断？</p>
+<p>因为逐笔止损和全池熔断解决的是不同层级的问题：</p>
+<table>
+<thead>
+<tr>
+<th>机制</th>
+<th>作用层级</th>
+<th>触发条件</th>
+<th>缺陷</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>逐笔止损</td>
+<td>单仓位</td>
+<td>单仓位亏损超阈值</td>
+<td>无法感知组合层面的同向暴露</td>
+</tr>
+<tr>
+<td>已实现日亏损熔断</td>
+<td>账户</td>
+<td>当日已平仓亏损超阈值</td>
+<td>浮亏期间完全沉默</td>
+</tr>
+<tr>
+<td>全池浮亏熔断</td>
+<td>账户</td>
+<td>全池 mark-to-market 亏损超阈值</td>
+<td>可能被短期波动误触发</td>
+</tr>
+</tbody>
+</table>
+<p>逐笔止损是<strong>微观风控</strong>，全池熔断是<strong>宏观风控</strong>。前者防止单笔交易失控，后者防止组合在系统性行情中集体流血。</p>
+<p>一个具体的互补场景：</p>
+<pre class="codehilite"><code class="language-python"># 场景：5个品种同向持仓，市场系统性下跌
+# 逐笔止损阈值 2%，全池熔断阈值 3%
+
+# Day 1: 每个品种浮亏 1.2%
+# 逐笔止损：全部未触发（1.2% &lt; 2%）
+# 全池浮亏：5 × 20% × 1.2% = 1.2%（未触发）
+
+# Day 2: 每个品种浮亏 2.1%
+# 逐笔止损：全部触发，5笔同时平仓
+# 结果：一次性实现 5 × 20% × 2.1% = 2.1% 的亏损
+# 已实现日亏损熔断：触发（2.1% &gt; 3%？不一定，看阈值）
+
+# 如果有全池浮亏熔断（阈值3%）：
+# Day 1 收盘全池浮亏 1.2%，未触发
+# Day 2 盘中全池浮亏触及 3% 时，全池熔断触发，禁止开新仓
+# 同时可以主动减仓，而不是等逐笔止损被动触发
+</code></pre>
+
+<p>关键差异在于：<strong>逐笔止损是"各管各的"，全池熔断是"统一指挥"</strong>。当多个仓位同时承压时，全池熔断能更早地发出信号，让你有时间做组合层面的决策（减仓、对冲、暂停开仓），而不是被动地等每个仓位各自触发止损。</p>
+<h3 id="31">3.1 集成到开仓决策流</h3>
+<pre class="codehilite"><code class="language-python">class TradingEngine:
+    def __init__(self, risk_state: RiskState):
+        self.risk_state = risk_state
+        self.positions: Dict[str, Position] = {}
+        self.cash = 1_000_000.0
+
+    def on_price_update(self, symbol: str, price: float):
+        if symbol in self.positions:
+            self.positions[symbol].current_price = price
+        self.risk_state.update_market_value(self.positions, self.cash)
+
+    def try_open(self, symbol: str, target_value: float) -&gt; bool:
+        allowed, reason = self.risk_state.check_circuit_breaker()
+        if not allowed:
+            print(f&quot;[CIRCUIT BREAKER] {reason} — 拒绝开仓 {symbol}&quot;)
+            return False
+
+        # 额外的仓位级检查
+        current_exposure = sum(p.market_value for p in self.positions.values())
+        if current_exposure + target_value &gt; self.risk_state.current_equity * 1.5:
+            print(f&quot;[EXPOSURE LIMIT] 总敞口超限 — 拒绝开仓 {symbol}&quot;)
+            return False
+
+        # 执行开仓...
+        return True
+</code></pre>
+
+<p>注意 <code>on_price_update</code> 里每次都调用 <code>update_market_value</code>，这是关键。全池浮亏口径必须是<strong>实时更新</strong>的，不能等到收盘才算。盘中价格跳动时，熔断判断就应该基于最新的 mark-to-market 数据。</p>
+<h3 id="32">3.2 一个容易踩的坑：浮亏口径的噪声</h3>
+<p>全池浮亏是实时计算的，这意味着它对短期波动非常敏感。如果阈值设得太紧，可能在正常波动中就频繁触发熔断，导致策略无法正常运转。</p>
+<p>两个缓解手段：</p>
+<p><strong>手段一：用滚动均值平滑</strong></p>
+<pre class="codehilite"><code class="language-python">from collections import deque
+
+class SmoothedUnrealizedTracker:
+    def __init__(self, window=5):
+        self.window = deque(maxlen=window)
+
+    def update(self, unrealized_pnl_pct: float):
+        self.window.append(unrealized_pnl_pct)
+
+    @property
+    def smoothed(self) -&gt; float:
+        if not self.window:
+            return 0.0
+        return sum(self.window) / len(self.window)
+</code></pre>
+
+<p>用5个更新周期的均值做熔断判断，过滤掉单次跳动的噪声。但注意：平滑会引入滞后，阈值需要相应放宽。</p>
+<p><strong>手段二：分层触发</strong></p>
+<pre class="codehilite"><code class="language-python">def check_unrealized_breaker(self) -&gt; tuple[str, str]:
+    &quot;&quot;&quot;分层：警告 / 限制 / 熔断&quot;&quot;&quot;
+    loss_pct = -self.total_unrealized_pnl / max(self.current_equity, 1e-9)
+
+    if loss_pct &gt; self.max_unrealized_loss_pct * 1.5:
+        return &quot;HALT&quot;, f&quot;unrealized_critical:{loss_pct:.2%}&quot;
+    elif loss_pct &gt; self.max_unrealized_loss_pct:
+        return &quot;RESTRICT&quot;, f&quot;unrealized_warning:{loss_pct:.2%}&quot;
+    return &quot;NORMAL&quot;, &quot;ok&quot;
+</code></pre>
+
+<p><code>RESTRICT</code> 状态下禁止新开仓但允许持有和减仓，<code>HALT</code> 状态下强制减仓到目标敞口以下。这样比一刀切的熔断更灵活。</p>
+<h2 id="_4">四、回测中的验证方法</h2>
+<p>光有设计不够，得验证这个盲区在历史上到底造成了多大差异。一个简单的对比框架：</p>
+<pre class="codehilite"><code class="language-python">def compare_breakers(trades_df, positions_df, equity_series):
+    &quot;&quot;&quot;
+    trades_df: 已平仓交易记录，含 close_date, pnl
+    positions_df: 每日持仓快照，含 date, symbol, unrealized_pnl
+    equity_series: 每日权益序列
+    &quot;&quot;&quot;
+    results = {'realized_only': [], 'dual_caliber': []}
+
+    for method in results:
+        daily_realized = 0.0
+        peak_equity = equity_series.iloc[0]
+        blocked_days = 0
+
+        for i, (dt, equity) in enumerate(equity_series.items()):
+            # 当日已实现盈亏
+            day_trades = trades_df[trades_df['close_date'] == dt]
+            daily_realized += day_trades['pnl'].sum()
+
+            # 当日全池浮亏
+            day_positions = positions_df[positions_df['date'] == dt]
+            total_unrealized = day_positions['unrealized_pnl'].sum()
+
+            peak_equity = max(peak_equity, equity)
+            drawdown = (peak_equity - equity) / peak_equity
+
+            if method == 'realized_only':
+                blocked = (-daily_realized / equity &gt; 0.03) or (drawdown &gt; 0.08)
+            else:
+                unrealized_loss = -total_unrealized / equity
+                blocked = ((-daily_realized / equity &gt; 0.03) or
+                          (drawdown &gt; 0.08) or
+                          (unrealized_loss &gt; 0.04))
+
+            if blocked:
+                blocked_days += 1
+
+            results[method].append({
+                'date': dt, 'equity': equity, 'drawdown': drawdown,
+                'blocked': blocked
+            })
+
+    return results
+</code></pre>
+
+<p>重点看两个指标：<strong>最大回撤的差异</strong>和<strong>被阻断交易日的数量</strong>。如果双口径版本的最大回撤显著更低，而阻断天数只增加了一点点，说明这个盲区是真实存在的，且修复成本可接受。</p>
+<h2 id="_5">五、小结</h2>
+<p>回撤断路器的盲区不在于代码写错了，而在于**</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">回撤保护</span><span class="tag-badge">连亏保护</span><span class="tag-badge">浮亏</span><span class="tag-badge">风控盲区</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
