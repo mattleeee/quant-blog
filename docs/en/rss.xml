@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Serving a Bilingual Static Site on GitHub Pages</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/26.html</link>
+            <description>Why one repo, two sites A Chinese blog already lived at the domain root: example.com/....</description>
+            <pubDate>2026-10-24</pubDate>
+            <category>Domains &amp; Deployment</category>
+        </item>
+        <item>
             <title>Why You Cannot Put a CNAME on the Apex Domain</title>
             <link>https://www.hkcode.dpdns.org/en/posts/25.html</link>
             <description>The zone apex is not like other names The apex of a zone — the bare domain itself, hkcode.dpdns.org in this case — is where the DNS machinery for the entire zon...</description>
@@ -136,13 +143,6 @@
             <title>Staggering Nine Scheduled Tasks to Eliminate Resource Contention</title>
             <link>https://www.hkcode.dpdns.org/en/posts/4.html</link>
             <description>A market-signal job ran at HH:00. A data-refresh job ran at HH:00. Both touched the same JSON files and both wanted the CPU at the same instant....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Exit Code 267009: Debugging CMD Encoding Corruption</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/5.html</link>
-            <description>Scheduled tasks fail in the dark. There is no console, no visible stderr, and often no useful log — just a status code in Task Scheduler&#x27;s &quot;Last Run Result&quot; col...</description>
             <pubDate>2026-10-06</pubDate>
             <category>Windows Automation</category>
         </item>
