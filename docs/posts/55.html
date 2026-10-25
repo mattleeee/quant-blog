@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gate.io API的分页陷阱：from+to+limit不能共存 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Gate.io API的分页陷阱：from+to+limit不能共存
+
+拉历史K线这件事，看起来是最简单的活。一个循环，翻页，拼起来，完事。...">
+    <meta name="keywords" content="Gate.io,分页,K线API,参数陷阱">
+    <meta property="og:title" content="Gate.io API的分页陷阱：from+to+limit不能共存">
+    <meta property="og:description" content="Gate.io API的分页陷阱：from+to+limit不能共存
+
+拉历史K线这件事，看起来是最简单的活。一个循环，翻页，拼起来，完事。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/55.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Gate.io API的分页陷阱：from+to+limit不能共存</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-25</span>
+                <span class="category"><span class="tag-badge">API实战</span></span>
+            </div>
+            <div class="post-content">
+<p>拉历史K线这件事，看起来是最简单的活。一个循环，翻页，拼起来，完事。但Gate.io期货行情API在这件事上埋了个坑：<code>from</code>、<code>to</code>、<code>limit</code> 三个参数只要同时出现，接口直接甩你一个400，而且错误信息里一个字都不提参数冲突，只告诉你请求有问题。你盯着文档看半天，参数名没错、格式没错，就是不通。</p>
+<p>这篇文章把这个坑拆开讲清楚：怎么复现、正确的分页姿势是什么、撞到10000点上限怎么绕、以及遇到类似问题时怎么用最小参数组合快速定位。</p>
+<h2 id="_1">一、问题背景</h2>
+<p>Gate.io期货（合约）的K线接口大致长这样：</p>
+<pre class="codehilite"><code>GET /api/v4/futures/{settle}/candlesticks
+</code></pre>
+
+<p>常用参数：</p>
+<ul>
+<li><code>contract</code>：合约名</li>
+<li><code>interval</code>：K线周期，如 <code>1m</code>、<code>5m</code>、<code>1h</code>、<code>1d</code></li>
+<li><code>from</code>：起始时间戳（秒）</li>
+<li><code>to</code>：结束时间戳（秒）</li>
+<li><code>limit</code>：返回条数上限</li>
+</ul>
+<p>文档里对 <code>from</code> / <code>to</code> / <code>limit</code> 的描述是分开写的，各自都"能用"。直觉上你会认为：我给定时间区间 <code>[from, to]</code>，再用 <code>limit</code> 控制每次返回多少条，服务端在区间内分页返回——这是绝大多数交易所API的通用语义。</p>
+<p>Gate.io不是。它的实际行为是：<strong>这三个参数互斥性极强，同时传会直接报错。</strong></p>
+<h2 id="_2">二、错误复现</h2>
+<p>先写一段最"理所当然"的代码：</p>
+<pre class="codehilite"><code class="language-python">import requests
+import time
+
+BASE = &quot;https://api.gateio.ws/api/v4&quot;
+
+def fetch_candles_naive(contract, interval, start_ts, end_ts, limit=1000):
+    url = f&quot;{BASE}/futures/usdt/candlesticks&quot;
+    params = {
+        &quot;contract&quot;: contract,
+        &quot;interval&quot;: interval,
+        &quot;from&quot;: start_ts,
+        &quot;to&quot;: end_ts,
+        &quot;limit&quot;: limit,
+    }
+    resp = requests.get(url, params=params, timeout=10)
+    print(&quot;status:&quot;, resp.status_code)
+    print(&quot;body:&quot;, resp.text[:300])
+    return resp
+
+if __name__ == &quot;__main__&quot;:
+    now = int(time.time())
+    fetch_candles_naive(
+        contract=&quot;BTC_USDT&quot;,
+        interval=&quot;1h&quot;,
+        start_ts=now - 7 * 24 * 3600,
+        end_ts=now,
+        limit=1000,
+    )
+</code></pre>
+
+<p>返回：</p>
+<pre class="codehilite"><code>status: 400
+body: {&quot;label&quot;:&quot;INVALID_PARAM_VALUE&quot;,&quot;message&quot;:&quot;invalid argument&quot;}
+</code></pre>
+
+<p><code>invalid argument</code>——哪个argument？不说。你改 <code>limit</code> 大小、改时间戳、换合约，全是同一个错误。这就是最恶心的地方：<strong>错误信息不指向冲突本身</strong>，你只能靠猜。</p>
+<p>把参数一个个删掉试：</p>
+<table>
+<thead>
+<tr>
+<th>参数组合</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>from + to</td>
+<td>200</td>
+</tr>
+<tr>
+<td>from + limit</td>
+<td>200</td>
+</tr>
+<tr>
+<td>to + limit</td>
+<td>200</td>
+</tr>
+<tr>
+<td>from + to + limit</td>
+<td><strong>400</strong></td>
+</tr>
+</tbody>
+</table>
+<p>到这里结论就出来了：三者不能共存。<code>from + to</code> 能跑，但它返回的是区间内<strong>全部</strong>数据，没有分页能力，数据量大时一样会撞上别的限制（后面讲）。</p>
+<h2 id="from-limit">三、正确的分页姿势：from + limit 单向翻页</h2>
+<p>Gate.io实际支持的分页语义是：<strong>给 <code>from</code> 和 <code>limit</code>，服务端从 <code>from</code> 开始向后取 <code>limit</code> 条</strong>。翻页靠推进 <code>from</code>，而不是靠 <code>to</code> 划区间。</p>
+<p>关键细节：下一页的起点不是"上一页最后一条的时间戳"，而是<strong>最后一条时间戳 + 周期秒数</strong>（也就是 +1 根K线）。如果直接用最后一条的时间戳当新的 <code>from</code>，你会把上一页最后一根K线重复拉一次，拼接后出现重复数据。</p>
+<pre class="codehilite"><code class="language-python">import requests
+import time
+
+BASE = &quot;https://api.gateio.ws/api/v4&quot;
+
+INTERVAL_SECONDS = {
+    &quot;10s&quot;: 10, &quot;1m&quot;: 60, &quot;5m&quot;: 300, &quot;15m&quot;: 900,
+    &quot;30m&quot;: 1800, &quot;1h&quot;: 3600, &quot;4h&quot;: 14400,
+    &quot;8h&quot;: 28800, &quot;1d&quot;: 86400,
+}
+
+def fetch_candles_paged(contract, interval, start_ts, end_ts,
+                        limit=1000, settle=&quot;usdt&quot;):
+    &quot;&quot;&quot;
+    用 from + limit 单向翻页拉取 [start_ts, end_ts] 区间的K线。
+    返回按时间升序排列的K线列表，元素为 dict。
+    &quot;&quot;&quot;
+    url = f&quot;{BASE}/futures/{settle}/candlesticks&quot;
+    step = INTERVAL_SECONDS[interval]
+    cursor = start_ts
+    all_candles = []
+
+    while cursor &lt; end_ts:
+        params = {
+            &quot;contract&quot;: contract,
+            &quot;interval&quot;: interval,
+            &quot;from&quot;: cursor,
+            &quot;limit&quot;: limit,
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        batch = resp.json()
+
+        if not batch:
+            break
+
+        # Gate.io 返回的 t 是字符串时间戳（秒）
+        for c in batch:
+            ts = int(c[&quot;t&quot;])
+            if start_ts &lt;= ts &lt;= end_ts:
+                all_candles.append(c)
+
+        last_ts = int(batch[-1][&quot;t&quot;])
+        # 关键：+step，而不是直接用 last_ts
+        cursor = last_ts + step
+
+        # 拉到的最后一条已经越过 end_ts，收工
+        if last_ts &gt;= end_ts:
+            break
+
+        # 防止服务端返回条数不足导致死循环
+        if len(batch) &lt; limit:
+            break
+
+        time.sleep(0.2)  # 简单限速，避免触发频率限制
+
+    # 去重 + 排序，双保险
+    dedup = {int(c[&quot;t&quot;]): c for c in all_candles}
+    return [dedup[k] for k in sorted(dedup)]
+
+
+if __name__ == &quot;__main__&quot;:
+    now = int(time.time())
+    data = fetch_candles_paged(
+        contract=&quot;BTC_USDT&quot;,
+        interval=&quot;1h&quot;,
+        start_ts=now - 30 * 24 * 3600,
+        end_ts=now,
+        limit=1000,
+    )
+    print(&quot;count:&quot;, len(data))
+    print(&quot;first:&quot;, data[0][&quot;t&quot;], &quot;last:&quot;, data[-1][&quot;t&quot;])
+</code></pre>
+
+<p>几个必须注意的点：</p>
+<ol>
+<li><strong><code>cursor = last_ts + step</code></strong>，不是 <code>last_ts</code>。少加这一步，每页交界处会多一根重复K线，做回测时这种重复数据会污染指标计算，而且很难发现。</li>
+<li><strong><code>len(batch) &lt; limit</code> 时 break</strong>。服务端有时返回不满一页，如果不判断，<code>cursor</code> 推进后可能原地打转。</li>
+<li><strong>去重兜底</strong>。用时间戳做 key 建字典，即使逻辑有疏漏也不至于把脏数据带进下游。</li>
+<li><strong><code>raise_for_status()</code></strong>。400错误在翻页循环里如果不抛，<code>resp.json()</code> 会解析出错误体，后面 <code>batch[-1]["t"]</code> 直接 KeyError，报错位置离真正原因十万八千里。</li>
+</ol>
+<h2 id="10000">四、10000点上限与多区间拼接</h2>
+<p>翻页逻辑写对了，还有第二个限制：<strong>单个查询窗口最多只能取最近10000个数据点</strong>。也就是说，不管你 <code>from</code> 设得多早，服务端只认最近10000根K线范围内的数据；更早的历史，<code>from</code> 怎么往前推都拿不到。</p>
+<p>这个限制的应对方式是<strong>区间切分</strong>：把目标时间范围切成若干个子区间，每个子区间内的数据量控制在10000点以内，逐段拉取后拼接。</p>
+<pre class="codehilite"><code class="language-python">def fetch_candles_chunked(contract, interval, start_ts, end_ts,
+                          limit=1000, max_points=10000, settle=&quot;usdt&quot;):
+    &quot;&quot;&quot;
+    按 max_points 切分时间区间，逐段调用 fetch_candles_paged，
+    规避单窗口10000点上限。
+    &quot;&quot;&quot;
+    step = INTERVAL_SECONDS[interval]
+    chunk_span = max_points * step  # 每个子区间覆盖的秒数
+
+    result = []
+    seg_start = start_ts
+    while seg_start &lt; end_ts:
+        seg_end = min(seg_start + chunk_span - step, end_ts)
+        part = fetch_candles_paged(
+            contract, interval, seg_start, seg_end,
+            limit=limit, settle=settle,
+        )
+        result.extend(part)
+        seg_start = seg_end + step
+
+    dedup = {int(c[&quot;t&quot;]): c for c in result}
+    return [dedup[k] for k in sorted(dedup)]
+</code></pre>
+
+<p>切分时有两个细节：</p>
+<ul>
+<li><strong><code>chunk_span = max_points * step</code></strong>，子区间长度按"点数 × 周期秒数"算，保证每段理论点数不超过上限。</li>
+<li><strong>段与段之间留 <code>step</code> 的间隔</strong>（<code>seg_start = seg_end + step</code>），避免相邻段在边界上重叠。即使重叠了，最后的去重也能兜住，但少一次重叠就少一次无谓的请求。</li>
+</ul>
+<p>如果目标区间跨度极大（比如拉几年的一分钟线），<code>max_points=10000</code> 意味着每段只有约7天（1m周期下 10000 分钟 ≈ 6.9 天），段数会很多。这时候要配合限速和重试：</p>
+<pre class="codehilite"><code class="language-python">def fetch_with_retry(contract, interval, start_ts, end_ts,
+                     retries=3, backoff=1.0, **kwargs):
+    for i in range(retries):
+        try:
+            return fetch_candles_chunked(
+                contract, interval, start_ts, end_ts, **kwargs
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                time.sleep(backoff * (2 ** i))
+                continue
+            raise
+    raise RuntimeError(&quot;retries exhausted&quot;)
+</code></pre>
+
+<h2 id="_3">五、调试方法：最小参数组合二分排查</h2>
+<p>这次踩坑暴露出的通用调试思路值得记下来：<strong>遇到"参数看起来都对但接口报错"时，不要读文档猜，用最小参数组合做二分。</strong></p>
+<p>具体做法：</p>
+<ol>
+<li>先只传<strong>必填参数</strong>（<code>contract</code> + <code>interval</code>），确认接口通。</li>
+<li>每次<strong>加一个参数</strong>，观察状态码变化。</li>
+<li>一旦某次加参数后从200变400，那个参数就是嫌疑对象。</li>
+<li>再在嫌疑参数之间做<strong>两两组合</strong>，定位到具体冲突对。</li>
+</ol>
+<p>写成一个可复用的小工具：</p>
+<pre class="codehilite"><code class="language-python">import itertools
+
+def probe_params(url, base_params, optional_params, timeout=10):
+    &quot;&quot;&quot;
+    逐个、两两组合探测可选参数，找出导致报错的组合。
+    &quot;&quot;&quot;
+    def call(extra):
+        p = {**base_params, **extra}
+        r = requests.get(url, params=p, timeout=timeout)
+        return r.status_code
+
+    print(&quot;baseline:&quot;, call({}))
+
+    keys = list(optional_params.keys())
+    for k in keys:
+        code = call({k: optional_params[k]})
+        print(f&quot;+{k}: {code}&quot;)
+
+    for a, b in itertools.combinations(keys, 2):
+        code = call({a: optional_params[a], b: optional_params[b]})
+        print(f&quot;+{a}+{b}: {code}&quot;)
+
+
+if __name__ == &quot;__main__&quot;:
+    now = int(time.time())
+    probe_params(
+        url=f&quot;{BASE}/futures/usdt/candlesticks&quot;,
+        base_params={&quot;contract&quot;: &quot;BTC_USDT&quot;, &quot;interval&quot;: &quot;1h&quot;},
+        optional_params={
+            &quot;from&quot;: now - 3600 * 24,
+            &quot;to&quot;: now,
+            &quot;limit&quot;: 100,
+        },
+    )
+</code></pre>
+
+<p>输出会直接把 <code>+from+to+limit: 400</code> 这一行打出来，冲突组合一目了然。这个方法对所有"文档描述模糊、错误信息笼统"的交易所API都适用，比反复读文档快得多。</p>
+<p>另外补充两个排查习惯：</p>
+<ul>
+<li><strong>打印完整请求URL</strong>。<code>requests</code> 的 <code>params</code> 会被编码，肉眼看不出来时把 <code>resp.request.url</code> 打出来，确认没有多余的空格或类型错误（时间戳传成字符串有时也会触发400）。</li>
+<li><strong>看响应体的 <code>label</code> 字段</strong>。Gate.io的错误体里有 <code>label</code>，虽然这次是笼统的 <code>INVALID_PARAM_VALUE</code>，但其他场景（如签名、频率限制）会给出更具体的label，值得先看一眼再动手。</li>
+</ul>
+<h2 id="_4">六、小结</h2>
+<p>把这次的坑归纳成几条可以直接抄进项目里的规则：</p>
+<ul>
+<li>Gate.io期货K线接口，<code>from</code>、<code>to</code>、<code>limit</code> <strong>不要同时传</strong>，分页只用 <code>from + limit</code>。</li>
+<li>翻页推进用 <strong>上一页最后时间戳 + 周期秒数</strong>，不要用时间戳本身。</li>
+<li>单次查询窗口上限 <strong>10000 点</strong>，超了就用区间切分 + 拼接 + 去重。</li>
+<li>循环里必须处理"返回不满一页"和"重复数据"两种情况，否则不是死循环就是脏数据。</li>
+<li>遇到参数冲突类问题，用<strong>最小参数组合二分探测</strong>，别靠读文档猜。</li>
+</ul>
+<p>分页这种基础设施代码，写一次就要写对，因为它会出现在每一个数据拉取脚本里，错了就是全盘错。把上面的 <code>fetch_candles_chunked</code> 封装成公共模块，后面所有策略回测、数据入库都复用它，比每次现写现调省事得多。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Gate.io</span><span class="tag-badge">分页</span><span class="tag-badge">K线API</span><span class="tag-badge">参数陷阱</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
