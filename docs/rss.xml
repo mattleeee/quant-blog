@@ -7,6 +7,15 @@
         <language>zh-CN</language>
         
         <item>
+            <title>Gate.io API的分页陷阱：from+to+limit不能共存</title>
+            <link>https://www.hkcode.dpdns.org/posts/55.html</link>
+            <description>Gate.io API的分页陷阱：from+to+limit不能共存
+
+拉历史K线这件事，看起来是最简单的活。一个循环，翻页，拼起来，完事。...</description>
+            <pubDate>2026-10-25</pubDate>
+            <category>API实战</category>
+        </item>
+        <item>
             <title>回撤断路器的盲区：已实现盈亏遮住的眼睛</title>
             <link>https://www.hkcode.dpdns.org/posts/54.html</link>
             <description>回撤断路器的盲区：已实现盈亏遮住的眼睛
@@ -189,13 +198,6 @@
             <link>https://www.hkcode.dpdns.org/posts/36.html</link>
             <description>单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。 整体架构 先看分层。整个系统分四层,自上而下: ┌───────────...</description>
             <pubDate>2026-10-05</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>回测数据清洗：如何处理缺失K线和异常数据</title>
-            <link>https://www.hkcode.dpdns.org/posts/35.html</link>
-            <description>做回测的人都有一个共识：垃圾数据进，垃圾结果出。策略逻辑写得再漂亮，如果喂进去的K线数据有缺失、有异常，回测出来的收益率曲线就是自欺欺人。 这篇文章不讲策略，只讲数据清洗。具体覆盖四块：缺失K线检测与填充、异常价格处理、时间对齐、数据完整性验证。全部用可运行的Python代码演示。 一、先搞清楚数据长什么样 拿到一份K...</description>
-            <pubDate>2026-10-04</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
