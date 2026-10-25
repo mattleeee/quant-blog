@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enforcing HTTPS on GitHub Pages After a Domain Switch - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Pointing a new domain at GitHub Pages works on the first try often enough that the greyed-out checkbox comes as a surpri...">
+    <meta name="keywords" content="HTTPS,GitHub Pages,certificate,Enforce HTTPS,mixed content">
+    <meta property="og:title" content="Enforcing HTTPS on GitHub Pages After a Domain Switch">
+    <meta property="og:description" content="Pointing a new domain at GitHub Pages works on the first try often enough that the greyed-out checkbox comes as a surpri...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/27.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Enforcing HTTPS on GitHub Pages After a Domain Switch</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-25</span>
+                <span class="category"><span class="tag-badge">Domains &amp; Deployment</span></span>
+            </div>
+            <div class="post-content">
+<p>Pointing a new domain at GitHub Pages works on the first try often enough that the greyed-out checkbox comes as a surprise. You add the custom domain, GitHub accepts it, the site loads over plain HTTP, and the <strong>Enforce HTTPS</strong> option sits there disabled with a note that the certificate has not been provisioned yet. In most cases nothing is wrong. GitHub is still in the middle of issuing the certificate, and the toggle unlocks on its own once that finishes.</p>
+<p>This post covers the whole lifecycle: what happens after you save a custom domain, how to watch it progress from the command line, why you should fix mixed content before you enforce HTTPS, and what to check when provisioning genuinely fails.</p>
+<h2 id="the-provisioning-sequence">The provisioning sequence</h2>
+<p>When you save a custom domain for a GitHub Pages site, GitHub runs a fixed pipeline in the background. The UI gives you one checkbox as feedback, but three distinct things happen.</p>
+<h3 id="1-dns-check">1. DNS check</h3>
+<p>GitHub resolves the domain and confirms it points where it should:</p>
+<ul>
+<li>For an apex domain (<code>example.com</code>), <code>A</code> records must point to the Pages IPs, or an <code>ALIAS</code>/<code>ANAME</code> record must be configured.</li>
+<li>For a subdomain (<code>www.example.com</code>, <code>blog.example.com</code>), a <code>CNAME</code> record must point to <code>&lt;user&gt;.github.io</code> (or <code>&lt;org&gt;.github.io</code>).</li>
+</ul>
+<p>If DNS does not resolve correctly at this stage, the certificate request never starts. The UI will keep saying the certificate is pending, and it will keep saying that indefinitely. This is the failure mode worth knowing about, because it looks identical to normal waiting.</p>
+<h3 id="2-certificate-issuance">2. Certificate issuance</h3>
+<p>Once DNS checks out, GitHub requests a certificate for the domain (and the <code>www</code> variant where applicable) from its CA. This is the part that takes time. Typical latency is 10 to 30 minutes, but it depends on DNS TTLs and CA queueing, so an hour is not unheard of after a domain switch. During this window the site is reachable over HTTP and, in many cases, already over HTTPS with a certificate that browsers may or may not accept yet.</p>
+<h3 id="3-enforce-toggle-unlocks">3. Enforce toggle unlocks</h3>
+<p>Only after the certificate is live does GitHub enable the <strong>Enforce HTTPS</strong> checkbox. Ticking it makes Pages redirect all HTTP requests to HTTPS with a 301. Until then, the box stays disabled, and there is no override, no query parameter, no API call that forces it early.</p>
+<p>The practical takeaway: after a domain switch, expect a wait. Do not start changing DNS records while the certificate is pending, because you will reset the process.</p>
+<h2 id="watching-progress-from-the-terminal">Watching progress from the terminal</h2>
+<p>The GitHub settings page is a poor progress indicator. It shows a static message until it flips. <code>curl</code> tells you more.</p>
+<h3 id="check-what-is-actually-being-served">Check what is actually being served</h3>
+<pre class="codehilite"><code class="language-bash">curl -I http://example.com
+curl -I https://example.com
+</code></pre>
+
+<p>Run both. Before the certificate is live, the HTTPS request typically fails at the TLS handshake, which <code>curl</code> reports as:</p>
+<pre class="codehilite"><code>curl: (60) SSL certificate problem: unable to get local issuer certificate
+</code></pre>
+
+<p>or a certificate mismatch error. The HTTP request, meanwhile, returns <code>200</code> with no redirect. That combination means: DNS is fine, certificate is not ready.</p>
+<p>Once provisioning completes, <code>https://</code> returns <code>200</code> and <code>http://</code> still returns <code>200</code> until you tick the box. After enforcing, <code>http://</code> returns:</p>
+<pre class="codehilite"><code>HTTP/1.1 301 Moved Permanently
+Location: https://example.com/
+</code></pre>
+
+<h3 id="inspect-the-served-certificate">Inspect the served certificate</h3>
+<p><code>curl -I</code> only tells you whether TLS works. To see <em>which</em> certificate is being served and for which names, use <code>openssl</code>:</p>
+<pre class="codehilite"><code class="language-bash">echo | openssl s_client -servername example.com -connect example.com:443 2&gt;/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+</code></pre>
+
+<p>A healthy result looks roughly like:</p>
+<pre class="codehilite"><code>subject=CN = example.com
+issuer=C = US, O = Let's Encrypt, CN = R3
+notBefore=...
+notAfter=...
+X509v3 Subject Alternative Name:
+    DNS:example.com, DNS:www.example.com
+</code></pre>
+
+<p>Two things to verify here. First, the SAN list must include every hostname you actually use. If you serve <code>www.example.com</code> but the certificate only covers the apex, browsers will warn on the <code>www</code> host even though the apex is fine. Second, check <code>notBefore</code> and <code>notAfter</code> to rule out a stale or expired certificate being served from an edge cache.</p>
+<p>If <code>openssl</code> returns a certificate whose subject is <code>*.github.io</code> or belongs to a different domain, the request is landing on the wrong vhost. That usually means DNS is still pointing at an old host, or a proxy (Cloudflare, for example) is terminating TLS in front of Pages. Cloudflare's "Full" or "Flexible" SSL modes in front of GitHub Pages are a common source of confusing certificate output.</p>
+<h3 id="scripting-the-wait">Scripting the wait</h3>
+<p>If you switch domains often, a small polling script saves a lot of tab-refreshing. This one checks the HTTPS handshake and the redirect status until both are correct, or gives up after a timeout:</p>
+<pre class="codehilite"><code class="language-python">import ssl
+import socket
+import time
+import urllib.request
+import urllib.error
+
+DOMAIN = &quot;example.com&quot;
+TIMEOUT_MINUTES = 45
+INTERVAL_SECONDS = 120
+
+
+def tls_ok(host: str, port: int = 443) -&gt; bool:
+    ctx = ssl.create_default_context()
+    try:
+        with socket.create_connection((host, port), timeout=10) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                cert = tls.getpeercert()
+                sans = [v for k, v in cert.get(&quot;subjectAltName&quot;, ()) if k == &quot;DNS&quot;]
+                return host in sans or f&quot;*.{host.split('.', 1)[1]}&quot; in sans
+    except (ssl.SSLError, socket.error, OSError):
+        return False
+
+
+def redirects_to_https(url: str) -&gt; bool:
+    req = urllib.request.Request(url, method=&quot;HEAD&quot;)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.geturl().startswith(&quot;https://&quot;)
+    except urllib.error.HTTPError as e:
+        return e.code in (301, 308) and e.headers.get(&quot;Location&quot;, &quot;&quot;).startswith(&quot;https://&quot;)
+    except urllib.error.URLError:
+        return False
+
+
+deadline = time.time() + TIMEOUT_MINUTES * 60
+while time.time() &lt; deadline:
+    cert = tls_ok(DOMAIN)
+    enforced = redirects_to_https(f&quot;http://{DOMAIN}&quot;)
+    print(f&quot;cert={cert} enforced={enforced}&quot;)
+    if cert and enforced:
+        print(&quot;Done.&quot;)
+        break
+    time.sleep(INTERVAL_SECONDS)
+else:
+    print(&quot;Timed out. Check DNS and the Pages settings.&quot;)
+</code></pre>
+
+<p>The <code>tls_ok</code> check is stricter than a plain connection test: it validates that the hostname appears in the SAN list, which is the thing that actually matters for browsers. The <code>redirects_to_https</code> check confirms enforcement is active. Run it from a machine that is not behind the same DNS resolver you just changed, or you may be testing a cached view.</p>
+<h2 id="fix-mixed-content-before-you-enforce">Fix mixed content before you enforce</h2>
+<p>This is the step people skip, and it causes the most visible breakage. Enforcing HTTPS makes the page itself load over TLS, but it does not rewrite the URLs <em>inside</em> your HTML, CSS, or JavaScript. Any resource still referenced as <code>http://</code> becomes mixed content. Modern browsers block active mixed content (scripts, stylesheets, iframes) outright and either block or auto-upgrade passive mixed content (images), depending on the browser and the resource type.</p>
+<p>The result: the page loads, the layout looks wrong, and the console is full of errors. Users blame the certificate; the real cause is a handful of hard-coded <code>http://</code> URLs.</p>
+<h3 id="find-them-before-you-flip-the-switch">Find them before you flip the switch</h3>
+<p>Crawl your own site over HTTP and grep the rendered HTML for <code>http://</code> references. A minimal crawler:</p>
+<pre class="codehilite"><code class="language-python">import re
+from urllib.parse import urljoin, urlparse
+from collections import deque
+
+import requests
+
+START = &quot;http://example.com/&quot;
+SAME_HOST = urlparse(START).netloc
+
+# Ignore URLs that are fine as http:// (rare) or not resources at all.
+IGNORE = re.compile(r&quot;^(mailto:|tel:|javascript:|#)&quot;)
+
+seen = set()
+queue = deque([START])
+findings = []
+
+session = requests.Session()
+session.headers[&quot;User-Agent&quot;] = &quot;mixed-content-audit/1.0&quot;
+
+while queue:
+    url = queue.popleft()
+    if url in seen or urlparse(url).netloc != SAME_HOST:
+        continue
+    seen.add(url)
+
+    try:
+        resp = session.get(url, timeout=10)
+    except requests.RequestException:
+        continue
+    if &quot;text/html&quot; not in resp.headers.get(&quot;Content-Type&quot;, &quot;&quot;):
+        continue
+
+    for match in re.finditer(r'(?:src|href|action)\s*=\s*[&quot;\'](http://[^&quot;\']+)', resp.text):
+        findings.append((url, match.group(1)))
+
+    for match in re.finditer(r'&lt;a\s[^&gt;]*href\s*=\s*[&quot;\']([^&quot;\'#]+)', resp.text):
+        link = urljoin(url, match.group(1))
+        if not IGNORE.match(link):
+            queue.append(link)
+
+for page, asset in findings:
+    print(f&quot;{page} -&gt; {asset}&quot;)
+print(f&quot;\n{len(findings)} http:// references across {len(seen)} pages&quot;)
+</code></pre>
+
+<p>Anything it prints is a candidate for breakage. The fix is mechanical: rewrite to <code>https://</code>, or better, to protocol-relative or root-relative URLs (<code>//cdn.example.com/lib.js</code> or <code>/assets/lib.js</code>) so the scheme follows the page.</p>
+<h3 id="common-offenders">Common offenders</h3>
+<ul>
+<li>Hard-coded CDN links in templates, often copied from documentation years ago.</li>
+<li>Markdown content with embedded images using <code>http://</code> URLs.</li>
+<li>Analytics or font snippets pasted from a provider dashboard that predates HTTPS-by-default.</li>
+<li><code>srcset</code> and <code>&lt;picture&gt;</code> sources, which are easy to miss because they are not plain <code>src</code> attributes.</li>
+<li>CSS <code>url()</code> references to background images or fonts.</li>
+</ul>
+<p>The crawler above only covers HTML attributes. For a thorough pass, also fetch your CSS files and search them for <code>http://</code>, and check any client-side JavaScript that builds URLs at runtime. A <code>Content-Security-Policy</code> header with <code>upgrade-insecure-requests</code> is a useful safety net, but it is a mitigation, not a fix. Do the rewrite first.</p>
+<h2 id="when-provisioning-actually-fails">When provisioning actually fails</h2>
+<p>If more than a couple of hours pass and <code>curl -I https://example.com</code> still fails the handshake, the pipeline is stuck. Work through these in order.</p>
+<h3 id="verify-the-cname-value-exactly">Verify the CNAME value exactly</h3>
+<p>For a subdomain, the <code>CNAME</code> record must point to the Pages hostname, not to an IP, not to a proxy, and not to a URL with a path. The value is <code>&lt;user&gt;.github.io.</code> (or <code>&lt;org&gt;.github.io.</code>), with or without the trailing dot depending on your DNS provider. The apex domain is a special case: it cannot be a <code>CNAME</code>, so it needs <code>A</code> records to the documented GitHub Pages IPs, plus a <code>CNAME</code> file in the repository or the custom domain set in settings.</p>
+<pre class="codehilite"><code class="language-bash">dig +short CNAME www.example.com
+dig +short A example.com
+dig +short example.com NS
+</code></pre>
+
+<p>Check the <code>NS</code> output too. If the domain is still delegated to your registrar's parking nameservers because you changed nameservers recently, the records you configured in the new DNS provider are not live yet. That alone will stall provisioning.</p>
+<h3 id="wait-out-the-ttl">Wait out the TTL</h3>
+<p>If you changed DNS records within the last 48 hours, resolvers across the internet are still serving cached answers with the old target. GitHub's checker may have queried a resolver that still had the old record and concluded DNS was wrong. There is no way to force GitHub's check; it retries on its own schedule. Lowering the TTL before a planned migration (to 300 seconds, a day or two in advance) makes this window much shorter.</p>
+<p>To see what different resolvers think, query a public resolver directly:</p>
+<pre class="codehilite"><code class="language-bash">dig +short CNAME www.example.com @1.1.1.1
+dig +short CNAME www.example.com @8.8.8.8
+</code></pre>
+
+<p>If these disagree, you are still inside the propagation window. Wait.</p>
+<h3 id="remove-and-re-add-the-custom-domain">Remove and re-add the custom domain</h3>
+<p>If DNS is correct across resolvers, the served certificate is wrong or absent, and several hours have passed, remove the custom domain in the Pages settings, save, and add it back. This cancels the stuck request and starts a fresh one. It is safe, but it resets the clock, so only do it once you are confident DNS is right. Re-adding the domain while DNS is still wrong just reproduces the same stuck state.</p>
+<h3 id="rule-out-a-proxy-in-front-of-pages">Rule out a proxy in front of Pages</h3>
+<p>If the domain is behind Cloudflare or a similar proxy, the certificate GitHub issues may never be served, because the proxy terminates TLS with its own certificate. That is not necessarily a problem, but it changes where you look: the <code>openssl</code> output will show the proxy's issuer, and the "Enforce HTTPS" toggle in GitHub may stay disabled because GitHub cannot complete its own validation through the proxy. Either set the proxy to DNS-only during provisioning and re-enable it afterwards, or accept that HTTPS is handled at the proxy layer and configure enforcement there instead.</p>
+<h3 id="check-the-cname-file-in-the-repo">Check the CNAME file in the repo</h3>
+<p>If you set the custom domain through the repository's <code>CNAME</code> file rather than the settings UI, a mismatch between the file contents and the settings value can cause the domain to flap between configured states. Pick one method and stick to it; the settings UI writes the <code>CNAME</code> file for you.</p>
+<h2 id="a-short-checklist">A short checklist</h2>
+<p>Before enforcing HTTPS after a domain switch:</p>
+<ol>
+<li>Confirm DNS resolves correctly from multiple public resolvers.</li>
+<li>Wait for the certificate; verify it with <code>openssl s_client</code> and check the SAN list covers every hostname.</li>
+<li>Crawl the site for <code>http://</code> asset references and rewrite them.</li>
+<li>Tick <strong>Enforce HTTPS</strong> once the checkbox unlocks.</li>
+<li>Verify the redirect with <code>curl -I http://example.com</code> and re-run the crawler against the HTTPS origin to confirm nothing regressed.</li>
+</ol>
+<p>The greyed-out checkbox is normal. The failures that matter are the ones where it stays greyed out for hours, and those almost always trace back to DNS.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-25 08:56:33</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AXIS</td>
+<td>短平快做多</td>
+<td>$0.2484</td>
+<td>$0.2559</td>
+<td>$0.2422</td>
+<td>1:1.2</td>
+</tr>
+<tr>
+<td>ORDER</td>
+<td>短平快做多</td>
+<td>$0.0566</td>
+<td>$0.0583</td>
+<td>$0.0552</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">HTTPS</span><span class="tag-badge">GitHub Pages</span><span class="tag-badge">certificate</span><span class="tag-badge">Enforce HTTPS</span><span class="tag-badge">mixed content</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
