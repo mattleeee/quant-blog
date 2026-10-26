@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Three-Layer Validation Before You Trust a Backtest</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/28.html</link>
+            <description>Why One Good Backtest Means Nothing A single equity curve is a sample of size one....</description>
+            <pubDate>2026-10-26</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Enforcing HTTPS on GitHub Pages After a Domain Switch</title>
             <link>https://www.hkcode.dpdns.org/en/posts/27.html</link>
             <description>Pointing a new domain at GitHub Pages works on the first try often enough that the greyed-out checkbox comes as a surprise....</description>
@@ -136,13 +143,6 @@
             <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</title>
             <link>https://www.hkcode.dpdns.org/en/posts/2.html</link>
             <description>The Problem: Black Windows Every Hour A monitoring server had nine scheduled tasks, each firing hourly....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Fail-Fast Retry Design for Scheduled Scripts: Three Attempts with Backoff</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/3.html</link>
-            <description>Unattended scripts fail for the least interesting reasons. A DNS lookup times out at 02:00....</description>
             <pubDate>2026-10-06</pubDate>
             <category>Windows Automation</category>
         </item>
