@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three-Layer Validation Before You Trust a Backtest - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why One Good Backtest Means Nothing A single equity curve is a sample of size one....">
+    <meta name="keywords" content="backtesting,overfitting,parameter sweep,robustness">
+    <meta property="og:title" content="Three-Layer Validation Before You Trust a Backtest">
+    <meta property="og:description" content="Why One Good Backtest Means Nothing A single equity curve is a sample of size one....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/28.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Three-Layer Validation Before You Trust a Backtest</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-26</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A single equity curve is a sample of size one. Optimize hard enough over enough combinations and something will look great by luck alone. The question is not "does this rule make money in the backtest?" but "does this rule make money for reasons that survive contact with slightly different assumptions?"</p>
+<p>The gate I use before any rule reaches the live scanner has three layers: a parameter sweep, a monthly consistency check, and a component ablation. Each layer answers a different question, and each has a hard pass/fail threshold. A rule has to clear all three. This post walks through the mechanics, then through a real rejection: a MACD divergence entry that passed layer 1 and died on layers 2 and 3.</p>
+<h2 id="layer-1-parameter-sweep">Layer 1: Parameter Sweep</h2>
+<h3 id="the-question-it-answers">The question it answers</h3>
+<p>Is the edge a plateau or a spike? If performance only exists at <code>fast=12, slow=26, signal=9</code>, you have found noise, not a rule. Neighboring parameter values should produce comparable results, and the chosen point should sit near the center of a profitable region, not on its edge.</p>
+<h3 id="the-metrics">The metrics</h3>
+<p>For each parameter combination in the grid, record:</p>
+<ul>
+<li><strong>Trade count</strong> — anything under ~50 is too thin to say much.</li>
+<li><strong>Profit factor (PF)</strong> — gross wins / gross losses.</li>
+<li><strong>Expectancy per trade</strong> — in R units (risk multiples), so results are comparable across parameter sets.</li>
+<li><strong>Max drawdown</strong> — in R, not percent, so it doesn't depend on position sizing.</li>
+<li><strong>Plateau score</strong> — the fraction of neighboring combinations (within one step in each dimension) that stay above the PF threshold.</li>
+</ul>
+<h3 id="the-thresholds">The thresholds</h3>
+<ul>
+<li>Median PF across the sweep ≥ 1.3</li>
+<li>At least 70% of combinations with ≥ 50 trades have PF &gt; 1.0</li>
+<li>Plateau score at the chosen point ≥ 0.6</li>
+<li>Chosen point is not on the grid boundary</li>
+</ul>
+<h3 id="the-code">The code</h3>
+<pre class="codehilite"><code class="language-python">import itertools
+import numpy as np
+import pandas as pd
+
+def sweep(params_grid, run_backtest, min_trades=50):
+    rows = []
+    for combo in itertools.product(*params_grid.values()):
+        params = dict(zip(params_grid.keys(), combo))
+        res = run_backtest(**params)
+        if res[&quot;trades&quot;] &lt; min_trades:
+            continue
+        rows.append({**params, **res})
+    return pd.DataFrame(rows)
+
+def plateau_score(df, param_names, chosen, pf_col=&quot;pf&quot;, threshold=1.0):
+    &quot;&quot;&quot;Fraction of 1-step neighbors of `chosen` with PF above threshold.&quot;&quot;&quot;
+    neighbors = []
+    for name in param_names:
+        values = sorted(df[name].unique())
+        idx = values.index(chosen[name])
+        for offset in (-1, 1):
+            j = idx + offset
+            if 0 &lt;= j &lt; len(values):
+                mask = pd.Series(True, index=df.index)
+                for n in param_names:
+                    target = chosen[n] if n != name else values[j]
+                    mask &amp;= df[n] == target
+                if mask.any():
+                    neighbors.append(df.loc[mask, pf_col].iloc[0])
+    if not neighbors:
+        return 0.0
+    return float(np.mean(np.array(neighbors) &gt; threshold))
+
+grid = {
+    &quot;fast&quot;:   [8, 10, 12, 14, 16],
+    &quot;slow&quot;:   [20, 24, 26, 30, 34],
+    &quot;signal&quot;: [7, 9, 11],
+}
+results = sweep(grid, run_macd_divergence_backtest)
+
+chosen = {&quot;fast&quot;: 12, &quot;slow&quot;: 26, &quot;signal&quot;: 9}
+score = plateau_score(results, list(grid.keys()), chosen)
+
+print(f&quot;median PF: {results['pf'].median():.2f}&quot;)
+print(f&quot;share PF&gt;1: {(results['pf'] &gt; 1.0).mean():.0%}&quot;)
+print(f&quot;plateau score at chosen point: {score:.2f}&quot;)
+</code></pre>
+
+<p>A plateau score of 0.6 means most one-step neighbors still clear PF 1.0. That is a low bar, deliberately. If a rule can't survive a one-step nudge, it has no business being tested further.</p>
+<h2 id="layer-2-monthly-consistency">Layer 2: Monthly Consistency</h2>
+<h3 id="the-question-it-answers_1">The question it answers</h3>
+<p>Is the annual result distributed across time, or is it one monster month doing all the work? A strategy with one +40% month and eleven flat months is not a strategy. It's a lottery ticket that already paid out, and the next ticket is unlikely to pay again.</p>
+<h3 id="the-metrics_1">The metrics</h3>
+<p>Bucket trades by calendar month and compute:</p>
+<ul>
+<li><strong>Share of profitable months</strong> — count of months with positive PnL / total months.</li>
+<li><strong>Best-month contribution</strong> — best month's PnL / total PnL.</li>
+<li><strong>Top-3-month contribution</strong> — same, for the three best months.</li>
+<li><strong>Median monthly return</strong> and <strong>worst month</strong> in R.</li>
+</ul>
+<h3 id="the-thresholds_1">The thresholds</h3>
+<ul>
+<li>≥ 55% of months positive</li>
+<li>Best month ≤ 30% of total PnL</li>
+<li>Top 3 months ≤ 55% of total PnL</li>
+<li>Worst month no worse than −3R (scaled to your per-trade risk)</li>
+</ul>
+<p>The best-month cap is the important one. It is the metric that catches curve-fit strategies that happen to overlap a single volatility event.</p>
+<h3 id="the-code_1">The code</h3>
+<pre class="codehilite"><code class="language-python">def monthly_consistency(trades: pd.DataFrame, risk_per_trade=1.0):
+    &quot;&quot;&quot;trades: columns ['exit_time', 'pnl_r']&quot;&quot;&quot;
+    monthly = (trades
+               .assign(month=trades[&quot;exit_time&quot;].dt.to_period(&quot;M&quot;))
+               .groupby(&quot;month&quot;)[&quot;pnl_r&quot;]
+               .sum()
+               .sort_index())
+    total = monthly.sum()
+    if total &lt;= 0:
+        return {&quot;pass&quot;: False, &quot;reason&quot;: &quot;non-positive total PnL&quot;}
+
+    best = monthly.max()
+    top3 = monthly.nlargest(3).sum()
+    stats = {
+        &quot;months&quot;: len(monthly),
+        &quot;positive_share&quot;: (monthly &gt; 0).mean(),
+        &quot;best_share&quot;: best / total,
+        &quot;top3_share&quot;: top3 / total,
+        &quot;median_month&quot;: monthly.median(),
+        &quot;worst_month&quot;: monthly.min(),
+    }
+    stats[&quot;pass&quot;] = (
+        stats[&quot;months&quot;] &gt;= 24
+        and stats[&quot;positive_share&quot;] &gt;= 0.55
+        and stats[&quot;best_share&quot;] &lt;= 0.30
+        and stats[&quot;top3_share&quot;] &lt;= 0.55
+        and stats[&quot;worst_month&quot;] &gt;= -3 * risk_per_trade
+    )
+    return stats
+</code></pre>
+
+<p>The <code>months &gt;= 24</code> requirement matters. With twelve months, "positive share" is dominated by a handful of observations and the test is close to meaningless.</p>
+<h2 id="layer-3-robustness-ablation">Layer 3: Robustness Ablation</h2>
+<h3 id="the-question-it-answers_2">The question it answers</h3>
+<p>Does each component of the rule contribute, and does the rule degrade gracefully when a component is removed? A robust rule loses some edge when you strip a filter. A fragile rule collapses to zero, or worse, only works with every component present — a sign the components were fitted to each other.</p>
+<h3 id="the-metrics_2">The metrics</h3>
+<p>For each component, run the backtest with that component removed (or replaced by a neutral version) and record:</p>
+<ul>
+<li><strong>PF delta</strong> — component PF minus full-rule PF.</li>
+<li><strong>Expectancy delta</strong> in R.</li>
+<li><strong>Retention</strong> — component expectancy / full-rule expectancy.</li>
+</ul>
+<h3 id="the-thresholds_2">The thresholds</h3>
+<ul>
+<li>Removing any single component leaves expectancy ≥ 60% of the full rule (graceful degradation).</li>
+<li>Removing the <em>core</em> component (the entry trigger itself, not a filter) drops expectancy below 50% and PF below 1.1 (the core actually matters).</li>
+<li>No component removal <em>improves</em> expectancy by more than 15% (if it does, that component is hurting and should be cut).</li>
+</ul>
+<p>The third criterion is the one people skip. It catches filters that were added to patch a specific losing streak in the sample and do nothing out of sample.</p>
+<h3 id="the-code_2">The code</h3>
+<pre class="codehilite"><code class="language-python">def ablation(full_result, variants: dict, core=&quot;divergence&quot;):
+    &quot;&quot;&quot;variants: name -&gt; backtest result dict with 'pf' and 'expectancy_r'&quot;&quot;&quot;
+    base_pf = full_result[&quot;pf&quot;]
+    base_exp = full_result[&quot;expectancy_r&quot;]
+    rows = []
+    for name, res in variants.items():
+        rows.append({
+            &quot;component&quot;: name,
+            &quot;pf&quot;: res[&quot;pf&quot;],
+            &quot;expectancy_r&quot;: res[&quot;expectancy_r&quot;],
+            &quot;retention&quot;: res[&quot;expectancy_r&quot;] / base_exp if base_exp else 0.0,
+            &quot;pf_delta&quot;: res[&quot;pf&quot;] - base_pf,
+        })
+    df = pd.DataFrame(rows)
+
+    checks = {
+        &quot;graceful&quot;: (df.loc[df[&quot;component&quot;] != core, &quot;retention&quot;] &gt;= 0.60).all(),
+        &quot;core_matters&quot;: df.loc[df[&quot;component&quot;] == core, &quot;retention&quot;].lt(0.50).all(),
+        &quot;no_harmful&quot;: (df[&quot;retention&quot;] &lt;= 1.15).all(),
+    }
+    return df, checks
+</code></pre>
+
+<h2 id="the-case-study-a-macd-divergence-entry">The Case Study: A MACD Divergence Entry</h2>
+<p>The rule: enter long when price makes a lower low but MACD histogram makes a higher low (bullish divergence), confirmed by a close above the signal line. Exit on a fixed 2R target or a time stop of 20 bars. Filters included a trend filter (price above the 200-EMA), a volume filter (volume above its 20-bar average), and a volatility floor (ATR above its 20-bar median).</p>
+<h3 id="layer-1-passed">Layer 1: passed</h3>
+<p>The sweep over <code>fast ∈ [8,16]</code>, <code>slow ∈ [20,34]</code>, <code>signal ∈ [7,11]</code> produced 75 combinations, 68 with enough trades. Median PF was 1.41, 78% of combinations had PF above 1.0, and the plateau score at <code>(12, 26, 9)</code> was 0.71. The chosen point sat comfortably inside the grid. Nothing suspicious yet.</p>
+<h3 id="layer-2-failed">Layer 2: failed</h3>
+<p>Over 31 months, only 48% of months were positive. Worse, the best month contributed 44% of total PnL, and the top three months contributed 71%. The best month coincided with a broad volatility expansion — the rule caught one regime and did nothing in the other thirty. Median monthly PnL was slightly negative.</p>
+<p>Verdict: fail on <code>positive_share</code> (0.48 &lt; 0.55), <code>best_share</code> (0.44 &gt; 0.30), and <code>top3_share</code> (0.71 &gt; 0.55). This alone is enough to reject the rule.</p>
+<h3 id="layer-3-failed">Layer 3: failed</h3>
+<p>The ablation was run anyway, out of curiosity:</p>
+<table>
+<thead>
+<tr>
+<th>Removed</th>
+<th>PF</th>
+<th>Expectancy (R)</th>
+<th>Retention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trend filter</td>
+<td>1.38</td>
+<td>0.11</td>
+<td>0.73</td>
+</tr>
+<tr>
+<td>Volume filter</td>
+<td>1.52</td>
+<td>0.17</td>
+<td>1.13</td>
+</tr>
+<tr>
+<td>Volatility floor</td>
+<td>1.09</td>
+<td>0.06</td>
+<td>0.40</td>
+</tr>
+<tr>
+<td>Divergence (core)</td>
+<td>0.94</td>
+<td>−0.01</td>
+<td>−0.07</td>
+</tr>
+</tbody>
+</table>
+<p>Two problems. The volatility floor is doing most of the work — removing it drops retention to 0.40, well below the 0.60 floor. That means the "divergence" rule is largely a low-volatility regime filter wearing a costume. And removing the volume filter <em>improves</em> expectancy by 13%, which is under the 15% harm threshold but close enough to be a warning sign: the filter was probably added to patch a specific stretch of the sample.</p>
+<p>The core divergence component does matter (removal sends expectancy negative), but that doesn't save the rule. A rule whose edge lives mostly in a regime filter, and whose only positive months come from one volatility event, is not a rule. It's a description of one period.</p>
+<h3 id="the-rejection">The rejection</h3>
+<p>Three-layer result: pass, fail, fail. The rule went into the rejected list with the metrics recorded, so future me doesn't re-test it in six months and get excited all over again. That bookkeeping is half the value of the process.</p>
+<h2 id="practical-notes">Practical Notes</h2>
+<ul>
+<li><strong>Run the layers in order.</strong> Layer 1 is cheap and filters out most junk. Layer 2 is cheaper than layer 3 and catches the most common failure mode. Don't run ablations on rules that can't pass a monthly check.</li>
+<li><strong>Log every metric, including failures.</strong> A rejection is only useful if it's documented. Keep the sweep DataFrame and the ablation table next to the rule definition.</li>
+<li><strong>Thresholds are conventions, not laws.</strong> The numbers above are tuned to my trade frequency and risk unit. If your rules trade twenty times a year, <code>months &gt;= 24</code> is too strict; if they trade daily, <code>best_share &lt;= 0.30</code> is probably too loose. Pick thresholds once, write them down, and don't move them after seeing a result you like.</li>
+<li><strong>The ablation is the most informative layer.</strong> It tells you <em>why</em> a rule works, not just whether it did. When a rule fails layer 3, you often learn something reusable about the market — in this case, that low-volatility regimes are where this class of divergence entry lives, which is a hypothesis worth testing on its own.</li>
+</ul>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">backtesting</span><span class="tag-badge">overfitting</span><span class="tag-badge">parameter sweep</span><span class="tag-badge">robustness</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
