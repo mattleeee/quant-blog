@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>从xcopy迁移到robocopy：中文路径下的复制可靠性</title>
+            <link>https://www.hkcode.dpdns.org/posts/56.html</link>
+            <description>从xcopy迁移到robocopy：中文路径下的复制可靠性
+
+一、故障场景：静默失败的xcopy
+
+一个定时同步脚本，负责把量化策略的日志目录从 D:\策略日志\ 备份到 E:\备份\。...</description>
+            <pubDate>2026-10-26</pubDate>
+            <category>Windows自动化</category>
+        </item>
+        <item>
             <title>Gate.io API的分页陷阱：from+to+limit不能共存</title>
             <link>https://www.hkcode.dpdns.org/posts/55.html</link>
             <description>Gate.io API的分页陷阱：from+to+limit不能共存
@@ -191,13 +202,6 @@
             <link>https://www.hkcode.dpdns.org/posts/37.html</link>
             <description>模拟盘跑了一段时间,交易记录攒了几百条,但很多人只是看看总盈亏就结束了。这样跑模拟盘的意义不大——真正有价值的是从交易记录中提取统计指标,做系统性复盘,找到策略的衰减点和改进方向。 这篇文章分享一套完整的模拟盘数据统计与月度复盘方法,包含可复用的Python代码。 一、数据准备 假设你的模拟盘交易记录已经导出为CSV,...</description>
             <pubDate>2026-10-06</pubDate>
-            <category>量化策略</category>
-        </item>
-        <item>
-            <title>策略组合管理：多策略并行运行的架构设计</title>
-            <link>https://www.hkcode.dpdns.org/posts/36.html</link>
-            <description>单策略跑通不难,难的是同时跑十个策略还不出乱子。仓位互相踩踏、信号冲突、资金分配不均、风控各自为政——这些问题在策略数量超过三个之后必然出现。这篇文章讲一套我在实盘里用过的多策略并行架构,核心解决四件事:策略注册、信号优先级、资金分配、冲突处理。 整体架构 先看分层。整个系统分四层,自上而下: ┌───────────...</description>
-            <pubDate>2026-10-05</pubDate>
             <category>量化策略</category>
         </item>
     </channel>
