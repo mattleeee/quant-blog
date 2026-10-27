@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>幂等部署设计：可重复执行的更新脚本 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="幂等部署设计：可重复执行的更新脚本
+
+部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。...">
+    <meta name="keywords" content="幂等,部署脚本,可重入,补丁">
+    <meta property="og:title" content="幂等部署设计：可重复执行的更新脚本">
+    <meta property="og:description" content="幂等部署设计：可重复执行的更新脚本
+
+部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/57.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>幂等部署设计：可重复执行的更新脚本</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-27</span>
+                <span class="category"><span class="tag-badge">工程实践</span></span>
+            </div>
+            <div class="post-content">
+<p>部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。此时运维的第一反应是重跑脚本——如果脚本不可重入，重跑轻则报错误判，重则把已完成的步骤再执行一遍，造成配置重复、数据覆盖甚至服务不可用。</p>
+<p>幂等（idempotent）部署的核心目标只有一个：<strong>同一份脚本，执行一次和执行 N 次，系统最终状态一致</strong>。下面从判断模式、反模式、远程补丁 checklist 三个层面拆解具体做法。</p>
+<h2 id="_1">一、幂等检查的四种模式</h2>
+<h3 id="1-content-marker">1. 内容标记（Content Marker）</h3>
+<p>最可靠的判断方式：不看“第几步执行到哪”，只看“目标状态是否已经存在”。判断依据是目标文件或资源的内容特征，而不是计数器或时间戳。</p>
+<pre class="codehilite"><code class="language-python">import hashlib
+import os
+
+MARKER = &quot;# managed-by: deploy-script-v3&quot;
+
+def patch_applied(target_file: str, marker: str = MARKER) -&gt; bool:
+    &quot;&quot;&quot;检查目标文件是否已包含部署标记&quot;&quot;&quot;
+    if not os.path.exists(target_file):
+        return False
+    with open(target_file, &quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
+        content = f.read()
+    return marker in content
+
+def apply_patch(target_file: str, patch_block: str, marker: str = MARKER) -&gt; bool:
+    &quot;&quot;&quot;幂等地追加补丁块；已应用则跳过&quot;&quot;&quot;
+    if patch_applied(target_file, marker):
+        print(f&quot;[skip] {target_file} already patched&quot;)
+        return False
+    with open(target_file, &quot;a&quot;, encoding=&quot;utf-8&quot;) as f:
+        f.write(f&quot;\n{patch_block}\n{marker}\n&quot;)
+        f.flush()
+        os.fsync(f.fileno())   # 立即写盘，防止断电丢内容
+    print(f&quot;[apply] {target_file} patched&quot;)
+    return True
+</code></pre>
+
+<p>用内容标记的好处：即使脚本在“写完补丁但还没写状态文件”时崩溃，重跑时 <code>patch_applied</code> 依然能识别出补丁已存在，不会重复追加。<strong>状态文件可以丢，内容不会骗人。</strong></p>
+<h3 id="2-desired-state-diff">2. 目标状态比对（Desired State Diff）</h3>
+<p>对配置文件类补丁，更稳妥的做法是先算出“期望内容”，再和现状比对，只做差异部分。</p>
+<pre class="codehilite"><code class="language-python">import re
+
+def ensure_config_line(config_path: str, key: str, value: str) -&gt; bool:
+    &quot;&quot;&quot;确保配置文件中 key=value 存在且唯一，幂等&quot;&quot;&quot;
+    pattern = re.compile(rf&quot;^{re.escape(key)}\s*=.*$&quot;, re.MULTILINE)
+    new_line = f&quot;{key}={value}&quot;
+
+    if not os.path.exists(config_path):
+        with open(config_path, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+            f.write(new_line + &quot;\n&quot;)
+        return True
+
+    with open(config_path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
+        content = f.read()
+
+    matches = pattern.findall(content)
+    if len(matches) == 1 and matches[0].strip() == new_line:
+        return False                      # 已是目标状态
+    if matches:
+        content = pattern.sub(new_line, content, count=1)
+        # 清理可能存在的重复行
+        content = pattern.sub(&quot;&quot;, content)
+    else:
+        content = content.rstrip(&quot;\n&quot;) + &quot;\n&quot; + new_line + &quot;\n&quot;
+
+    with open(config_path, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    return True
+</code></pre>
+
+<h3 id="3">3. 资源存在性探测</h3>
+<p>对“创建类”操作（建目录、建用户、建 systemd unit），直接探测资源是否已存在，而不是靠“上次是否成功”的布尔值。</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+
+def ensure_user(username: str) -&gt; bool:
+    result = subprocess.run(
+        [&quot;id&quot;, &quot;-u&quot;, username], capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        return False
+    subprocess.run([&quot;useradd&quot;, &quot;-r&quot;, &quot;-s&quot;, &quot;/usr/sbin/nologin&quot;, username], check=True)
+    return True
+</code></pre>
+
+<h3 id="4">4. 版本号/指纹标记</h3>
+<p>对二进制或整包更新，用版本指纹判断，比时间戳可靠得多。</p>
+<pre class="codehilite"><code class="language-python">def current_version(binary: str) -&gt; str:
+    out = subprocess.run([binary, &quot;--version&quot;], capture_output=True, text=True)
+    return out.stdout.strip()
+
+def ensure_version(binary: str, expected: str) -&gt; bool:
+    if current_version(binary) == expected:
+        return False
+    # 执行升级……
+    return True
+</code></pre>
+
+<h2 id="_2">二、常见反模式</h2>
+<h3 id="_3">反模式一：先删后建</h3>
+<pre class="codehilite"><code class="language-python"># 错误示范
+shutil.rmtree(&quot;/opt/app/conf&quot;)
+shutil.copytree(&quot;/tmp/new_conf&quot;, &quot;/opt/app/conf&quot;)
+</code></pre>
+
+<p>如果 <code>copytree</code> 中途失败，<code>/opt/app/conf</code> 就没了，重跑脚本也救不回来——因为源可能已经清理。正确做法是<strong>先写临时目录，校验通过后原子替换</strong>：</p>
+<pre class="codehilite"><code class="language-python">import tempfile
+
+def atomic_replace_dir(src: str, dst: str):
+    parent = os.path.dirname(dst)
+    tmp = tempfile.mkdtemp(dir=parent, prefix=&quot;.deploy-&quot;)
+    try:
+        shutil.copytree(src, os.path.join(tmp, &quot;payload&quot;))
+        payload = os.path.join(tmp, &quot;payload&quot;)
+        backup = dst + &quot;.bak&quot;
+        if os.path.exists(dst):
+            os.rename(dst, backup)
+        os.rename(payload, dst)
+        if os.path.exists(backup):
+            shutil.rmtree(backup)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+</code></pre>
+
+<h3 id="_4">反模式二：计数式判断</h3>
+<pre class="codehilite"><code class="language-python"># 错误示范
+STATE_FILE = &quot;/var/lib/deploy/step.txt&quot;
+
+def get_step() -&gt; int:
+    return int(open(STATE_FILE).read()) if os.path.exists(STATE_FILE) else 0
+
+def run():
+    step = get_step()
+    if step &lt; 1:
+        do_step1()
+        open(STATE_FILE, &quot;w&quot;).write(&quot;1&quot;)
+    if step &lt; 2:
+        do_step2()
+        open(STATE_FILE, &quot;w&quot;).write(&quot;2&quot;)
+</code></pre>
+
+<p>问题在于：<code>do_step2()</code> 执行成功但写状态文件前崩溃，重跑时 <code>step</code> 仍是 1，<code>do_step2</code> 会被再执行一次。计数式判断把“执行”和“记录”拆成两个非原子操作，天然存在窗口。<strong>用目标状态判断，别用执行进度判断。</strong></p>
+<h3 id="_5">反模式三：无条件覆盖</h3>
+<pre class="codehilite"><code class="language-python"># 错误示范：每次都覆盖，配置里手工改过的项全丢
+with open(&quot;/etc/app/config.yml&quot;, &quot;w&quot;) as f:
+    f.write(DEFAULT_CONFIG)
+</code></pre>
+
+<p>覆盖式写入在“重跑”场景下会把运维手工调过的参数冲掉。应改为“只补缺失项”或“按 key 合并”。</p>
+<h3 id="_6">反模式四：依赖外部副作用判断</h3>
+<p>用 <code>curl</code> 探测服务是否起来决定要不要重启，看似合理，但服务可能因其他原因已运行，导致补丁永远不会被应用。<strong>判断依据必须和补丁本身强相关。</strong></p>
+<h2 id="_7">三、每步成功立即写盘的实现</h2>
+<p>幂等判断解决“要不要做”，立即写盘解决“做到一半崩了怎么办”。原则：<strong>每个原子步骤完成后，立即把该步骤的结果持久化，且持久化动作本身要幂等。</strong></p>
+<pre class="codehilite"><code class="language-python">import json
+
+class DeployLog:
+    def __init__(self, path: str):
+        self.path = path
+        self.data = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                self.data = json.load(f)
+
+    def mark(self, step: str, payload: dict):
+        self.data[step] = payload
+        tmp = self.path + &quot;.tmp&quot;
+        with open(tmp, &quot;w&quot;) as f:
+            json.dump(self.data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)   # 原子替换
+
+    def done(self, step: str) -&gt; bool:
+        return step in self.data
+</code></pre>
+
+<p>配合内容标记使用：<code>DeployLog</code> 只是加速跳过，真正的正确性由内容标记兜底。即使日志文件丢失，重跑也不会重复打补丁。</p>
+<h2 id="checklist">四、远程打补丁完整 checklist</h2>
+<p>一个可重入的远程补丁脚本，按以下顺序组织：</p>
+<ol>
+<li><strong>前置检查</strong>：SSH 连通性、磁盘空间、目标路径存在性、依赖命令（<code>systemctl</code>/<code>docker</code>）可用。检查失败直接退出，不产生任何副作用。</li>
+<li><strong>备份</strong>：对将被修改的文件做带时间戳备份（<code>cp -a</code>），备份本身幂等——已存在同名备份则跳过。</li>
+<li><strong>逐项应用补丁</strong>：每项补丁独立函数，内部先做内容标记检查，未应用才执行，执行后 <code>fsync</code>。</li>
+<li><strong>配置校验</strong>：<code>nginx -t</code>、<code>systemd-analyze verify</code>、<code>python -m py_compile</code> 等，校验失败回滚本次变更，不影响已完成的项。</li>
+<li><strong>服务重载</strong>：只在配置确实变化时 reload，用 <code>systemctl is-active</code> + 配置哈希判断。</li>
+<li><strong>健康检查</strong>：<code>curl</code> 本地端点或 <code>nc -z</code> 端口，失败则告警但不自动回滚（回滚本身也需幂等）。</li>
+<li><strong>日志落盘</strong>：每步结果写入 <code>DeployLog</code>，供下次运行跳过。</li>
+<li><strong>退出码语义化</strong>：<code>0</code> 全部成功或全部已应用；<code>1</code> 前置检查失败；<code>2</code> 部分应用需人工介入。</li>
+</ol>
+<p>对应的执行骨架：</p>
+<pre class="codehilite"><code class="language-python">STEPS = [
+    (&quot;backup&quot;,    do_backup),
+    (&quot;patch_ssh&quot;, lambda: apply_patch(&quot;/etc/ssh/sshd_config&quot;, SSHD_BLOCK)),
+    (&quot;patch_nginx&quot;, lambda: ensure_config_line(&quot;/etc/nginx/nginx.conf&quot;, &quot;worker_rlimit_nofile&quot;, &quot;65535&quot;)),
+    (&quot;reload&quot;,    reload_if_changed),
+]
+
+def run_deploy(log: DeployLog):
+    for name, fn in STEPS:
+        if log.done(name):
+            print(f&quot;[skip] {name}&quot;)
+            continue
+        try:
+            changed = fn()
+            log.mark(name, {&quot;changed&quot;: bool(changed)})
+        except Exception as e:
+            print(f&quot;[fail] {name}: {e}&quot;)
+            return 2
+    return 0
+</code></pre>
+
+<p>注意 <code>fn()</code> 的返回值表示“是否真的做了变更”，供后续步骤（如 reload）判断。这样即使某步因已应用而跳过，reload 逻辑也不会被误触发。</p>
+<h2 id="_8">五、小结</h2>
+<p>幂等部署不是加个 <code>if exists</code> 就完事，它要求每个步骤都满足三个性质：<strong>判断依据与目标状态强相关、执行与记录原子化、失败可安全重入</strong>。内容标记做判断、原子替换做写入、每步立即落盘、checklist 覆盖前置与后置校验——这套组合在远程补丁场景下能把“重跑”从高风险操作变成常规操作。</p>
+<p>写完脚本后最有效的验证方式：在测试机上故意在每步之间 <code>kill -9</code>，然后重跑，检查最终状态是否与一次跑完完全一致。跑不通的，就是还有非幂等的角落。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">幂等</span><span class="tag-badge">部署脚本</span><span class="tag-badge">可重入</span><span class="tag-badge">补丁</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
