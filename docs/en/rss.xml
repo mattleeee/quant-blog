@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Backtesting the Pullback Filter: When a Safety Check Kills Profit</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/29.html</link>
+            <description>The Setup: One Strategy, Two Filters The base strategy is a long-only momentum entry on 15-minute candles....</description>
+            <pubDate>2026-10-27</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Three-Layer Validation Before You Trust a Backtest</title>
             <link>https://www.hkcode.dpdns.org/en/posts/28.html</link>
             <description>Why One Good Backtest Means Nothing A single equity curve is a sample of size one....</description>
@@ -136,13 +143,6 @@
             <title>Why I Replaced Daemon Processes with Windows Task Scheduler</title>
             <link>https://www.hkcode.dpdns.org/en/posts/1.html</link>
             <description>Corporate Windows machines are hostile territory for long-running processes....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Windows Automation</category>
-        </item>
-        <item>
-            <title>Running Scheduled Tasks Silently: The VBS Wrapper Pattern</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/2.html</link>
-            <description>The Problem: Black Windows Every Hour A monitoring server had nine scheduled tasks, each firing hourly....</description>
             <pubDate>2026-10-06</pubDate>
             <category>Windows Automation</category>
         </item>
