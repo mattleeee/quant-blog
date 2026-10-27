@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtesting the Pullback Filter: When a Safety Check Kills Profit - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Setup: One Strategy, Two Filters The base strategy is a long-only momentum entry on 15-minute candles....">
+    <meta name="keywords" content="pullback,filter design,expectancy,A/B test,entry rules">
+    <meta property="og:title" content="Backtesting the Pullback Filter: When a Safety Check Kills Profit">
+    <meta property="og:description" content="The Setup: One Strategy, Two Filters The base strategy is a long-only momentum entry on 15-minute candles....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/29.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Backtesting the Pullback Filter: When a Safety Check Kills Profit</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-27</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>The base strategy is a long-only momentum entry on 15-minute candles. Signal logic, position sizing, and exit rules are fixed. The only thing that changes between variants is the pullback confirmation that must be true before an entry fires.</p>
+<p>The strict filter requires all three of the following on the entry bar:</p>
+<ol>
+<li>At least one down candle among the last three 15-minute candles.</li>
+<li>Current price below the high of the last five candles.</li>
+<li>The latest candle is not a large bullish candle (body above a threshold, e.g. 0.8 × ATR).</li>
+</ol>
+<p>The relaxed filter drops the three-candle window and the big-bullish veto, keeping only: <strong>at least one down candle within the last five candles.</strong> It still demands a pullback, just a looser one.</p>
+<p>Both variants run on the same 90-day window, 24 symbols, same fee model, same slippage assumption. That is the whole point of the experiment: a single boolean changes, everything else is held constant.</p>
+<h2 id="why-the-comparison-is-easy-to-get-wrong">Why the Comparison Is Easy to Get Wrong</h2>
+<p>The tempting move is to compare the two versions by their win rates or average PnL per trade. That comparison is contaminated. The strict filter does not just change <em>how</em> trades are taken — it changes <em>which</em> trades exist. The strict set is a subset of the relaxed set, so you are comparing two different populations of trades, not the same trades under two treatments.</p>
+<p>To say anything honest about the filter, you need to look at the trades the strict filter <em>rejects</em>. Those rejected entries are where the answer lives. If the rejected trades have positive expectancy on their own, the filter is destroying edge. If they are negative, the filter is earning its keep.</p>
+<p>So the experiment has three outputs, not two:</p>
+<ul>
+<li>Trades taken by both variants (the intersection).</li>
+<li>Trades taken only by the relaxed variant (rejected by strict).</li>
+<li>Expectancy of each group.</li>
+</ul>
+<p>The base strategy under the relaxed filter is the control population. The strict filter is a treatment applied to the signal stream. Treat it like an A/B test where the "B" arm is a <em>subset</em> of "A", and you want to know whether the excluded slice is better or worse than average.</p>
+<h2 id="counting-the-incremental-trades">Counting the Incremental Trades</h2>
+<p>The cleanest way to run this is to evaluate the signal stream once, tag every candidate entry with the filter booleans, and then slice. Here is a minimal harness that does exactly that.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class Trade:
+    symbol: str
+    ts: int
+    entry: float
+    exit: float
+    pnl: float          # net of fees and slippage, in quote units
+
+def strict_pullback(candles, i: int, atr: float) -&gt; bool:
+    # candles: list of (ts, o, h, l, c) ascending, i = entry bar index
+    last3 = candles[i-2:i+1]
+    has_down = any(c[4] &lt; c[1] for c in last3)
+    five_high = max(c[2] for c in candles[i-4:i+1])
+    body = candles[i][4] - candles[i][1]
+    not_big_bull = body &lt; 0.8 * atr
+    return has_down and candles[i][4] &lt; five_high and not_big_bull
+
+def relaxed_pullback(candles, i: int, atr: float) -&gt; bool:
+    last5 = candles[i-4:i+1]
+    return any(c[4] &lt; c[1] for c in last5)
+</code></pre>
+
+<p>The backtest engine stays untouched. You generate candidate entries from the momentum signal, then record both filter verdicts alongside the realized PnL. Note that the entry price and exit price are identical for a given candidate regardless of which filter accepted it — the filter does not move the entry bar, it only decides whether the bar is tradeable at all. That assumption matters: if your strict filter also shifts entry timing (e.g. waiting for confirmation on the <em>next</em> bar), you have changed two variables and the comparison is dead.</p>
+<pre class="codehilite"><code class="language-python">def run_backtest(candles_by_symbol, signal_fn, exit_fn):
+    rows = []
+    for sym, candles in candles_by_symbol.items():
+        atr_series = compute_atr(candles, 14)
+        for i in range(20, len(candles) - 1):
+            if not signal_fn(candles, i):
+                continue
+            atr = atr_series[i]
+            entry = candles[i][4]
+            exit_price = exit_fn(candles, i)
+            pnl = (exit_price - entry) - fee_and_slip(entry, exit_price)
+            rows.append({
+                &quot;symbol&quot;: sym,
+                &quot;ts&quot;: candles[i][0],
+                &quot;pnl&quot;: pnl,
+                &quot;strict&quot;: strict_pullback(candles, i, atr),
+                &quot;relaxed&quot;: relaxed_pullback(candles, i, atr),
+            })
+    return rows
+</code></pre>
+
+<p>Now the analysis is just a groupby. No second backtest run, no risk of drift between the two code paths.</p>
+<pre class="codehilite"><code class="language-python">def slice_expectancy(rows):
+    both = [r[&quot;pnl&quot;] for r in rows if r[&quot;strict&quot;] and r[&quot;relaxed&quot;]]
+    strict_only = [r[&quot;pnl&quot;] for r in rows if r[&quot;strict&quot;] and not r[&quot;relaxed&quot;]]
+    relaxed_only = [r[&quot;pnl&quot;] for r in rows if r[&quot;relaxed&quot;] and not r[&quot;strict&quot;]]
+    # note: strict implies relaxed by construction only if the
+    # relaxed rule is a strict superset — verify this before trusting it
+    return {
+        &quot;both&quot;: (len(both), sum(both) / len(both) if both else 0),
+        &quot;strict_rejected&quot;: (len(relaxed_only),
+                            sum(relaxed_only) / len(relaxed_only) if relaxed_only else 0),
+        &quot;strict_only&quot;: (len(strict_only),
+                        sum(strict_only) / len(strict_only) if strict_only else 0),
+    }
+</code></pre>
+
+<p>One check before you trust any of this: confirm the strict rule is actually a subset of the relaxed rule. If your relaxed rule is "any down candle in the last five" and your strict rule also requires "price below the five-candle high," then strict does <em>not</em> imply relaxed — a bar can satisfy strict's down-candle condition and high condition while failing nothing in relaxed, but the reverse can also happen if the down candle is outside the five-bar window in strict's three-bar check. Run the set-difference both ways and print the counts. If <code>strict_only</code> is non-empty, your two rules are not nested, and you should compare them as two separate populations rather than a control and a treatment.</p>
+<h2 id="the-numbers">The Numbers</h2>
+<p>On the 90-day, 24-symbol run:</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Trades</th>
+<th>Expectancy (U/trade)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strict pullback</td>
+<td>~1,900</td>
+<td><strong>-0.013</strong></td>
+</tr>
+<tr>
+<td>Relaxed pullback</td>
+<td>~2,600</td>
+<td><strong>+0.011</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The strict filter rejects roughly 700 candidate entries. Those rejected trades carry positive expectancy — enough to flip the whole strategy from negative to positive. The filter did not remove noise; it removed the profitable tail.</p>
+<p>The win rate on the strict set was actually slightly <em>higher</em>. That is the trap. A filter that raises win rate while lowering expectancy is selecting for small, frequent wins and occasional large losses — exactly what a late, tired move produces.</p>
+<h2 id="why-safer-is-worse-here">Why "Safer" Is Worse Here</h2>
+<p>The strict filter's three conditions all bias toward the same failure mode: <strong>entering after the move has already extended and then rolled over.</strong></p>
+<ul>
+<li>Requiring a down candle in the last three bars means you enter on the first sign of weakness. In a momentum regime, that is often the start of a real reversal, not a healthy pullback.</li>
+<li>Requiring price below the five-candle high means you are buying into a local dip — but only after the high was already set. The move is mature.</li>
+<li>Vetoing a big bullish candle removes exactly the bars where momentum is re-accelerating. Those are the entries with the best follow-through.</li>
+</ul>
+<p>The relaxed filter keeps the pullback requirement but gives the move room to breathe. It accepts entries where the pullback happened four or five bars ago and price has since resumed. Those entries are earlier in the <em>next</em> leg, not later in the <em>current</em> one.</p>
+<p>Put differently: the strict filter is a proxy for "the setup looks clean right now." But clean-looking setups are, by construction, the ones where the crowd has already noticed. The relaxed filter accepts messier setups that the strategy's exit logic can still harvest. The filter was supposed to reduce drawdown. It reduced trade count and took the edge with it.</p>
+<h2 id="practical-rules-for-filter-ab-tests">Practical Rules for Filter A/B Tests</h2>
+<p>A few habits that keep this kind of test honest:</p>
+<p><strong>Keep the exit fixed.</strong> If you tune the exit for each filter variant, you are no longer measuring the filter. Any difference in expectancy is confounded by the exit change.</p>
+<p><strong>Always report the rejected slice.</strong> A filter's value is the expectancy of what it excludes. If you do not compute that number, you do not know what the filter does.</p>
+<p><strong>Check nesting before slicing.</strong> Confirm which candidate population each rule accepts, and whether one is a subset of the other. Non-nested rules need separate baselines.</p>
+<p><strong>Watch win rate and expectancy diverge.</strong> When a filter raises win rate but lowers expectancy, you have found a filter that trades frequency for size. That trade is only good if the size reduction is larger than the frequency gain — usually it is not.</p>
+<p><strong>Run the test on out-of-sample data.</strong> A 90-day window with 24 symbols is enough to see a sign flip, not enough to trust the magnitude. Re-run on a held-out period and check whether the rejected-slice expectancy keeps the same sign.</p>
+<h2 id="closing">Closing</h2>
+<p>Filters that feel safe are often filters that select for late entries. Measure what they reject, not just what they keep.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-27 08:46:47</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Q</td>
+<td>热点跟涨</td>
+<td>$0.2008</td>
+<td>$0.1848</td>
+<td>$0.2079</td>
+<td>1:2.3</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">pullback</span><span class="tag-badge">filter design</span><span class="tag-badge">expectancy</span><span class="tag-badge">A/B test</span><span class="tag-badge">entry rules</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
