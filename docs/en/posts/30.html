@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A/B Testing Trading Rules: The 52 Rejected Trades That Changed My Mind - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Question a Filter Should Answer A pullback filter sits in front of an entry signal and decides which setups are allo...">
+    <meta name="keywords" content="A/B test,incremental trades,profit factor,win rate,evidence">
+    <meta property="og:title" content="A/B Testing Trading Rules: The 52 Rejected Trades That Changed My Mind">
+    <meta property="og:description" content="The Question a Filter Should Answer A pullback filter sits in front of an entry signal and decides which setups are allo...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/30.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>A/B Testing Trading Rules: The 52 Rejected Trades That Changed My Mind</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-28</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A pullback filter sits in front of an entry signal and decides which setups are allowed through. The usual debate goes like this: the strict variant looks cleaner on the equity curve, the relaxed variant trades more, and someone argues the extra trades are "noise." That argument is almost never tested. It is asserted from the shape of the curve.</p>
+<p>The right question is narrower: <strong>what happens to the trades that exist only because of the relaxed rule?</strong> If that incremental set has positive expectancy, the strict filter is not cleaning up noise. It is deleting the strategy's core. In the case I worked through, the strict rule rejected 52 trades that the relaxed rule took. Those 52 trades had a 48.1% win rate, +0.131U expectancy per trade, and a profit factor of 1.50. The "worse" rule was rejecting the profitable part.</p>
+<p>This post is about the method, not the specific rule: run both variants over the same window, diff the trade lists, and evaluate the rejected set on its own statistics.</p>
+<h2 id="why-the-headline-curve-cant-settle-it">Why the Headline Curve Can't Settle It</h2>
+<p>Two variants produce two equity curves. Comparing them tells you which variant made more money over one sample. It does not tell you whether the filter is doing what you think it is doing, because the curves aggregate everything: shared trades, rejected trades, and the timing of both.</p>
+<p>A strict filter can improve a curve for three different reasons:</p>
+<ol>
+<li>It removes genuinely bad trades (the intended effect).</li>
+<li>It removes trades that were fine but happened to lose in this sample (overfitting to noise).</li>
+<li>It changes position sizing or trade sequencing in a way that masks the removal of good trades.</li>
+</ol>
+<p>Only the first is a reason to keep it. The diff isolates the trades that differ, and their statistics tell you which of the three you are looking at.</p>
+<h3 id="the-diff-is-the-unit-of-analysis">The diff is the unit of analysis</h3>
+<p>Think of the two variants as generating two sets of trades over an identical window. The shared trades are irrelevant to the filter decision — both rules took them, so they contribute equally to both curves. The decision lives entirely in the symmetric difference:</p>
+<ul>
+<li><strong>Rejected-only</strong>: trades the strict rule skipped and the relaxed rule took.</li>
+<li><strong>Accepted-only</strong>: trades the relaxed rule skipped and the strict rule took (this happens when the rules are not strictly nested).</li>
+</ul>
+<p>If the rejected-only set has positive expectancy with a reasonable sample size, the filter is destroying value. If it has strongly negative expectancy, the filter is earning its keep. If the set is tiny, you have no evidence either way and should not pretend otherwise.</p>
+<h2 id="building-the-two-trade-lists">Building the Two Trade Lists</h2>
+<p>The prerequisite is that both variants log trades in the same schema, over the same data, with the same execution assumptions. Any difference in slippage model or fill logic between runs will contaminate the diff.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass(frozen=True)
+class Trade:
+    symbol: str
+    entry_time: datetime
+    exit_time: datetime
+    direction: str          # &quot;long&quot; / &quot;short&quot;
+    entry_price: float
+    exit_price: float
+    size: float             # units
+    pnl: float              # realized, in account currency
+    rule_variant: str       # &quot;strict&quot; / &quot;relaxed&quot;
+</code></pre>
+
+<p>A trade key needs to identify the same opportunity across runs. Entry timestamp plus symbol plus direction is usually enough; if a strategy can re-enter the same symbol on the same bar, add an entry-sequence index.</p>
+<pre class="codehilite"><code class="language-python">def trade_key(t: Trade) -&gt; tuple:
+    return (t.symbol, t.entry_time, t.direction)
+</code></pre>
+
+<p>Run both variants over the same window and the same instrument universe:</p>
+<pre class="codehilite"><code class="language-python">strict_trades = run_backtest(strategy, data, params=STRICT_PARAMS)
+relaxed_trades = run_backtest(strategy, data, params=RELAXED_PARAMS)
+
+strict_by_key = {trade_key(t): t for t in strict_trades}
+relaxed_by_key = {trade_key(t): t for t in relaxed_trades}
+
+rejected_only = [t for k, t in relaxed_by_key.items() if k not in strict_by_key]
+accepted_only = [t for k, t in strict_by_key.items() if k not in relaxed_by_key]
+shared = [t for k, t in strict_by_key.items() if k in relaxed_by_key]
+</code></pre>
+
+<p>Sanity check before analyzing anything: <code>len(shared) + len(rejected_only)</code> should equal the relaxed run's trade count, and the PnL of the shared set should be identical in both runs. If it is not, the two runs are not comparable and the diff means nothing.</p>
+<h2 id="statistics-for-the-incremental-set">Statistics for the Incremental Set</h2>
+<p>The rejected-only set is just a list of trades. Evaluate it exactly as you would a standalone strategy, but report the full picture, not one number.</p>
+<pre class="codehilite"><code class="language-python">import statistics as st
+
+def summarize(trades: list[Trade]) -&gt; dict:
+    n = len(trades)
+    if n == 0:
+        return {&quot;n&quot;: 0}
+
+    pnls = [t.pnl for t in trades]
+    wins = [p for p in pnls if p &gt; 0]
+    losses = [p for p in pnls if p &lt; 0]
+
+    gross_win = sum(wins)
+    gross_loss = -sum(losses)
+
+    return {
+        &quot;n&quot;: n,
+        &quot;win_rate&quot;: len(wins) / n,
+        &quot;avg_win&quot;: st.mean(wins) if wins else 0.0,
+        &quot;avg_loss&quot;: st.mean(losses) if losses else 0.0,
+        &quot;expectancy&quot;: st.mean(pnls),
+        &quot;profit_factor&quot;: gross_win / gross_loss if gross_loss &gt; 0 else float(&quot;inf&quot;),
+        &quot;total_pnl&quot;: sum(pnls),
+    }
+</code></pre>
+
+<p>For the 52 rejected trades this returns something like:</p>
+<pre class="codehilite"><code class="language-text">n=52  win_rate=0.481  avg_win=+0.71U  avg_loss=-0.41U
+expectancy=+0.131U  profit_factor=1.50  total_pnl=+6.81U
+</code></pre>
+
+<p>Read it as a whole. A 48.1% win rate sounds unremarkable until you pair it with the payoff ratio: average win is roughly 1.7x average loss, so sub-50% accuracy still yields positive expectancy. Profit factor 1.50 over 52 trades is not spectacular, but it is clearly the wrong side of zero for a filter that is supposed to be removing bad trades. A filter that rejects a set with PF 1.50 is rejecting trades you would have wanted.</p>
+<h3 id="interpret-the-shape-not-just-the-sign">Interpret the shape, not just the sign</h3>
+<p>Three patterns are worth distinguishing when you look at the rejected-only set:</p>
+<ul>
+<li><strong>Negative expectancy with a normal win rate</strong>: the filter is removing losers. Keep it.</li>
+<li><strong>Near-zero expectancy with a large sample</strong>: the filter is removing noise. Keep it only if it materially reduces drawdown or costs; otherwise it is not earning its complexity.</li>
+<li><strong>Positive expectancy</strong>: the filter is removing profit. The strict variant needs a different justification, or it should go.</li>
+</ul>
+<p>The 52-trade case is the third pattern, and the win rate alone would have hidden it. This is why the diff has to be evaluated with expectancy and profit factor, not just hit rate.</p>
+<h2 id="guarding-against-one-lucky-trade">Guarding Against One Lucky Trade</h2>
+<p>The most common way a diff analysis lies is concentration. Fifty-two trades with +0.131U expectancy can be twelve good trades and forty flat ones, or one trade that made the entire set. Before trusting the result, check:</p>
+<h3 id="per-trade-contribution">Per-trade contribution</h3>
+<pre class="codehilite"><code class="language-python">def concentration_report(trades: list[Trade], top_k: int = 5) -&gt; dict:
+    pnls = sorted((t.pnl for t in trades), reverse=True)
+    total = sum(pnls)
+    top = sum(pnls[:top_k])
+
+    return {
+        &quot;total_pnl&quot;: total,
+        &quot;top_k_pnl&quot;: top,
+        &quot;top_k_share&quot;: top / total if total != 0 else float(&quot;inf&quot;),
+        &quot;expectancy_ex_top_k&quot;: (total - top) / (len(pnls) - top_k) if len(pnls) &gt; top_k else None,
+    }
+</code></pre>
+
+<p>If the top five trades account for most of the set's PnL and expectancy excluding them collapses toward zero, the incremental set is not evidence of a better rule. It is evidence of a handful of outcomes.</p>
+<h3 id="per-symbol-breakdown">Per-symbol breakdown</h3>
+<p>The diff can also be dominated by one instrument. Group the rejected-only trades by symbol and compare each group's count and expectancy against its share of the full sample.</p>
+<pre class="codehilite"><code class="language-python">from collections import defaultdict
+
+def by_symbol(trades: list[Trade]) -&gt; dict[str, dict]:
+    groups = defaultdict(list)
+    for t in trades:
+        groups[t.symbol].append(t)
+    return {sym: summarize(ts) for sym, ts in groups.items()}
+</code></pre>
+
+<p>If one symbol supplies most of the rejected trades and all of the positive expectancy, the honest conclusion is "the relaxed rule helps on this symbol in this window," not "the relaxed rule is better." A filter decision made on a single-symbol diff is a single-symbol decision.</p>
+<h3 id="sample-size-and-stability">Sample size and stability</h3>
+<p>Fifty-two trades is enough to see a signal but not enough to be confident about its magnitude. Split the rejected-only set in half by time and check whether expectancy holds in both halves. If the first half carries everything and the second half is flat or negative, the incremental set is not a stable property of the rule.</p>
+<pre class="codehilite"><code class="language-python">def split_half(trades: list[Trade]) -&gt; tuple[list[Trade], list[Trade]]:
+    ordered = sorted(trades, key=lambda t: t.entry_time)
+    mid = len(ordered) // 2
+    return ordered[:mid], ordered[mid:]
+</code></pre>
+
+<h2 id="what-the-method-actually-decides">What the Method Actually Decides</h2>
+<p>The diff analysis does not tell you which rule is "correct." It tells you what each rule is doing. In this case, the strict pullback filter was not removing noise — it was removing a set of trades with positive expectancy, a 1.50 profit factor, and a payoff profile that made a sub-50% win rate profitable. The relaxed rule was not sloppier; the strict rule was over-filtered.</p>
+<p>The general procedure generalizes beyond pullback filters. Any time you compare two entry conditions, two exit rules, or two position-sizing schemes, the shared trades cancel and the decision lives in the diff. Evaluate the incremental set with count, win rate, average win and loss, expectancy, and profit factor, then check whether that set is concentrated in a few trades or a single symbol. If it is, you have a hypothesis, not a result.</p>
+<p>The headline curve is a summary of everything at once. The diff is the only place the filter's actual effect is visible.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">A/B test</span><span class="tag-badge">incremental trades</span><span class="tag-badge">profit factor</span><span class="tag-badge">win rate</span><span class="tag-badge">evidence</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
