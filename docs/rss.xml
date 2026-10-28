@@ -7,6 +7,19 @@
         <language>zh-CN</language>
         
         <item>
+            <title>反事实重放回测：如果当时有熔断会怎样</title>
+            <link>https://www.hkcode.dpdns.org/posts/58.html</link>
+            <description>反事实重放回测：如果当时有熔断会怎样
+
+问题的本质
+
+假设你有一套跑了两年的实盘策略，交易记录完整。现在你想知道：如果当初就加上&quot;单日亏损超过2%停止开新仓&quot;这条规则，历史曲线会怎么变？
+
+普通回测回答不了这个问题。因为你的历史交易是在旧规则下发生的——每笔开仓的时间、价格、仓位，都是旧规则的产物。...</description>
+            <pubDate>2026-10-28</pubDate>
+            <category>量化回测</category>
+        </item>
+        <item>
             <title>幂等部署设计：可重复执行的更新脚本</title>
             <link>https://www.hkcode.dpdns.org/posts/57.html</link>
             <description>幂等部署设计：可重复执行的更新脚本
@@ -198,13 +211,6 @@
 在量化交易项目中,策略代码的迭代频率远高于普通业务系统。一个因子权重的微调、一段风控逻辑的修改,都可能直接影响实盘表现。如果没有可靠的备份机制,一次误操作就可能让数周的优化工作付诸东流。...</description>
             <pubDate>2026-10-08</pubDate>
             <category>系统运维</category>
-        </item>
-        <item>
-            <title>市场情绪分析功能实现：综合分数+F&amp;amp;G指标</title>
-            <link>https://www.hkcode.dpdns.org/posts/38.html</link>
-            <description>情绪是市场的短期定价因子之一。价格可以被操纵,成交量可以被对倒,但情绪指标往往能提供另一维度的参考。这篇文章记录我在自己的量化系统里实现市场情绪分析模块的过程,包括 F&amp;amp;G 指数获取、综合情绪分数计算、极端值信号,以及定时推送。 一、为什么要做情绪分析 做趋势策略的时候,最难受的不是震荡,而是趋势末端的情绪亢奋...</description>
-            <pubDate>2026-10-07</pubDate>
-            <category>量化策略</category>
         </item>
     </channel>
 </rss>
