@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>反事实重放回测：如果当时有熔断会怎样 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="反事实重放回测：如果当时有熔断会怎样
+
+问题的本质
+
+假设你有一套跑了两年的实盘策略，交易记录完整。现在你想知道：如果当初就加上&quot;单日亏损超过2%停止开新仓&quot;这条规则，历史曲线会怎么变？
+
+普通回测回答不了这个问题。...">
+    <meta name="keywords" content="反事实,重放回测,What-if分析,回测方法论">
+    <meta property="og:title" content="反事实重放回测：如果当时有熔断会怎样">
+    <meta property="og:description" content="反事实重放回测：如果当时有熔断会怎样
+
+问题的本质
+
+假设你有一套跑了两年的实盘策略，交易记录完整。现在你想知道：如果当初就加上&quot;单日亏损超过2%停止开新仓&quot;这条规则，历史曲线会怎么变？
+
+普通回测回答不了这个问题。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/58.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>反事实重放回测：如果当时有熔断会怎样</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-28</span>
+                <span class="category"><span class="tag-badge">量化回测</span></span>
+            </div>
+            <div class="post-content">
+<h2 id="_1">问题的本质</h2>
+<p>假设你有一套跑了两年的实盘策略，交易记录完整。现在你想知道：<strong>如果当初就加上"单日亏损超过2%停止开新仓"这条规则，历史曲线会怎么变？</strong></p>
+<p>普通回测回答不了这个问题。因为你的历史交易是在旧规则下发生的——每笔开仓的时间、价格、仓位，都是旧规则的产物。你重新跑一遍回测，用的是历史K线加新规则，但策略的参数、信号逻辑、甚至你对市场的判断，都已经和当初不一样了。这不是"如果当时"，这是"如果现在"。</p>
+<p>反事实重放（counterfactual replay）走的是另一条路：<strong>不改策略，只改规则，把真实发生的交易记录当作输入，在重放时叠加新规则。</strong> 被规则拦截的开仓直接剔除，对应的平仓也剔除，然后处理拦截带来的连锁影响。</p>
+<p>这比重新回测更接近"如果当时"的语义，因为它保留了真实交易的所有细节——真实的成交价、真实的滑点、真实的持仓时长。</p>
+<h2 id="_2">重放引擎的设计</h2>
+<p>核心数据结构很简单：一笔交易（trade）包含开仓时间、开仓价、平仓时间、平仓价、方向、数量。重放引擎按时间顺序遍历这些交易，对每笔开仓应用新规则，决定放行还是拦截。</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+from datetime import datetime
+from typing import Callable, Optional
+import pandas as pd
+
+@dataclass
+class Trade:
+    open_time: datetime
+    open_price: float
+    close_time: datetime
+    close_price: float
+    direction: int      # 1 多, -1 空
+    size: float
+
+    @property
+    def pnl(self) -&gt; float:
+        return (self.close_price - self.open_price) * self.direction * self.size
+</code></pre>
+
+<p>规则接口设计成一个函数，输入是当前交易和重放状态（已实现的盈亏、当日累计亏损等），输出是放行或拦截：</p>
+<pre class="codehilite"><code class="language-python">@dataclass
+class ReplayState:
+    realized_pnl: float = 0.0
+    daily_pnl: float = 0.0
+    current_day: Optional[datetime] = None
+    blocked_count: int = 0
+
+Rule = Callable[[Trade, ReplayState], bool]  # True = 放行
+</code></pre>
+
+<p>重放主循环：</p>
+<pre class="codehilite"><code class="language-python">def replay(trades: list[Trade], rules: list[Rule]) -&gt; tuple[list[Trade], ReplayState]:
+    state = ReplayState()
+    kept = []
+    for t in sorted(trades, key=lambda x: x.open_time):
+        # 跨日重置
+        day = t.open_time.date()
+        if state.current_day != day:
+            state.current_day = day
+            state.daily_pnl = 0.0
+
+        if all(rule(t, state) for rule in rules):
+            kept.append(t)
+            state.realized_pnl += t.pnl
+            state.daily_pnl += t.pnl
+        else:
+            state.blocked_count += 1
+    return kept, state
+</code></pre>
+
+<p>到这里还只是"过滤"，真正的难点在下一步。</p>
+<h2 id="_3">连锁效应：拦截不是孤立的</h2>
+<p>被拦截的一笔开仓，会改变后续的状态。最典型的是<strong>日内亏损熔断</strong>：原本第3笔交易亏损触发了熔断，第4、5笔被拦截；但如果第1笔就被拦截了，第3笔可能根本不会触发熔断，第4、5笔就该放行。</p>
+<p>这就是连锁效应（cascading effect）。上面的朴素实现有个致命问题：它用<strong>原始交易的盈亏</strong>去更新 <code>daily_pnl</code>，但原始交易的盈亏是基于"所有交易都发生"的路径。一旦有交易被拦截，后续的 <code>daily_pnl</code> 轨迹就错了。</p>
+<p>正确的做法是：<strong>状态只由放行的交易驱动，规则判断基于重放后的状态，而不是原始状态。</strong> 上面代码其实已经做到了这一点——<code>state.daily_pnl</code> 只在放行时累加。但还有一个隐含假设需要显式处理：<strong>被拦截交易的平仓价，是否还应该用来更新状态？</strong></p>
+<p>答案是不应该。被拦截的交易从未发生，它的盈亏不该进入任何状态。但这里有个微妙之处：如果一笔交易在开仓时被拦截，它的平仓时间点之后的市场状态（比如波动率、价格水平）在现实中确实变了，但重放引擎不模拟市场，只模拟交易流。所以平仓事件也必须一并剔除。</p>
+<pre class="codehilite"><code class="language-python">def replay_with_cascade(trades, rules):
+    state = ReplayState()
+    kept = []
+    blocked_ids = set()
+
+    for t in sorted(trades, key=lambda x: x.open_time):
+        day = t.open_time.date()
+        if state.current_day != day:
+            state.current_day = day
+            state.daily_pnl = 0.0
+
+        # 如果这笔交易依赖的前序交易被拦截，视情况处理
+        # 这里假设交易相互独立，只处理状态依赖
+        if all(rule(t, state) for rule in rules):
+            kept.append(t)
+            state.realized_pnl += t.pnl
+            state.daily_pnl += t.pnl
+        else:
+            blocked_ids.add(id(t))
+            state.blocked_count += 1
+
+    return kept, state, blocked_ids
+</code></pre>
+
+<p>如果策略有<strong>仓位依赖</strong>（比如同时最多持仓N笔，或后一笔仓位是前一笔的加仓），连锁效应会更复杂：拦截一笔会释放仓位额度，让后续原本被仓位限制挡住的交易得以发生。这种场景需要把规则引擎和仓位管理耦合起来，重放时维护一个"虚拟持仓簿"，而不是简单地过滤列表。</p>
+<p>一个实用的折中：<strong>把重放分成两层。</strong> 第一层只处理"状态型规则"（日内亏损、连续亏损次数、单日交易笔数上限），这类规则的连锁效应可以通过顺序重放自然处理。第二层处理"路径型规则"（仓位上限、资金占用），这类需要模拟持仓簿，实现成本高，先标注为不支持，在报告里明确说明。</p>
+<h2 id="1k">口径选择：1小时K线现价近似</h2>
+<p>重放需要价格。真实交易记录里有开仓价和平仓价，但规则判断往往需要<strong>开仓时刻的现价</strong>——比如"当前浮亏超过X就禁止加仓"，或者"日内已实现亏损按当前价折算"。</p>
+<p>最精确的口径是用tick或逐笔数据重算，但成本高。务实的选择是<strong>1小时K线收盘价近似现价</strong>：</p>
+<pre class="codehilite"><code class="language-python">def load_hourly_close(symbol: str, start, end) -&gt; pd.Series:
+    # 假设已有本地K线库
+    df = pd.read_parquet(f&quot;data/{symbol}_1h.parquet&quot;)
+    df = df[(df.index &gt;= start) &amp; (df.index &lt;= end)]
+    return df[&quot;close&quot;]
+
+def price_at(series: pd.Series, ts: datetime) -&gt; float:
+    # 取 ts 之前最近的1小时收盘价
+    idx = series.index.searchsorted(ts, side=&quot;right&quot;) - 1
+    return float(series.iloc[max(idx, 0)])
+</code></pre>
+
+<p>这个近似的误差来源有两个：一是<strong>小时内价格波动</strong>，开仓发生在10:15，用10:00的收盘价，可能偏差几个tick；二是<strong>跳空</strong>，如果开仓在整点后第一分钟，前一根K线的收盘价可能已经过时。</p>
+<p>对日内风控规则来说，这个误差通常可接受——熔断阈值是2%，K线近似误差在0.1%量级，不会改变大多数判断。但如果规则阈值本身很窄（比如0.3%的移动止损），就必须用更细的数据。</p>
+<p>一个改进：<strong>用开仓价本身作为现价的代理</strong>。因为开仓价是真实成交价，比K线收盘价更接近"那一刻的市场"。缺点是无法得到开仓前的浮盈状态。折中方案是：开仓前的状态用K线近似，开仓后的状态用成交价，两者拼接。</p>
+<h2 id="_4">局限说明</h2>
+<p>反事实重放不是万能药，有三个必须写进报告的限制：</p>
+<p><strong>第一，不模拟资金占用变化。</strong> 被拦截的交易不占用资金，理论上这些资金可以用于其他交易，或者影响后续交易的仓位大小。重放引擎假设资金无限、仓位独立，所以它回答的是"如果这些交易没发生"，而不是"如果这些资金重新配置"。后者需要完整的组合级模拟。</p>
+<p><strong>第二，K线近似现价的误差。</strong> 上面已经讨论过，误差量级取决于规则阈值和数据粒度。报告里应该给出一个敏感性分析：把阈值上下浮动20%，看结论是否稳健。</p>
+<p><strong>第三，幸存者偏差的反向版本。</strong> 原始交易记录本身是旧规则的产物。如果旧规则曾经拦截过某些交易，这些交易根本不在记录里，重放也无法"恢复"它们。所以重放只能回答"在已发生的交易集合上，新规则会改变什么"，不能回答"新规则会创造哪些新交易"。</p>
+<h2 id="_5">一个完整的调用示例</h2>
+<pre class="codehilite"><code class="language-python">def daily_loss_limit(limit_pct: float, capital: float) -&gt; Rule:
+    def rule(t: Trade, s: ReplayState) -&gt; bool:
+        return s.daily_pnl &gt; -limit_pct * capital
+    return rule
+
+def max_trades_per_day(n: int) -&gt; Rule:
+    def rule(t: Trade, s: ReplayState) -&gt; bool:
+        # 需要额外维护当日计数，这里简化
+        return True
+    return rule
+
+trades = load_trades(&quot;trades.parquet&quot;)  # 你的真实交易记录
+rules = [daily_loss_limit(0.02, capital=1_000_000)]
+
+kept, state, blocked = replay_with_cascade(trades, rules)
+print(f&quot;原始 {len(trades)} 笔, 保留 {len(kept)} 笔, 拦截 {state.blocked_count} 笔&quot;)
+print(f&quot;原始盈亏 {sum(t.pnl for t in trades):.2f}, 重放盈亏 {state.realized_pnl:.2f}&quot;)
+</code></pre>
+
+<p>输出会直接告诉你：加上这条熔断后，历史盈亏从多少变成多少，拦截了多少笔交易。再叠加一个按日聚合的对比图，就能看到熔断在哪些交易日真正起了作用。</p>
+<p>反事实重放的价值不在于精确预测，而在于<strong>用真实数据量化规则的边际影响</strong>。它比重新回测更诚实，因为它承认"历史不可重来"，只做局部替换。对于风控规则的评估，这已经够用了。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">反事实</span><span class="tag-badge">重放回测</span><span class="tag-badge">What-if分析</span><span class="tag-badge">回测方法论</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
