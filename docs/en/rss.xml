@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>A/B Testing Trading Rules: The 52 Rejected Trades That Changed My Mind</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/30.html</link>
+            <description>The Question a Filter Should Answer A pullback filter sits in front of an entry signal and decides which setups are allowed through....</description>
+            <pubDate>2026-10-28</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Backtesting the Pullback Filter: When a Safety Check Kills Profit</title>
             <link>https://www.hkcode.dpdns.org/en/posts/29.html</link>
             <description>The Setup: One Strategy, Two Filters The base strategy is a long-only momentum entry on 15-minute candles....</description>
@@ -138,13 +145,6 @@
             <description>Heartbeats flowed, the platform showed the device online, but pressing play produced nothing....</description>
             <pubDate>2026-10-08</pubDate>
             <category>Network &amp; Security</category>
-        </item>
-        <item>
-            <title>Why I Replaced Daemon Processes with Windows Task Scheduler</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/1.html</link>
-            <description>Corporate Windows machines are hostile territory for long-running processes....</description>
-            <pubDate>2026-10-06</pubDate>
-            <category>Windows Automation</category>
         </item>
     </channel>
 </rss>
