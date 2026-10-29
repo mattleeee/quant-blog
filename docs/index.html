@@ -31,6 +31,22 @@
             <h2>最新文章</h2>
             
         <article class="post-card">
+            <h2><a href="/posts/59.html">一次API拉全市场行情：批量持仓估值的工程优化</a></h2>
+            <div class="post-meta">
+                <span class="date">2026-10-29</span>
+                <span class="tag-badge">API实战</span>
+            </div>
+            <p class="excerpt">一次API拉全市场行情：批量持仓估值的工程优化
+
+给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
+
+
+
+逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个请求都是一次独立的限频计数。...</p>
+            <div class="post-tags"><span class="tag-badge">批量估值</span><span class="tag-badge">行情API</span><span class="tag-badge">性能优化</span></div>
+            <a href="/posts/59.html" class="read-more">阅读更多</a>
+        </article>
+        <article class="post-card">
             <h2><a href="/posts/58.html">反事实重放回测：如果当时有熔断会怎样</a></h2>
             <div class="post-meta">
                 <span class="date">2026-10-28</span>
