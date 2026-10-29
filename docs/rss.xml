@@ -7,6 +7,19 @@
         <language>zh-CN</language>
         
         <item>
+            <title>一次API拉全市场行情：批量持仓估值的工程优化</title>
+            <link>https://www.hkcode.dpdns.org/posts/59.html</link>
+            <description>一次API拉全市场行情：批量持仓估值的工程优化
+
+给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
+
+
+
+逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个请求都是一次独立的限频计数。...</description>
+            <pubDate>2026-10-29</pubDate>
+            <category>API实战</category>
+        </item>
+        <item>
             <title>反事实重放回测：如果当时有熔断会怎样</title>
             <link>https://www.hkcode.dpdns.org/posts/58.html</link>
             <description>反事实重放回测：如果当时有熔断会怎样
@@ -201,15 +214,6 @@
 
 项目迭代到第三个月，你还能准确说出 v1.2.0 和 v1.2.1 之间到底改了什么吗？靠翻 Git log？几百条 commit 里混着 fix bug、update、临时提交，找起来比考古还累。...</description>
             <pubDate>2026-10-09</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>增量代码备份方案设计：版本管理最佳实践</title>
-            <link>https://www.hkcode.dpdns.org/posts/39.html</link>
-            <description>增量代码备份方案设计：版本管理最佳实践
-
-在量化交易项目中,策略代码的迭代频率远高于普通业务系统。一个因子权重的微调、一段风控逻辑的修改,都可能直接影响实盘表现。如果没有可靠的备份机制,一次误操作就可能让数周的优化工作付诸东流。...</description>
-            <pubDate>2026-10-08</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
