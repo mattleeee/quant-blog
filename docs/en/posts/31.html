@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Resonance Scanner: Seven Filters and the One That Mattered - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Resonance Scanner: Seven Filters and the One That Mattered A scanner is a conjunction....">
+    <meta name="keywords" content="scanner,signal filters,multi-condition entry,design tradeoff">
+    <meta property="og:title" content="The Resonance Scanner: Seven Filters and the One That Mattered">
+    <meta property="og:description" content="The Resonance Scanner: Seven Filters and the One That Mattered A scanner is a conjunction....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/31.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>The Resonance Scanner: Seven Filters and the One That Mattered</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-29</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A scanner is a conjunction. Every filter must pass, so the output rate is the product of the individual pass rates. This is obvious arithmetic and almost nobody instruments for it. Instead, we tune filters one at a time, looking at each in isolation, and feel good about every one of them. "The trend filter is correct. The volume filter is correct. The momentum filter is correct." Seven correct filters, zero positions.</p>
+<p>That was the situation with our resonance scanner: a seven-layer entry gate that produced watchlist entries for weeks and never opened a position. The forensics were not subtle once we looked. The binding constraint was pullback confirmation, the last layer, and the reason it bound was structural, not statistical: the moves we were trying to catch do not, by their nature, offer a clean three-candle pullback.</p>
+<h3 id="anatomy-of-the-gate">Anatomy of the Gate</h3>
+<p>The pipeline looked like this, in order:</p>
+<ol>
+<li><strong>Trend</strong> — higher-timeframe EMA alignment.</li>
+<li><strong>Volume</strong> — relative volume above a rolling baseline.</li>
+<li><strong>Momentum</strong> — rate-of-change percentile.</li>
+<li><strong>Volatility</strong> — ATR band, to skip dead and berserk regimes.</li>
+<li><strong>Session</strong> — allowed trading hours.</li>
+<li><strong>Blacklist</strong> — symbol exclusion list.</li>
+<li><strong>Pullback confirmation</strong> — a defined retracement over N candles, then a resumption candle.</li>
+</ol>
+<p>Each filter is a pure function of a dataframe slice, which makes the whole thing easy to test and easy to instrument. The entry point was a single <code>evaluate()</code> that short-circuited on the first failure. That short-circuit was efficient and it was also why we were blind: a candidate rejected at layer 2 never touched layers 3 through 7, so we had no idea how many candidates each layer would have killed independently.</p>
+<h2 id="instrumenting-the-filters">Instrumenting the Filters</h2>
+<p>The fix for blindness is cheap. Keep the short-circuit for live use, but add a shadow pass that evaluates every filter regardless of earlier failures and records the result. Two things matter in the record: the per-filter pass boolean, and the <strong>order of the first failure</strong>. The second is what tells you which filter is binding.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+
+@dataclass
+class FilterTrace:
+    symbol: str
+    ts: int
+    results: dict = field(default_factory=dict)  # name -&gt; bool
+
+    @property
+    def first_failure(self):
+        for name, passed in self.results.items():  # insertion order = pipeline order
+            if not passed:
+                return name
+        return None
+
+
+def shadow_evaluate(symbol, ts, ctx, filters):
+    &quot;&quot;&quot;Evaluate all filters without short-circuiting. Order preserved.&quot;&quot;&quot;
+    trace = FilterTrace(symbol=symbol, ts=ts)
+    for name, fn in filters:  # list of (name, callable), in pipeline order
+        try:
+            trace.results[name] = bool(fn(ctx))
+        except Exception:
+            trace.results[name] = False  # fail closed, but record it
+    return trace
+</code></pre>
+
+<p>Note the <code>except</code> clause. A filter that throws is a filter that rejected, and silently swallowing the exception is how you end up with a layer that never passes and nobody notices. Fail closed, but count it separately so exceptions do not masquerade as legitimate rejections.</p>
+<p>Live evaluation stays fast:</p>
+<pre class="codehilite"><code class="language-python">def live_evaluate(ctx, filters):
+    for name, fn in filters:
+        if not fn(ctx):
+            return False, name
+    return True, None
+</code></pre>
+
+<p>Both paths share the same filter list, so they cannot drift apart.</p>
+<h3 id="aggregating-the-traces">Aggregating the Traces</h3>
+<p>With a few weeks of traces stored, the analysis is a groupby. For every filter we want the independent pass rate (how often it would pass if it were the only gate), and the conditional pass rate given that all earlier filters passed. The gap between those two numbers is where the interesting failures live.</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+def filter_report(traces: list[FilterTrace]) -&gt; pd.DataFrame:
+    rows = []
+    for t in traces:
+        rows.append({&quot;symbol&quot;: t.symbol, &quot;ts&quot;: t.ts,
+                     &quot;first_failure&quot;: t.first_failure, **t.results})
+    df = pd.DataFrame(rows)
+
+    order = list(traces[0].results.keys())
+    out = []
+    for i, name in enumerate(order):
+        independent = df[name].mean()
+        if i == 0:
+            conditional = independent
+            reached = 1.0
+        else:
+            prior = order[:i]
+            reached_mask = df[prior].all(axis=1)
+            reached = reached_mask.mean()
+            conditional = df.loc[reached_mask, name].mean() if reached_mask.any() else float(&quot;nan&quot;)
+        out.append({
+            &quot;filter&quot;: name,
+            &quot;independent_pass&quot;: round(independent, 4),
+            &quot;reached_rate&quot;: round(reached, 4),
+            &quot;conditional_pass&quot;: round(conditional, 4),
+        })
+    return pd.DataFrame(out)
+</code></pre>
+
+<p><code>reached_rate</code> is the fraction of candidates that survived everything before this layer. <code>conditional_pass</code> is the pass rate among those that got there. A filter with a high independent pass rate and a low conditional pass rate is doing real work at the margin. A filter with a low independent pass rate is a candidate for removal regardless of where it sits.</p>
+<p>Then the binding constraint is simply the mode of <code>first_failure</code>:</p>
+<pre class="codehilite"><code class="language-python">binding = df[&quot;first_failure&quot;].value_counts(dropna=False)
+print(binding.head())
+</code></pre>
+
+<p>Our output looked roughly like this (numbers rounded, structure exact):</p>
+<table>
+<thead>
+<tr>
+<th>filter</th>
+<th>independent_pass</th>
+<th>reached_rate</th>
+<th>conditional_pass</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>trend</td>
+<td>0.31</td>
+<td>1.00</td>
+<td>0.31</td>
+</tr>
+<tr>
+<td>volume</td>
+<td>0.44</td>
+<td>0.31</td>
+<td>0.52</td>
+</tr>
+<tr>
+<td>momentum</td>
+<td>0.38</td>
+<td>0.16</td>
+<td>0.61</td>
+</tr>
+<tr>
+<td>volatility</td>
+<td>0.72</td>
+<td>0.10</td>
+<td>0.79</td>
+</tr>
+<tr>
+<td>session</td>
+<td>0.83</td>
+<td>0.08</td>
+<td>0.88</td>
+</tr>
+<tr>
+<td>blacklist</td>
+<td>0.97</td>
+<td>0.07</td>
+<td>0.98</td>
+</tr>
+<tr>
+<td>pullback</td>
+<td>0.11</td>
+<td>0.07</td>
+<td><strong>0.11</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Read the last row carefully. Seven percent of candidates reached the pullback layer, and only eleven percent of those passed it. The first six filters were, individually and collectively, behaving as designed: they cut a large universe down to a small, sensible set of live movers. The seventh filter then threw away 89% of that set. The mode of <code>first_failure</code> confirmed it: pullback was the last rejection for the overwhelming majority of candidates that got that far.</p>
+<h2 id="the-structural-problem">The Structural Problem</h2>
+<p>The naive conclusion is "loosen the pullback filter." That would have been wrong, and it took a while to articulate why.</p>
+<p>The scanner's thesis was resonance: trend, volume, and momentum aligned on a symbol that was being actively accumulated. In practice, the moves that satisfied the first six filters were fast, high-volume expansions, often on altcoins during a coordinated push. These moves have a characteristic shape: a steep impulse, a shallow consolidation or a single red candle, then continuation or exhaustion. What they almost never have is a textbook three-candle retracement followed by a clean resumption candle. The pullback filter was written for a different market behavior: orderly trends that breathe. By the time a clean three-candle pullback prints on a fast expansion, the expansion is over. The filter was not rejecting noise. It was rejecting the exact events the scanner existed to find.</p>
+<p>This is the general failure mode of stacked filters: each one is validated against the full population, but the conjunction selects a subpopulation with different conditional statistics. A pullback filter that works beautifully on a broad universe of trending names can have near-zero pass rate on the narrow slice that survives six upstream gates, because the upstream gates have already selected for the behavior the pullback filter excludes. Filters are not independent, and a pipeline is not a bag of good ideas.</p>
+<h2 id="the-design-tradeoff">The Design Tradeoff</h2>
+<p>The real decision was not "keep or drop pullback." It was where to sit on the spectrum between <strong>few but clean</strong> and <strong>so strict it never trades</strong>.</p>
+<p>The discipline argument for strictness is sound. Every filter you add is a degree of freedom, and every degree of freedom is an opportunity to fit the last regime. A seven-condition entry is nearly impossible to overfit by accident, because the search space of ways to be wrong is enormous and the sample of trades is tiny. If a strict system trades rarely, at least the trades it takes are well-supported.</p>
+<p>The counterargument is that a scanner which never trades is not conservative, it is broken. It provides no information, accumulates no live sample, and its filters are never validated against real outcomes. You cannot distinguish a disciplined system from a mis-specified one if the mis-specification happens to be the last gate in the chain. Strictness that produces zero fills is not a virtue; it is a measurement failure wearing a virtue's clothes.</p>
+<p>The resolution we landed on was to treat the pullback layer as a <strong>regime-conditional</strong> filter rather than a universal one, and to replace the hard three-candle rule with a graded score so the layer can be strict in one regime and permissive in another without being deleted outright.</p>
+<pre class="codehilite"><code class="language-python">def pullback_score(df, lookback=3, min_retrace=0.25, max_retrace=0.75):
+    &quot;&quot;&quot;
+    Score 0..1 instead of boolean. Measures whether the recent action
+    shows a controlled retracement rather than a vertical run.
+    &quot;&quot;&quot;
+    impulse = df[&quot;close&quot;].iloc[-lookback-1] - df[&quot;close&quot;].iloc[-lookback*2-1]
+    if impulse &lt;= 0:
+        return 0.0
+    retrace = (df[&quot;close&quot;].iloc[-lookback-1] - df[&quot;close&quot;].iloc[-1]) / impulse
+    if retrace &lt; min_retrace:
+        return 0.0            # no pullback at all: vertical run
+    if retrace &gt; max_retrace:
+        return 0.0            # too deep: structure broken
+    # peak score at mid-retrace, taper toward both edges
+    mid = (min_retrace + max_retrace) / 2
+    width = (max_retrace - min_retrace) / 2
+    return max(0.0, 1.0 - abs(retrace - mid) / width)
+
+
+def pullback_gate(ctx, threshold=0.5):
+    score = pullback_score(ctx.df)
+    # Fast-expansion regime: accept a shallower structure.
+    if ctx.regime == &quot;expansion&quot;:
+        return score &gt;= threshold * 0.6
+    return score &gt;= threshold
+</code></pre>
+
+<p>Two changes matter here. First, the layer now returns a continuous score, so you can see <em>how close</em> near-misses were instead of only pass/fail. Second, the threshold is regime-dependent, which encodes the actual finding: fast expansions legitimately do not pull back like orderly trends do, and pretending otherwise is a modeling error, not a discipline.</p>
+<p>Crucially, we did not just lower the threshold globally until trades appeared. That is the opposite failure: tuning a filter until it stops binding, then calling the result validated. The regime split came from the trace data (pullback pass rates differed sharply by regime upstream), and the new threshold was chosen on out-of-sample traces, not on the same window that produced the diagnosis.</p>
+<h3 id="what-to-keep">What to Keep</h3>
+<p>The instrumented pipeline is worth keeping permanently, not just for this investigation. The <code>FilterTrace</code> records cost almost nothing, and the <code>filter_report</code> table is the single most useful diagnostic a multi-condition scanner can have. Run it monthly. If the binding constraint moves, you have learned something about the market. If it never moves, you have learned something about your filters: one of them is doing all the work, and the other six are decoration.</p>
+<p>The lesson generalizes past this scanner. A conjunction of filters is only as good as its weakest link, and you cannot find the weakest link by inspecting filters individually. You find it by counting first failures, computing conditional pass rates, and asking whether the surviving subpopulation is the one you actually meant to trade. The filter that rejects last is the filter that defines your system, whether or not you intended it to.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-29 08:46:59</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BTC</td>
+<td>趋势低吸做多</td>
+<td>$81120.0</td>
+<td>$87204.0</td>
+<td>$80574.0602</td>
+<td>1:11.1</td>
+</tr>
+<tr>
+<td>SNXX</td>
+<td>高质量标的做多</td>
+<td>$10.016</td>
+<td>$10.3866</td>
+<td>$9.8157</td>
+<td>1:1.9</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">scanner</span><span class="tag-badge">signal filters</span><span class="tag-badge">multi-condition entry</span><span class="tag-badge">design tradeoff</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
