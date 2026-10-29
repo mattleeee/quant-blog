@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一次API拉全市场行情：批量持仓估值的工程优化 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="一次API拉全市场行情：批量持仓估值的工程优化
+
+给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
+
+
+
+逻辑没问题，但工程上很糟。...">
+    <meta name="keywords" content="批量估值,行情API,性能优化,限频">
+    <meta property="og:title" content="一次API拉全市场行情：批量持仓估值的工程优化">
+    <meta property="og:description" content="一次API拉全市场行情：批量持仓估值的工程优化
+
+给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
+
+
+
+逻辑没问题，但工程上很糟。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/59.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>一次API拉全市场行情：批量持仓估值的工程优化</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-29</span>
+                <span class="category"><span class="tag-badge">API实战</span></span>
+            </div>
+            <div class="post-content">
+<p>给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：</p>
+<pre class="codehilite"><code class="language-python">for pos in positions:
+    price = get_price(pos.symbol)   # 一次HTTP请求
+    pnl = (price - pos.entry) * pos.size * pos.direction
+</code></pre>
+
+<p>逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个请求都是一次独立的限频计数。仓位再多一点，或者估值频率提高到每秒一次，很快就会被交易所按在限频墙上。</p>
+<p>这篇文章记录一个把「N 次请求」压成「1 次请求」的改造过程：用全市场 tickers 接口一次拉回所有合约现价，本地建字典查价，批量算浮亏。顺带处理单币缺失、超时、重试这些绕不开的工程细节。</p>
+<h2 id="_1">问题拆解：慢在哪，限频限在哪</h2>
+<p>先把成本算清楚。假设 50 个持仓，单次行情请求平均耗时 80ms（含网络 RTT 和交易所处理），串行就是 4 秒。如果估值循环跑在策略主循环里，4 秒的阻塞足以让信号延迟到没法用。</p>
+<p>限频方面，主流交易所的现货/合约行情端点通常按 IP 或 API Key 计权重，单 symbol 查询的权重虽低，但 50 次/轮的频率叠加多策略并发，很容易撞到每分钟请求数上限。一旦触发限频，返回 429 或直接封禁一段时间，整个估值链路一起挂掉。</p>
+<p>关键观察是：<strong>我们需要的不是「每个 symbol 的最新价」，而是「全市场最新价里我们关心的那几十个」</strong>。这两个需求在数据量上差了几个数量级，但交易所恰好提供了后者——一次返回全市场所有合约 ticker 的端点。</p>
+<p>以 Gate.io 的合约行情为例，<code>/api/v4/futures/usdt/tickers</code> 一次返回全部 USDT 永续合约的最新成交价、标记价、买一卖一等字段。一次请求，几百个合约的价格全在手里。</p>
+<h2 id="_2">方案：全市场快照 + 本地字典</h2>
+<p>整体思路三步：</p>
+<ol>
+<li>一次请求拉全市场 tickers；</li>
+<li>构建 <code>pair -&gt; price</code> 的字典；</li>
+<li>遍历持仓，从字典 O(1) 查价，批量算浮亏。</li>
+</ol>
+<p>先看拉取和建字典的部分：</p>
+<pre class="codehilite"><code class="language-python">import time
+import requests
+from typing import Dict, List, Optional
+
+GATE_FUTURES_TICKERS = &quot;https://api.gateio.ws/api/v4/futures/usdt/tickers&quot;
+
+def fetch_all_prices(timeout: float = 5.0, retries: int = 3) -&gt; Dict[str, float]:
+    &quot;&quot;&quot;一次拉取全市场合约最新价，返回 {contract: price} 字典。&quot;&quot;&quot;
+    last_err: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(GATE_FUTURES_TICKERS, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            prices: Dict[str, float] = {}
+            for item in data:
+                contract = item.get(&quot;contract&quot;)
+                last = item.get(&quot;last&quot;)
+                if not contract or last is None:
+                    continue
+                try:
+                    prices[contract] = float(last)
+                except (TypeError, ValueError):
+                    continue
+            if not prices:
+                raise ValueError(&quot;empty tickers payload&quot;)
+            return prices
+        except Exception as e:
+            last_err = e
+            time.sleep(0.5 * (2 ** attempt))  # 指数退避
+    raise RuntimeError(f&quot;fetch_all_prices failed after {retries} retries&quot;) from last_err
+</code></pre>
+
+<p>注意几个细节：</p>
+<ul>
+<li><code>raise_for_status()</code> 把 4xx/5xx 转成异常，交给重试逻辑统一处理；</li>
+<li>单条记录解析失败（<code>last</code> 为 None 或不是数字）直接 <code>continue</code>，不让一条脏数据毁掉整批；</li>
+<li>指数退避 <code>0.5 * 2**attempt</code>，避免限频时连续重试加重惩罚；</li>
+<li>返回空字典视为失败，触发重试——全市场接口返回空基本只能是异常。</li>
+</ul>
+<p>拿到价格字典后，批量估值就是纯本地计算：</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+
+@dataclass
+class Position:
+    contract: str      # 例如 &quot;BTC_USDT&quot;
+    entry: float
+    size: float        # 正数为多，负数为空
+    # 合约面值等乘数按实际品种自行处理，这里简化
+
+def batch_valuation(positions: List[Position],
+                    prices: Dict[str, float]) -&gt; List[dict]:
+    results = []
+    for pos in positions:
+        price = prices.get(pos.contract)
+        if price is None:
+            # 单币缺失：跳过并标记，不中断整批
+            results.append({
+                &quot;contract&quot;: pos.contract,
+                &quot;price&quot;: None,
+                &quot;pnl&quot;: None,
+                &quot;status&quot;: &quot;missing_price&quot;,
+            })
+            continue
+        pnl = (price - pos.entry) * pos.size
+        results.append({
+            &quot;contract&quot;: pos.contract,
+            &quot;price&quot;: price,
+            &quot;pnl&quot;: pnl,
+            &quot;status&quot;: &quot;ok&quot;,
+        })
+    return results
+</code></pre>
+
+<p>这里的关键设计是<strong>单币缺失只影响自己</strong>。全市场快照里理论上应该包含所有在交易的合约，但新上市、临时停牌、字段异常都可能让某个 contract 查不到价。如果直接 <code>prices[pos.contract]</code> 抛 KeyError，整批估值全废；用 <code>.get()</code> 加状态标记，缺失的持仓单独标出来，其余照常算完。上层可以对这些 <code>missing_price</code> 的仓位做告警或沿用上一轮价格。</p>
+<h2 id="n-vs-1">性能对比：N 次 vs 1 次</h2>
+<p>写个简单基准，对比两种方式在 50 个持仓下的耗时：</p>
+<pre class="codehilite"><code class="language-python">import statistics
+
+def bench_single_requests(contracts: List[str], rounds: int = 5) -&gt; float:
+    &quot;&quot;&quot;逐 symbol 请求，返回平均耗时（秒）。&quot;&quot;&quot;
+    times = []
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        for c in contracts:
+            requests.get(
+                f&quot;https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={c}&quot;,
+                timeout=5,
+            )
+        times.append(time.perf_counter() - t0)
+    return statistics.mean(times)
+
+def bench_batch(rounds: int = 5) -&gt; float:
+    times = []
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        fetch_all_prices()
+        times.append(time.perf_counter() - t0)
+    return statistics.mean(times)
+</code></pre>
+
+<p>在本地网络环境下实测（不同网络差异较大，仅看数量级）：</p>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>请求数</th>
+<th>平均耗时</th>
+<th>限频权重消耗</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>逐 symbol 请求（50 持仓）</td>
+<td>50</td>
+<td>~3.5–5 s</td>
+<td>50 次/轮</td>
+</tr>
+<tr>
+<td>全市场快照</td>
+<td>1</td>
+<td>~0.1–0.2 s</td>
+<td>1 次/轮</td>
+</tr>
+</tbody>
+</table>
+<p>耗时差一个数量级以上，限频权重消耗差 50 倍。更重要的是，<strong>全市场快照的耗时基本与持仓数量无关</strong>——50 个持仓和 500 个持仓，拉取成本一样，只有本地字典遍历的差异，而那是微秒级的。这让估值频率可以放心提高，比如从每分钟一次提到每 5 秒一次，限频压力反而比原来更低。</p>
+<p>内存上，几百个合约的字典也就几十 KB，完全不是瓶颈。</p>
+<h2 id="_3">异常处理：让估值链路不因单点失败而崩</h2>
+<p>批量估值最容易出问题的地方不是计算，是数据链路。分三层处理：</p>
+<h3 id="_4">单币缺失：跳过而非中断</h3>
+<p>前面 <code>batch_valuation</code> 已经用 <code>.get()</code> + 状态标记解决了。补充一个实践：对 <code>missing_price</code> 的持仓，可以维护一份「上一轮有效价格」缓存，缺失时用缓存兜底，同时打日志告警。这样估值结果不会因为一次快照缺字段就出现空洞。</p>
+<pre class="codehilite"><code class="language-python">class PriceCache:
+    def __init__(self):
+        self._last: Dict[str, float] = {}
+
+    def update(self, prices: Dict[str, float]):
+        self._last.update(prices)
+
+    def get(self, contract: str) -&gt; Optional[float]:
+        return self._last.get(contract)
+</code></pre>
+
+<h3 id="_5">超时与重试：分开处理可重试与不可重试</h3>
+<p><code>requests</code> 的 <code>timeout</code> 参数建议传元组 <code>(connect_timeout, read_timeout)</code>，把连接超时和读取超时区分开。连接超时通常设短（1–2s），读取超时按接口实际响应时间留余量（3–5s）。</p>
+<p>重试要区分错误类型：网络超时、连接错误、5xx 值得重试；4xx（尤其 401/403 鉴权失败、400 参数错误）重试没有意义，直接抛。上面的 <code>fetch_all_prices</code> 用 <code>raise_for_status()</code> 统一转异常后无差别重试，更严谨的版本应该判断状态码：</p>
+<pre class="codehilite"><code class="language-python">def _should_retry(resp_or_exc) -&gt; bool:
+    if isinstance(resp_or_exc, requests.HTTPError):
+        code = resp_or_exc.response.status_code
+        return code == 429 or 500 &lt;= code &lt; 600
+    return isinstance(resp_or_exc, (requests.Timeout, requests.ConnectionError))
+</code></pre>
+
+<p>429 单独处理：读 <code>Retry-After</code> 响应头，按它给的秒数等待，比盲目指数退避更符合交易所预期。</p>
+<h3 id="_6">快照新鲜度：别让旧数据冒充实时</h3>
+<p>全市场快照有个隐含风险：接口返回成功，但某些合约的 <code>last</code> 字段可能是很久以前的成交价（流动性差的品种）。如果直接用，算出来的浮亏是失真的。可以在解析时检查 ticker 里的时间戳字段（Gate.io 的 tickers 返回 <code>create_time</code> 等），超过阈值（比如 60 秒）的标记为 stale，走和缺失一样的兜底逻辑。</p>
+<pre class="codehilite"><code class="language-python">def is_stale(item: dict, max_age: float = 60.0) -&gt; bool:
+    ts = item.get(&quot;create_time&quot;)
+    if ts is None:
+        return False
+    try:
+        return time.time() - float(ts) &gt; max_age
+    except (TypeError, ValueError):
+        return True
+</code></pre>
+
+<h2 id="_7">落地建议</h2>
+<p>几个从这次改造里总结的点：</p>
+<p><strong>估值循环和行情拉取解耦。</strong> 用一个后台线程或定时任务按固定频率刷新价格字典，估值函数只读字典、不做网络 IO。这样估值调用是纯内存操作，主策略循环不会被网络抖动阻塞。字典更新用整体替换而非逐 key 更新，避免读到半更新状态（Python 的 dict 赋值是原子的，但整体替换语义更清晰）。</p>
+<p><strong>频率对齐限频预算。</strong> 全市场快照虽然便宜，也不是免费的。先查清楚该端点的权重和每分钟上限，再决定刷新频率。单策略 5 秒一次、多策略共享一个刷新线程，是常见做法。</p>
+<p><strong>监控缺失率和延迟。</strong> 每次估值记录 <code>missing_price</code> 数量和快照年龄，这两个指标异常往往先于估值错误暴露问题。缺失率突然上升，可能是合约改名或接口字段变更；快照年龄变大，可能是拉取线程卡死。</p>
+<p><strong>别在估值路径里做重试。</strong> 重试放在拉取层，估值层拿到什么用什么，缺失就走兜底。估值函数应该是确定性的、无副作用的，方便测试和复用。</p>
+<p>这套改造的核心其实就一句话：<strong>把「按需逐个取」换成「批量快照 + 本地索引」</strong>。同样的思路可以用在任何「需要全市场某个字段」的场景——批量查余额、批量查订单状态、批量算保证金占用，都是先拉全量再本地匹配，比逐个请求快一个数量级，限频压力也小得多。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">批量估值</span><span class="tag-badge">行情API</span><span class="tag-badge">性能优化</span><span class="tag-badge">限频</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
