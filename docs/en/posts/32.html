@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circuit Breakers for Strategies: Pausing After Three Consecutive Losses - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why Consecutive Losses Need Their Own Guard Drawdown limits answer &quot;how much have I lost?&quot; Consecutive-loss breakers ans...">
+    <meta name="keywords" content="circuit breaker,consecutive losses,cooldown,risk control">
+    <meta property="og:title" content="Circuit Breakers for Strategies: Pausing After Three Consecutive Losses">
+    <meta property="og:description" content="Why Consecutive Losses Need Their Own Guard Drawdown limits answer &quot;how much have I lost?&quot; Consecutive-loss breakers ans...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/32.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Circuit Breakers for Strategies: Pausing After Three Consecutive Losses</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-30</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Drawdown limits answer "how much have I lost?" Consecutive-loss breakers answer a different question: "is the process still behaving the way I validated it?" A strategy can be down 4% over a month through a slow bleed of small wins and losses — normal. Or it can lose five trades in a row in two days — also possible under a valid edge, but far less likely, and much more informative. The breaker treats the streak as a signal about regime change, broken data feeds, or an implementation bug, not as a verdict on your equity curve.</p>
+<p>The rule is deliberately blunt: <strong>three consecutive losing trades trips the strategy into cooldown.</strong> No auto-restart. A human reviews the trade history, checks whether the edge is still there, and re-arms the breaker explicitly.</p>
+<h2 id="the-state-machine">The State Machine</h2>
+<p>Four states, three transitions, one manual gate:</p>
+<pre class="codehilite"><code>ACTIVE ──(3 losses)──&gt; TRIPPED ──(notify + persist)──&gt; COOLDOWN
+   ^                                                      │
+   └──────────(manual review / resume)────────────────────┘
+</code></pre>
+
+<ul>
+<li><strong>ACTIVE</strong>: strategy trades normally, counter increments on each closed loss and resets on each closed win.</li>
+<li><strong>TRIPPED</strong>: transient state entered the moment the third loss closes. Its only job is to fire the notification and persist the trip record. Execution must already be blocked here.</li>
+<li><strong>COOLDOWN</strong>: strategy is paused. No orders, no sizing, no "just one small trade to test."</li>
+<li><strong>Resume</strong>: only via an explicit call after review. Never on a timer, never on a new day, never on "market looks better now."</li>
+</ul>
+<p>The important design decision is that <code>TRIPPED</code> blocks execution <em>before</em> the notification is sent. If the notification service is down, the strategy still doesn't trade. Failure to notify must never mean failure to stop.</p>
+<h2 id="where-the-counter-lives">Where the Counter Lives</h2>
+<p>An in-memory counter is worthless. Strategies get restarted by deploys, crashes, and Windows Task Scheduler reboots. If the counter resets on restart, a strategy that lost two trades before a restart gets a free pass on the third. Persist the counter and the state together, atomically, on every closed trade.</p>
+<p>SQLite is enough for a single-strategy setup and survives process death:</p>
+<pre class="codehilite"><code class="language-python">import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+
+class State(str, Enum):
+    ACTIVE = &quot;active&quot;
+    TRIPPED = &quot;tripped&quot;
+    COOLDOWN = &quot;cooldown&quot;
+
+@dataclass
+class BreakerRecord:
+    strategy_id: str
+    state: State
+    consecutive_losses: int
+    updated_at: str
+
+class BreakerStore:
+    def __init__(self, path: str = &quot;breaker.db&quot;):
+        self.path = path
+        with self._conn() as c:
+            c.execute(&quot;&quot;&quot;
+                CREATE TABLE IF NOT EXISTS breaker (
+                    strategy_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    consecutive_losses INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+            &quot;&quot;&quot;)
+
+    @contextmanager
+    def _conn(self):
+        conn = sqlite3.connect(self.path, isolation_level=None)
+        try:
+            conn.execute(&quot;PRAGMA journal_mode=WAL&quot;)
+            yield conn
+        finally:
+            conn.close()
+
+    def load(self, strategy_id: str) -&gt; BreakerRecord:
+        with self._conn() as c:
+            row = c.execute(
+                &quot;SELECT state, consecutive_losses, updated_at FROM breaker WHERE strategy_id=?&quot;,
+                (strategy_id,),
+            ).fetchone()
+        if row is None:
+            return BreakerRecord(strategy_id, State.ACTIVE, 0, _now())
+        return BreakerRecord(strategy_id, State(row[0]), row[1], row[2])
+
+    def save(self, rec: BreakerRecord) -&gt; None:
+        with self._conn() as c:
+            c.execute(&quot;&quot;&quot;
+                INSERT INTO breaker (strategy_id, state, consecutive_losses, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(strategy_id) DO UPDATE SET
+                    state=excluded.state,
+                    consecutive_losses=excluded.consecutive_losses,
+                    updated_at=excluded.updated_at
+            &quot;&quot;&quot;, (rec.strategy_id, rec.state.value, rec.consecutive_losses, rec.updated_at))
+
+def _now() -&gt; str:
+    return datetime.now(timezone.utc).isoformat()
+</code></pre>
+
+<p>Two things matter here beyond persistence. First, <code>isolation_level=None</code> with WAL gives you autocommit plus concurrent readers, which is fine for this write pattern. Second, the state and the counter are one row — they can never disagree after a crash.</p>
+<h2 id="the-breaker-logic">The Breaker Logic</h2>
+<p>The transition function is small and should stay that way. Every closed trade goes through it; nothing else mutates the counter.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import replace
+
+MAX_CONSECUTIVE_LOSSES = 3
+
+class LossBreaker:
+    def __init__(self, store: BreakerStore, strategy_id: str,
+                 threshold: int = MAX_CONSECUTIVE_LOSSES):
+        self.store = store
+        self.strategy_id = strategy_id
+        self.threshold = threshold
+
+    def can_trade(self) -&gt; bool:
+        return self.store.load(self.strategy_id).state is State.ACTIVE
+
+    def on_trade_closed(self, pnl: float, trade_meta: dict) -&gt; BreakerRecord:
+        rec = self.store.load(self.strategy_id)
+
+        if rec.state is not State.ACTIVE:
+            # Breaker is latched; closed PnL from any straggler orders
+            # must not move the counter.
+            return rec
+
+        losses = rec.consecutive_losses + 1 if pnl &lt; 0 else 0
+        new_state = State.TRIPPED if losses &gt;= self.threshold else State.ACTIVE
+        rec = replace(rec, state=new_state, consecutive_losses=losses,
+                      updated_at=_now())
+        self.store.save(rec)
+
+        if new_state is State.TRIPPED:
+            # Execution is already blocked by the persisted state.
+            self._handle_trip(rec, trade_meta)
+        return rec
+
+    def _handle_trip(self, rec: BreakerRecord, trade_meta: dict) -&gt; None:
+        history = self._recent_trades()
+        # Move to COOLDOWN before notifying so a crash mid-notification
+        # still leaves the strategy paused.
+        self.store.save(replace(rec, state=State.COOLDOWN, updated_at=_now()))
+        notify_trip(self.strategy_id, history, trade_meta)
+
+    def _recent_trades(self) -&gt; list[dict]:
+        # Pull the last N closed trades from your trade log.
+        return load_recent_closed_trades(self.strategy_id, limit=10)
+
+    def resume(self, reviewer: str, note: str) -&gt; BreakerRecord:
+        rec = self.store.load(self.strategy_id)
+        if rec.state is not State.COOLDOWN:
+            raise RuntimeError(f&quot;cannot resume from state {rec.state}&quot;)
+        log_review(self.strategy_id, reviewer, note, rec.consecutive_losses)
+        rec = replace(rec, state=State.ACTIVE, consecutive_losses=0,
+                      updated_at=_now())
+        self.store.save(rec)
+        return rec
+</code></pre>
+
+<p>Note the ordering in <code>_handle_trip</code>: persist <code>COOLDOWN</code> first, then notify. If <code>notify_trip</code> throws, the strategy is already stopped. The notification is a side effect, not part of the safety mechanism.</p>
+<p>Also note that <code>on_trade_closed</code> ignores PnL while the breaker is latched. This handles the real-world case where a stop order fills after the trip — you don't want that fill to silently reset a loss counter or, worse, re-trip an already-tripped breaker and re-fire notifications.</p>
+<h2 id="wiring-it-into-the-execution-loop">Wiring It Into the Execution Loop</h2>
+<p>The check has to sit in front of order submission, not inside the strategy logic. Strategy code is where you're most tempted to add exceptions.</p>
+<pre class="codehilite"><code class="language-python">def run_bar(breaker: LossBreaker, strategy, market_data) -&gt; None:
+    if not breaker.can_trade():
+        return  # paused: no signals, no orders, no sizing
+
+    signal = strategy.evaluate(market_data)
+    if signal is None:
+        return
+
+    fill = execute_order(signal)
+    if fill is not None and fill.closed:
+        breaker.on_trade_closed(fill.pnl, fill.meta)
+</code></pre>
+
+<p>If your strategy emits orders from multiple places, wrap <code>execute_order</code> itself with the <code>can_trade()</code> guard as a second line of defense. Belt and suspenders is cheap here.</p>
+<h2 id="notifications-that-are-actually-useful">Notifications That Are Actually Useful</h2>
+<p>A push that says "strategy tripped" wastes the meeting. The notification should carry the evidence: the losing trades, their entry/exit, size, PnL, and the timestamps. That's what makes the review a review instead of a shrug.</p>
+<pre class="codehilite"><code class="language-python">import json
+import requests
+
+def notify_trip(strategy_id: str, history: list[dict], trigger: dict) -&gt; None:
+    lines = [f&quot;Circuit breaker tripped: {strategy_id}&quot;, &quot;&quot;]
+    for t in history:
+        lines.append(
+            f&quot;{t['closed_at']}  {t['side']:&lt;4}  size={t['size']:&lt;8}  &quot;
+            f&quot;pnl={t['pnl']:+.2f}  {t.get('exit_reason', '')}&quot;
+        )
+    lines.append(&quot;&quot;)
+    lines.append(f&quot;Triggering trade: {json.dumps(trigger, default=str)}&quot;)
+    body = &quot;\n&quot;.join(lines)
+
+    requests.post(
+        &quot;https://ntfy.sh/your-private-topic&quot;,
+        data=body.encode(&quot;utf-8&quot;),
+        headers={&quot;Title&quot;: f&quot;BREAKER: {strategy_id}&quot;, &quot;Priority&quot;: &quot;high&quot;},
+        timeout=10,
+    )
+</code></pre>
+
+<p>Keep the payload small and text-based. It should be readable on a phone lock screen. If you use a different channel — email, Telegram, a local webhook — the shape stays the same: strategy id, the streak, the trades.</p>
+<h2 id="consecutive-losses-vs-drawdown-limits">Consecutive Losses vs. Drawdown Limits</h2>
+<p>These are not substitutes, and running only one is a common gap.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Drawdown limit</th>
+<th>Consecutive-loss breaker</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Measures</td>
+<td>Cumulative capital loss</td>
+<td>Process deviation</td>
+</tr>
+<tr>
+<td>Typical trigger</td>
+<td>Slow bleed over weeks</td>
+<td>Fast streak over days</td>
+</tr>
+<tr>
+<td>Reset</td>
+<td>New equity high</td>
+<td>A single win</td>
+</tr>
+<tr>
+<td>Failure mode it catches</td>
+<td>Sizing too large for the edge</td>
+<td>Edge decay, feed corruption, bug</td>
+</tr>
+<tr>
+<td>Response</td>
+<td>Reduce size / stop</td>
+<td>Pause and review</td>
+</tr>
+</tbody>
+</table>
+<p>A drawdown limit won't fire on three losses if the prior month was strong. A consecutive-loss breaker will. Conversely, a breaker won't catch a strategy that loses 55% of trades in a steady grind — you need the drawdown limit for that. Run both. They answer different questions and they fail in different directions.</p>
+<p>One more distinction worth stating: the breaker is per strategy, not per account. If you run five strategies and one trips, the other four should keep running. Coupling them turns a single-strategy problem into a portfolio-wide outage.</p>
+<h2 id="the-psychology-part">The Psychology Part</h2>
+<p>The breaker is not punishment. It's a forced meeting with your own statistics.</p>
+<p>Three losses in a row is not rare. For a strategy with a 45% win rate, the probability of any given three-trade window being all losses is about 16.6%. Over a few hundred trades you'll see it constantly. That's precisely why the rule is mechanical: if you decide case-by-case whether a streak is "just variance," you will decide it's variance every time, because that's the answer that lets you keep trading.</p>
+<p>The manual resume step is the actual feature. It forces you to write down what you saw — the trades, the market context, whether the fills looked normal — before the strategy goes live again. Sometimes the review takes two minutes and you're back. Sometimes it takes a week and the strategy gets retired. Both are correct outcomes. What's not correct is a timer that restarts everything at midnight and calls it risk management.</p>
+<p>Two practical habits make reviews fast:</p>
+<ol>
+<li><strong>Log the review.</strong> The <code>log_review</code> call in <code>resume()</code> writes who resumed, when, and why. After a few months you have a record of which strategies trip often and whether those trips preceded real problems. That's data about your breaker, not just your strategy.</li>
+<li><strong>Tune the threshold per strategy, not globally.</strong> Three is a reasonable default for strategies trading a few times a day. For a high-frequency strategy, three losses is noise; use a larger threshold or a percentage-based variant. For a low-frequency strategy, three losses might span months — there, a drawdown limit does more work.</li>
+</ol>
+<h2 id="adapting-it">Adapting It</h2>
+<p>The same structure generalizes cheaply:</p>
+<ul>
+<li><strong>Percentage-based streak</strong>: trip when cumulative loss over the current streak exceeds <em>x</em>% of equity, instead of a fixed count.</li>
+<li><strong>Time-bounded streak</strong>: only count losses within a rolling window, so a loss in January and a loss in June aren't "consecutive."</li>
+<li><strong>Per-instrument breakers</strong>: key the store on <code>strategy_id + symbol</code> if your strategy trades several instruments with independent behavior.</li>
+</ul>
+<p>In all cases, keep the same invariants: persist state and counter together, block execution before notifying, and require an explicit, logged resume.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-30 08:46:53</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TRX</td>
+<td>高质量标的做多</td>
+<td>$0.3521</td>
+<td>$0.3768</td>
+<td>$0.3398</td>
+<td>1:2.0</td>
+</tr>
+</tbody>
+</table>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SNXX</td>
+<td>庄家做空</td>
+<td>$8.496</td>
+<td>$8.0967</td>
+<td>$8.7934</td>
+<td>1:1.3</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">circuit breaker</span><span class="tag-badge">consecutive losses</span><span class="tag-badge">cooldown</span><span class="tag-badge">risk control</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
