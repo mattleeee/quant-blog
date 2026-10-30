@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dev.to API发布实战：tag规则、限流与幂等设计 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Dev.to API发布实战：tag规则、限流与幂等设计
+
+用脚本把文章自动同步到 Dev.to，听起来是个十分钟的活：拿 API key，POST 一个 /articles 就完事。...">
+    <meta name="keywords" content="Dev.to,API发布,限流,幂等">
+    <meta property="og:title" content="Dev.to API发布实战：tag规则、限流与幂等设计">
+    <meta property="og:description" content="Dev.to API发布实战：tag规则、限流与幂等设计
+
+用脚本把文章自动同步到 Dev.to，听起来是个十分钟的活：拿 API key，POST 一个 /articles 就完事。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/60.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Dev.to API发布实战：tag规则、限流与幂等设计</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-30</span>
+                <span class="category"><span class="tag-badge">博客运营</span></span>
+            </div>
+            <div class="post-content">
+<p>用脚本把文章自动同步到 Dev.to，听起来是个十分钟的活：拿 API key，POST 一个 <code>/articles</code> 就完事。实际跑起来会踩三个坑：tag 里的连字符直接 422、发布频率高了 429 要等 300 秒、重跑脚本时文章发重了。</p>
+<p>这篇文章把这三个坑和对应的解法写清楚，代码可以直接拿去改。</p>
+<h2 id="api-header">API 认证：一个 header 搞定</h2>
+<p>Dev.to 的认证走 <code>api-key</code> header，不需要 OAuth 流程（个人发布场景）：</p>
+<pre class="codehilite"><code class="language-python">import os
+import requests
+
+API_KEY = os.environ[&quot;DEVTO_API_KEY&quot;]
+BASE = &quot;https://dev.to/api&quot;
+
+HEADERS = {
+    &quot;api-key&quot;: API_KEY,
+    &quot;Content-Type&quot;: &quot;application/json&quot;,
+    &quot;Accept&quot;: &quot;application/json&quot;,
+}
+</code></pre>
+
+<p>API key 在 Dev.to 的 Settings → Extensions → DEV Community API Keys 里生成。注意两点：</p>
+<ol>
+<li>key 只显示一次，生成后立刻存进环境变量或密钥管理，别留在代码里。</li>
+<li>请求体用 JSON 传，<code>Content-Type</code> 必须显式声明，否则部分网关会当成表单处理。</li>
+</ol>
+<p>发布文章的 payload 大致长这样：</p>
+<pre class="codehilite"><code class="language-python">payload = {
+    &quot;article&quot;: {
+        &quot;title&quot;: &quot;文章标题&quot;,
+        &quot;published&quot;: True,
+        &quot;body_markdown&quot;: &quot;# 正文\n...&quot;,
+        &quot;tags&quot;: [&quot;python&quot;, &quot;quant&quot;],
+        &quot;canonical_url&quot;: &quot;https://example.com/original-post&quot;,
+        &quot;description&quot;: &quot;摘要&quot;,
+    }
+}
+</code></pre>
+
+<p><code>canonical_url</code> 是 SEO 上的关键字段。同一篇文章在自有站点和 Dev.to 各有一份，如果不标 canonical，搜索引擎会认为是重复内容，权重可能被分走。把 <code>canonical_url</code> 指向原文地址，Dev.to 页面会带上 canonical 标签，告诉搜索引擎"正版在这边"。做多平台同步的，这个字段别省。</p>
+<h2 id="tag">坑一：tag 只允许纯字母数字</h2>
+<p>这是最容易卡住的一个。Dev.to 的 tags 文档里写着"alphanumeric"，但实际校验比想象中严格：<strong>连字符、下划线、空格全部拒绝</strong>。</p>
+<p>比如你按常见习惯写：</p>
+<pre class="codehilite"><code class="language-python">tags = [&quot;python&quot;, &quot;quant-trading&quot;, &quot;api-publish&quot;]
+</code></pre>
+
+<p>请求会返回 422，错误信息大意是 tag 包含 non-alphanumeric 字符。第一反应往往是去查中文、特殊符号，绕一圈才意识到问题出在连字符上。</p>
+<p>解法很简单，在提交前做一次清洗：</p>
+<pre class="codehilite"><code class="language-python">import re
+
+def sanitize_tags(tags: list[str]) -&gt; list[str]:
+    &quot;&quot;&quot;Dev.to tag 只接受纯字母数字，连字符/下划线/空格一律剔除。&quot;&quot;&quot;
+    cleaned = []
+    for tag in tags:
+        # 去掉所有非字母数字字符
+        t = re.sub(r&quot;[^a-zA-Z0-9]&quot;, &quot;&quot;, tag).lower()
+        if t and t not in cleaned:
+            cleaned.append(t)
+    return cleaned[:4]  # Dev.to 最多 4 个 tag
+</code></pre>
+
+<p><code>quant-trading</code> 会被清洗成 <code>quanttrading</code>。这个结果不一定符合你的预期，所以更好的做法是在文章元数据里就写合规的 tag，清洗函数只作为兜底。另外 Dev.to 单篇文章最多 4 个 tag，超出的部分会被静默截断，最好自己先截。</p>
+<p>顺带一提，tag 清洗函数建议单独写单测，因为这类"看起来无害但会 422"的规则，靠人肉检查很容易漏。</p>
+<h2 id="429-300">坑二：429 限流与 300 秒等待</h2>
+<p>批量发布时，连续请求会触发限流，返回 429。Dev.to 的限流窗口比较长，实测触发后需要等待约 300 秒才能恢复。</p>
+<p>这里有两个设计要点：</p>
+<p><strong>第一，区分可重试与不可重试状态码。</strong> 429 和 5xx 可以重试，422 重试一万次也没用，直接抛错让人工修数据。</p>
+<p><strong>第二，退避时间要够长。</strong> 常见的指数退避从 1 秒起步，对 Dev.to 不够用，第一次重试就该等 300 秒左右。</p>
+<pre class="codehilite"><code class="language-python">import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+RETRYABLE = {429, 500, 502, 503, 504}
+RATE_LIMIT_WAIT = 300  # 秒
+
+def request_with_retry(method: str, url: str, max_retries: int = 3, **kwargs):
+    for attempt in range(1, max_retries + 1):
+        resp = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
+
+        if resp.status_code &lt; 400:
+            return resp
+
+        if resp.status_code not in RETRYABLE:
+            # 422 之类的业务错误，重试无意义
+            raise RuntimeError(f&quot;{resp.status_code}: {resp.text}&quot;)
+
+        wait = RATE_LIMIT_WAIT if resp.status_code == 429 else 2 ** attempt
+        logger.warning(
+            &quot;attempt %d/%d got %d, sleeping %ds&quot;,
+            attempt, max_retries, resp.status_code, wait,
+        )
+        if attempt == max_retries:
+            raise RuntimeError(f&quot;max retries exceeded: {resp.status_code}&quot;)
+        time.sleep(wait)
+</code></pre>
+
+<p>如果一次要发十几篇，更稳妥的做法是在每次成功请求后主动 <code>sleep</code> 几秒，把请求摊开，而不是等撞上 429 再退避。限流是"配额"不是"故障"，主动控速比被动重试便宜得多。</p>
+<h2 id="put">坑三：幂等——状态文件 + PUT 更新</h2>
+<p>脚本跑第二遍时，最怕两件事：文章发重了；或者想更新已发文章，结果又新建了一篇。</p>
+<p>解法是维护一个状态文件，记录每篇文章的本地标识、Dev.to 返回的 <code>id</code> 和 <code>url</code>。发布前先查状态：</p>
+<ul>
+<li>没记录 → POST 新建</li>
+<li>有记录 → PUT 更新已有文章</li>
+</ul>
+<pre class="codehilite"><code class="language-python">import json
+from pathlib import Path
+
+STATE_FILE = Path(&quot;devto_state.json&quot;)
+
+def load_state() -&gt; dict:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text(encoding=&quot;utf-8&quot;))
+    return {}
+
+def save_state(state: dict) -&gt; None:
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding=&quot;utf-8&quot;,
+    )
+</code></pre>
+
+<p>状态文件的 key 用文章 slug 或文件路径都行，关键是稳定——同一篇文章每次跑出来的 key 必须一致。用标题做 key 是个坑，标题一改就认不出来了。</p>
+<p>发布主逻辑：</p>
+<pre class="codehilite"><code class="language-python">def publish_article(slug: str, payload: dict) -&gt; dict:
+    state = load_state()
+    record = state.get(slug)
+
+    if record and record.get(&quot;id&quot;):
+        # 已发布过，走 PUT 更新
+        url = f&quot;{BASE}/articles/{record['id']}&quot;
+        resp = request_with_retry(&quot;PUT&quot;, url, json=payload)
+    else:
+        # 首次发布，走 POST
+        resp = request_with_retry(&quot;POST&quot;, f&quot;{BASE}/articles&quot;, json=payload)
+
+    data = resp.json()
+    state[slug] = {
+        &quot;id&quot;: data[&quot;id&quot;],
+        &quot;url&quot;: data.get(&quot;url&quot;),
+        &quot;title&quot;: data.get(&quot;title&quot;),
+    }
+    save_state(state)
+    return data
+</code></pre>
+
+<p>有个细节：PUT 更新时 payload 结构和 POST 一样，都是 <code>{"article": {...}}</code>，但更新接口对某些字段的处理和新建立略有差异，比如 <code>published</code> 状态。更新已发布文章时保留 <code>published: True</code> 即可，不要传 <code>False</code>，否则文章会被撤回草稿。</p>
+<h2 id="_1">完整发布脚本</h2>
+<p>把上面几块拼起来，一个可用的发布脚本：</p>
+<pre class="codehilite"><code class="language-python">import json
+import logging
+import os
+import re
+import time
+from pathlib import Path
+
+import requests
+
+logging.basicConfig(level=logging.INFO, format=&quot;%(asctime)s %(levelname)s %(message)s&quot;)
+logger = logging.getLogger(__name__)
+
+BASE = &quot;https://dev.to/api&quot;
+HEADERS = {
+    &quot;api-key&quot;: os.environ[&quot;DEVTO_API_KEY&quot;],
+    &quot;Content-Type&quot;: &quot;application/json&quot;,
+    &quot;Accept&quot;: &quot;application/json&quot;,
+}
+STATE_FILE = Path(&quot;devto_state.json&quot;)
+RETRYABLE = {429, 500, 502, 503, 504}
+RATE_LIMIT_WAIT = 300
+
+
+def sanitize_tags(tags):
+    cleaned = []
+    for tag in tags:
+        t = re.sub(r&quot;[^a-zA-Z0-9]&quot;, &quot;&quot;, tag).lower()
+        if t and t not in cleaned:
+            cleaned.append(t)
+    return cleaned[:4]
+
+
+def load_state():
+    return json.loads(STATE_FILE.read_text(encoding=&quot;utf-8&quot;)) if STATE_FILE.exists() else {}
+
+
+def save_state(state):
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding=&quot;utf-8&quot;)
+
+
+def request_with_retry(method, url, max_retries=3, **kwargs):
+    for attempt in range(1, max_retries + 1):
+        resp = requests.request(method, url, headers=HEADERS, timeout=30, **kwargs)
+        if resp.status_code &lt; 400:
+            return resp
+        if resp.status_code not in RETRYABLE:
+            raise RuntimeError(f&quot;{resp.status_code}: {resp.text}&quot;)
+        wait = RATE_LIMIT_WAIT if resp.status_code == 429 else 2 ** attempt
+        logger.warning(&quot;attempt %d/%d -&gt; %d, sleep %ds&quot;, attempt, max_retries, resp.status_code, wait)
+        if attempt == max_retries:
+            raise RuntimeError(f&quot;max retries exceeded: {resp.status_code}&quot;)
+        time.sleep(wait)
+
+
+def build_payload(title, body_md, tags, canonical_url, description=&quot;&quot;):
+    return {
+        &quot;article&quot;: {
+            &quot;title&quot;: title,
+            &quot;published&quot;: True,
+            &quot;body_markdown&quot;: body_md,
+            &quot;tags&quot;: sanitize_tags(tags),
+            &quot;canonical_url&quot;: canonical_url,
+            &quot;description&quot;: description,
+        }
+    }
+
+
+def publish(slug, payload):
+    state = load_state()
+    record = state.get(slug)
+
+    if record and record.get(&quot;id&quot;):
+        logger.info(&quot;update existing article id=%s&quot;, record[&quot;id&quot;])
+        resp = request_with_retry(&quot;PUT&quot;, f&quot;{BASE}/articles/{record['id']}&quot;, json=payload)
+    else:
+        logger.info(&quot;create new article&quot;)
+        resp = request_with_retry(&quot;POST&quot;, f&quot;{BASE}/articles&quot;, json=payload)
+
+    data = resp.json()
+    state[slug] = {&quot;id&quot;: data[&quot;id&quot;], &quot;url&quot;: data.get(&quot;url&quot;), &quot;title&quot;: data.get(&quot;title&quot;)}
+    save_state(state)
+    logger.info(&quot;done: %s&quot;, data.get(&quot;url&quot;))
+    return data
+
+
+if __name__ == &quot;__main__&quot;:
+    payload = build_payload(
+        title=&quot;Dev.to API发布实战：tag规则、限流与幂等设计&quot;,
+        body_md=Path(&quot;post.md&quot;).read_text(encoding=&quot;utf-8&quot;),
+        tags=[&quot;python&quot;, &quot;api-publish&quot;, &quot;automation&quot;],
+        canonical_url=&quot;https://example.com/posts/devto-api-publish&quot;,
+        description=&quot;Dev.to API 发布踩坑记录&quot;,
+    )
+    publish(&quot;devto-api-publish&quot;, payload)
+</code></pre>
+
+<p>注意 <code>tags</code> 里写了 <code>api-publish</code>，会被清洗成 <code>apipublish</code>——这正是坑一说的，最好在源头就写合规 tag。</p>
+<h2 id="_2">小结</h2>
+<p>三个坑的共性：<strong>API 的错误信息往往只描述现象，不描述原因</strong>。422 说 "non-alphanumeric"，但没人告诉你罪魁是连字符；429 只给状态码，等待时长得自己试。所以自动发布脚本里，防御性设计比功能本身更重要：</p>
+<ul>
+<li>tag 入口做清洗，别指望调用方守规矩</li>
+<li>重试策略区分状态码，429 单独给长等待</li>
+<li>状态文件做幂等，POST/PUT 按记录分流</li>
+<li><code>canonical_url</code> 必填，多平台同步的 SEO 底线</li>
+</ul>
+<p>状态文件建议纳入版本管理或至少定期备份，它是幂等逻辑的唯一依据，丢了就只能靠人工核对哪些文章发过了。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Dev.to</span><span class="tag-badge">API发布</span><span class="tag-badge">限流</span><span class="tag-badge">幂等</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
