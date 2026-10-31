@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Partial Take-Profit: Bank Half at 3%, Let the Rest Run - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Problem With a Single Take-Profit A fixed take-profit forces a binary choice....">
+    <meta name="keywords" content="partial take profit,position sizing,scaling out,trade management">
+    <meta property="og:title" content="Partial Take-Profit: Bank Half at 3%, Let the Rest Run">
+    <meta property="og:description" content="The Problem With a Single Take-Profit A fixed take-profit forces a binary choice....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/33.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Partial Take-Profit: Bank Half at 3%, Let the Rest Run</h1>
+            <div class="post-meta">
+                <span class="date">2026-10-31</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A fixed take-profit forces a binary choice. Set it tight and you cut winners that would have kept running. Set it wide and you watch a 5% open profit evaporate back to zero because the target was never hit. Both outcomes come from the same design flaw: the exit is a single point, and the market gets one vote on whether you keep everything.</p>
+<p>Partial take-profit splits that vote. The version I run in the paper trader: when unrealized profit on the open position reaches <strong>3%</strong>, sell <strong>half</strong> the position and move the stop on the remainder to <strong>break-even</strong>. The remaining half targets the original <strong>6%</strong>. The first leg banks a guaranteed gain; the second leg keeps upside exposure at zero risk (modulo fees, which we'll get to).</p>
+<p>The strategy logic is trivial. The bookkeeping is where implementations break, so most of this post is about state.</p>
+<h2 id="position-state">Position State</h2>
+<p>Every open position needs enough state to answer: how much is left, what did it cost, what's been realized, and has the partial already fired. A dataclass is the cleanest container:</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+
+@dataclass
+class Position:
+    entry_price: float
+    qty: float
+    stop_price: float
+    target_price: float
+    partial_level: float
+    partial_fraction: float = 0.5
+    partial_done: bool = False
+    realized_pnl: float = 0.0
+    fees_paid: float = 0.0
+    initial_qty: float = field(init=False)
+
+    def __post_init__(self):
+        self.initial_qty = self.qty
+</code></pre>
+
+<p>Two fields do the heavy lifting. <code>partial_done</code> is the latch that guarantees the 3% rule fires <strong>once</strong>, not on every candle that closes above the threshold. <code>initial_qty</code> preserves the original size so you can report percentage-of-position metrics after the exit.</p>
+<p>Note that <code>entry_price</code> never changes. After a partial exit, the remaining shares still carry the same cost basis — the average entry of the <em>remaining</em> position is unchanged. What changes is how much capital is at risk. If you recompute an "average entry" by blending realized and unrealized, you'll corrupt the R-multiple math later. Keep cost basis immutable; track realized PnL separately.</p>
+<h2 id="the-candle-loop-and-check-order">The Candle Loop and Check Order</h2>
+<p>The rule must be evaluated exactly once per candle, and the order of checks matters because a single candle can touch the stop, the partial level, and the target. Here's the loop I use:</p>
+<pre class="codehilite"><code class="language-python">def process_candle(pos: Position, candle, fee_rate: float = 0.001):
+    o, h, l, c = candle.open, candle.high, candle.low, candle.close
+
+    # 1. Gap handling: if the open is already beyond a level,
+    #    fill at the open, not at the level.
+    # 2. Stop check first (conservative: assume worst case within candle).
+    stop_hit = l &lt;= pos.stop_price
+    target_hit = h &gt;= pos.target_price
+    partial_hit = (not pos.partial_done) and h &gt;= pos.partial_level
+
+    # Conservative ordering: stop before target when both touched.
+    if stop_hit:
+        fill = min(o, pos.stop_price) if o &lt; pos.stop_price else pos.stop_price
+        close_remainder(pos, fill, fee_rate)
+        return &quot;stopped&quot;
+
+    if partial_hit:
+        take_partial(pos, max(o, pos.partial_level), fee_rate)
+        # Re-evaluate target on the same candle with reduced size.
+        if h &gt;= pos.target_price:
+            fill = max(o, pos.target_price)
+            close_remainder(pos, fill, fee_rate)
+            return &quot;partial+target&quot;
+        return &quot;partial&quot;
+
+    if target_hit:
+        fill = max(o, pos.target_price)
+        close_remainder(pos, fill, fee_rate)
+        return &quot;target&quot;
+
+    return &quot;open&quot;
+</code></pre>
+
+<p>The ordering decisions, spelled out:</p>
+<p><strong>Stop before partial.</strong> If a candle's range covers both the stop and the 3% level, assume the stop got hit first. Without tick data you cannot know the intrabar sequence, and assuming the favorable fill first is how backtests develop a personality disorder. Conservative ordering costs you some hypothetical profit and keeps the equity curve honest.</p>
+<p><strong>Partial before target.</strong> Once the 3% level triggers, the target check runs against the <em>reduced</em> position. If one candle runs from below 3% straight through 6%, you take the partial at 3% and the remainder at 6%. That's the intended behavior: the rule is a schedule, not an either/or.</p>
+<p><strong>Gap opens.</strong> If the candle opens above the target, the fill is the open, not the target — you don't get to sell at a price the market skipped. The <code>max(o, level)</code> / <code>min(o, level)</code> expressions handle long positions; flip them for shorts. Gap opens beyond <em>both</em> the partial and the target (open at 7%) mean the partial fills at the open too, and the remainder also fills at the open. Bank it and move on.</p>
+<h3 id="the-partial-fill-itself">The Partial Fill Itself</h3>
+<pre class="codehilite"><code class="language-python">def take_partial(pos: Position, fill_price: float, fee_rate: float):
+    qty = pos.qty * pos.partial_fraction
+    proceeds = qty * fill_price
+    fee = proceeds * fee_rate
+    cost = qty * pos.entry_price
+
+    pos.realized_pnl += proceeds - fee - cost
+    pos.fees_paid += fee
+    pos.qty -= qty
+    pos.partial_done = True
+
+    # Move stop to break-even, adjusted for fees already sunk.
+    pos.stop_price = pos.entry_price
+</code></pre>
+
+<p>Two subtleties here. First, <code>pos.qty -= qty</code> uses the fractional quantity, so a 50% exit on an odd lot leaves a fractional remainder — fine for crypto, and for equities you'd round down and keep the residual. Second, the break-even stop is set to <code>entry_price</code>, not to <code>entry_price + fees</code>. That's the version most people write, and it's slightly wrong; see the fee section.</p>
+<h2 id="edge-cases-that-bite">Edge Cases That Bite</h2>
+<p><strong>The "free ride" isn't free.</strong> Moving the stop to break-even means the remainder exits flat <em>before fees</em>. If you paid 0.1% on entry and 0.1% on exit, a break-even stop on the remainder loses roughly 0.2% of the remaining notional. Over hundreds of trades this shows up. The fix is to set the stop at the fee-adjusted break-even:</p>
+<pre class="codehilite"><code class="language-python">def breakeven_price(entry: float, entry_fee_rate: float,
+                    exit_fee_rate: float) -&gt; float:
+    # Price at which net PnL on the remainder is zero.
+    return entry * (1 + entry_fee_rate) / (1 - exit_fee_rate)
+</code></pre>
+
+<p>With 0.1% each way, that's entry × 1.001 / 0.999 ≈ entry × 1.002. Two basis points above entry — small, but it converts "free ride" from a slogan into an arithmetic fact. Whether the fee-adjusted stop or the plain break-even stop performs better is an empirical question; test both.</p>
+<p><strong>Partial level below entry after slippage.</strong> If your fill model includes slippage, the realized PnL on the partial can be negative even though the trigger price was 3% above entry. Guard the expectancy math against this by using actual fill prices everywhere, never the trigger levels.</p>
+<p><strong>Restart safety.</strong> If the trader persists state between runs, <code>partial_done</code> must be serialized. Reconstructing a position from "current qty and entry" alone will re-fire the partial after a restart. Persist the full dataclass.</p>
+<p><strong>One partial per position.</strong> The latch is not an optimization; it's the semantics. If you want multiple scale-out levels (3%, 5%, 7%), replace the boolean with a list of pending levels and pop them as they trigger. The bookkeeping pattern is identical.</p>
+<h2 id="how-partial-tp-changes-expectancy">How Partial TP Changes Expectancy</h2>
+<p>The standard expectancy formula for a single-target system is:</p>
+<pre class="codehilite"><code>E = p_win * avg_win - p_loss * avg_loss
+</code></pre>
+
+<p>Partial exits break <code>avg_win</code> into two components and change the outcome distribution. With half out at 3% and half at 6% (ignoring fees and the break-even stop for a moment), a full winner returns <code>0.5 * 3% + 0.5 * 6% = 4.5%</code> of position notional. A trade that reaches 3% but stalls returns <code>0.5 * 3% + 0 = 1.5%</code> instead of riding back to zero. A trade stopped at break-even after the partial returns <code>1.5%</code> instead of a full loss.</p>
+<p>The trade-off: you've capped the average winner at 4.5% instead of 6%, in exchange for converting some would-be losers into small winners and shrinking the loss tail. Whether that improves expectancy depends on the distribution of maximum favorable excursion (MFE) — specifically, how many trades reach 3% versus 6%. If most trades that hit 3% also hit 6%, the partial just costs you half a percent per winner. If a large fraction stall between 3% and 6%, the partial is where the edge lives.</p>
+<p>You can't reason your way to the answer; you measure it. Log MFE per trade and build the histogram:</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def mfe_histogram(trades, bins=(0, 1, 2, 3, 4, 5, 6, 8, 10)):
+    mfe = np.array([t.max_favorable_pct for t in trades])
+    hist, edges = np.histogram(mfe, bins=bins)
+    for lo, hi, n in zip(edges[:-1], edges[1:], hist):
+        print(f&quot;{lo:&gt;4.0f}%-{hi:&lt;4.0f}%  {n:&gt;5d}  {'#' * int(50 * n / max(hist))}&quot;)
+</code></pre>
+
+<p>If the 3–6% bucket is fat, the partial earns its keep. If it's nearly empty, a single wider target is simpler and better.</p>
+<h3 id="a-cleaner-expectancy-formula">A Cleaner Expectancy Formula</h3>
+<p>Once partials exist, per-trade expectancy is best computed from realized cash flows rather than win/loss averages:</p>
+<pre class="codehilite"><code class="language-python">def expectancy(closed_trades):
+    # Each trade: dict with 'pnl_pct' (net return on initial notional)
+    pnl = np.array([t[&quot;pnl_pct&quot;] for t in closed_trades])
+    return pnl.mean(), pnl.std() / np.sqrt(len(pnl))
+</code></pre>
+
+<p>Because every trade now has a continuum of outcomes (full stop, partial + break-even, partial + target, direct target), the win/loss split loses information. Mean net return per trade on initial notional, with a standard error, is the honest summary. Report it alongside the MFE histogram and the fraction of trades where the partial fired.</p>
+<h2 id="what-actually-matters">What Actually Matters</h2>
+<p>The partial take-profit is a small piece of logic wrapped in a lot of state discipline. Get these right and the rest follows:</p>
+<ul>
+<li>Latch the partial with an explicit flag and persist it.</li>
+<li>Evaluate stop → partial → target, once per candle, with gap-aware fills.</li>
+<li>Keep entry price immutable; track realized PnL separately.</li>
+<li>Use fee-adjusted break-even if you care about the "free" part being real.</li>
+<li>Judge the rule by the MFE distribution and net expectancy, not by how it feels.</li>
+</ul>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-10-31 08:47:06</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Q</td>
+<td>短平快做多</td>
+<td>$0.0434</td>
+<td>$0.0447</td>
+<td>$0.0423</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">partial take profit</span><span class="tag-badge">position sizing</span><span class="tag-badge">scaling out</span><span class="tag-badge">trade management</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
