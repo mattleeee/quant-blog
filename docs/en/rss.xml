@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Partial Take-Profit: Bank Half at 3%, Let the Rest Run</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/33.html</link>
+            <description>The Problem With a Single Take-Profit A fixed take-profit forces a binary choice. Set it tight and you cut winners that would have kept running....</description>
+            <pubDate>2026-10-31</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Circuit Breakers for Strategies: Pausing After Three Consecutive Losses</title>
             <link>https://www.hkcode.dpdns.org/en/posts/32.html</link>
             <description>Why Consecutive Losses Need Their Own Guard Drawdown limits answer &quot;how much have I lost?&quot; Consecutive-loss breakers answer a different question: &quot;is the proces...</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/14.html</link>
             <description>Alerts that fire twice for the same event are worse than alerts that never fire at all....</description>
             <pubDate>2026-10-11</pubDate>
-            <category>Notifications</category>
-        </item>
-        <item>
-            <title>Wiring WeChat Push into Python Automation with PushPlus</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/13.html</link>
-            <description>PushPlus is the shortest path from a Python script to your phone. One HTTP POST with a token, a title, and a markdown body, and the message lands in WeChat....</description>
-            <pubDate>2026-10-10</pubDate>
             <category>Notifications</category>
         </item>
     </channel>
