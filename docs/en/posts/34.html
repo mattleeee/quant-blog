@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adaptive Stop-Loss Thresholds Instead of Hardcoded Percentages - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A fixed -3% stop does not mean the same thing on every instrument....">
+    <meta name="keywords" content="stop loss,adaptive threshold,volatility,risk management">
+    <meta property="og:title" content="Adaptive Stop-Loss Thresholds Instead of Hardcoded Percentages">
+    <meta property="og:description" content="A fixed -3% stop does not mean the same thing on every instrument....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/34.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Adaptive Stop-Loss Thresholds Instead of Hardcoded Percentages</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-01</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A fixed <code>-3%</code> stop does not mean the same thing on every instrument. On a volatile altcoin, 3% is inside the normal noise band, so the stop fires on routine wiggles and the strategy never gets to express its edge. On a low-volatility index product, 3% is a wide move, so the stop sits far beyond where the strategy's own logic would have exited. The same number produces opposite behaviour depending on the thing it's attached to.</p>
+<p>The fix is not to tune the percentage per instrument by hand. It's to derive the safety floor from the strategy's own stop calculation, so the floor protects capital without overriding the strategy's exit logic. The formula used here:</p>
+<pre class="codehilite"><code class="language-python">threshold = -max(3.0, abs(strategy_stop_pct) * 2.0)
+</code></pre>
+
+<p>Read it as two clauses. The <code>abs(strategy_stop_pct) * 2.0</code> clause says: never force-close before the strategy's own stop has had a chance to work, and only intervene once the position has drifted to roughly twice the intended stop distance. The <code>max(3.0, ...)</code> clause says: there is always at least a 3% floor, so a strategy with a very tight stop (say 0.5%) doesn't get a 1% force-close that would fire on spread and slippage alone.</p>
+<h2 id="what-each-clause-is-protecting">What each clause is protecting</h2>
+<p>The <code>* 2.0</code> multiplier is the interesting part. A strategy that stops at 2% has a defined risk budget. If the price is at -2.5%, the strategy's stop should have already acted; if it hasn't, something is wrong (stale data, a gap, a broker reject). Waiting until -4% gives the strategy room to do its job and cuts the position only when the loss is clearly beyond what the strategy signed up for. That's the "respect the strategy" half.</p>
+<p>The <code>max(3.0, ...)</code> half is the "protect capital" floor. Without it, a strategy with a 0.5% stop yields a 1% force-close threshold, which is noise-level for most liquid instruments. The force-close would become the actual stop, and the strategy's own logic would be irrelevant. The 3% minimum guarantees the force-close is a genuine backstop, not a second, tighter stop.</p>
+<p>The result is a threshold that scales with the instrument's volatility <em>as the strategy sees it</em>, because <code>strategy_stop_pct</code> is itself volatility-derived. That's the whole point: the floor inherits the strategy's view of normal movement instead of imposing an external one.</p>
+<h2 id="computing-strategy_stop_pct-per-instrument">Computing <code>strategy_stop_pct</code> per instrument</h2>
+<p><code>strategy_stop_pct</code> must come from the strategy's own stop logic, not from a separate volatility estimate. If the strategy uses ATR-based stops, use that. If it uses a percentage of price derived from recent range, use that. The floor and the strategy must agree on what "the stop" means, or the <code>* 2.0</code> multiplier is meaningless.</p>
+<p>A common pattern is an ATR stop with a multiplier:</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+def atr(df: pd.DataFrame, period: int = 14) -&gt; pd.Series:
+    high, low, close = df[&quot;high&quot;], df[&quot;low&quot;], df[&quot;close&quot;]
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+def strategy_stop_pct(df: pd.DataFrame, atr_mult: float = 2.0,
+                      atr_period: int = 14) -&gt; pd.Series:
+    &quot;&quot;&quot;Stop distance as a fraction of current price.&quot;&quot;&quot;
+    a = atr(df, atr_period)
+    return (atr_mult * a) / df[&quot;close&quot;]
+</code></pre>
+
+<p>Then the floor follows directly:</p>
+<pre class="codehilite"><code class="language-python">def safety_floor_pct(stop_pct: pd.Series,
+                     min_floor: float = 3.0,
+                     mult: float = 2.0) -&gt; pd.Series:
+    &quot;&quot;&quot;Returns positive magnitude; apply as -value when comparing PnL.&quot;&quot;&quot;
+    return (stop_pct.abs() * mult).clip(lower=min_floor)
+</code></pre>
+
+<p>Two details matter here.</p>
+<p>First, <code>stop_pct</code> is a <em>series</em>, not a scalar. ATR changes, so the stop distance changes, so the floor changes. Recompute it on every bar or every position update. A floor computed once at entry will be wrong by the time the position has moved.</p>
+<p>Second, <code>clip(lower=min_floor)</code> implements the <code>max()</code> cleanly and keeps the output vectorised. For a strategy with a 2% stop, the floor is 4%. For a 0.8% stop, the floor is 3% (the minimum wins). For a 6% stop, the floor is 12%.</p>
+<p>One caveat on the ATR version: ATR is in price units, so dividing by <code>close</code> converts it to a fraction. For instruments with very different price scales (a $0.02 token vs. a $400 stock), the fraction is the only comparable quantity. Keep everything in fractional terms until the final PnL comparison.</p>
+<h2 id="applying-it-to-open-positions">Applying it to open positions</h2>
+<p>The check itself is a simple comparison against unrealised PnL as a fraction:</p>
+<pre class="codehilite"><code class="language-python">def should_force_close(entry_price: float,
+                       current_price: float,
+                       stop_pct_now: float,
+                       min_floor: float = 3.0,
+                       mult: float = 2.0) -&gt; bool:
+    pnl_pct = (current_price - entry_price) / entry_price * 100.0
+    floor = max(min_floor, abs(stop_pct_now) * mult)
+    return pnl_pct &lt;= -floor
+</code></pre>
+
+<p>Call this on every tick or bar, passing the <em>current</em> <code>stop_pct_now</code> rather than the value at entry. If the instrument has calmed down since entry, the floor tightens; if volatility has expanded, the floor widens. That's the adaptive part, and it's what a hardcoded percentage can't do.</p>
+<p>For a batch of positions, vectorise it:</p>
+<pre class="codehilite"><code class="language-python">def force_close_mask(entry: pd.Series, current: pd.Series,
+                     stop_pct_now: pd.Series,
+                     min_floor: float = 3.0,
+                     mult: float = 2.0) -&gt; pd.Series:
+    pnl_pct = (current - entry) / entry * 100.0
+    floor = (stop_pct_now.abs() * mult).clip(lower=min_floor)
+    return pnl_pct &lt;= -floor
+</code></pre>
+
+<h2 id="backtesting-the-floors-effect-on-surviving-trades">Backtesting the floor's effect on surviving trades</h2>
+<p>The number that matters is not how many trades the floor cuts. It's how many trades the floor cuts that would have recovered, and how much tail risk it removes. A floor that never fires is doing nothing; a floor that fires on trades that would have hit their own stop anyway is redundant. The useful cases are the ones in between: trades that drifted past the strategy's intended stop without triggering it, and trades that recovered.</p>
+<p>Tag each trade with whether the floor fired and whether the trade would have been profitable without it:</p>
+<pre class="codehilite"><code class="language-python">def evaluate_floor(trades: pd.DataFrame) -&gt; dict:
+    &quot;&quot;&quot;
+    trades columns: pnl_pct (final, without floor), floor_pnl_pct
+    (PnL at the moment the floor would have fired, NaN if it never fired),
+    would_recover (bool: final pnl_pct &gt; 0 without floor).
+    &quot;&quot;&quot;
+    fired = trades[&quot;floor_pnl_pct&quot;].notna()
+    cut = trades[fired]
+    return {
+        &quot;n_trades&quot;: len(trades),
+        &quot;n_fired&quot;: int(fired.sum()),
+        &quot;fired_rate&quot;: fired.mean(),
+        &quot;avg_pnl_fired&quot;: cut[&quot;floor_pnl_pct&quot;].mean(),
+        &quot;avg_pnl_if_held&quot;: cut[&quot;pnl_pct&quot;].mean(),
+        &quot;recovered_after_cut&quot;: int(cut[&quot;would_recover&quot;].sum()),
+        &quot;recovered_pnl_cost&quot;: cut.loc[cut[&quot;would_recover&quot;], &quot;pnl_pct&quot;].sum(),
+        &quot;tail_saved&quot;: (
+            trades.loc[~fired, &quot;pnl_pct&quot;].nsmallest(20).mean()
+            - cut[&quot;floor_pnl_pct&quot;].mean()
+            if fired.any() else float(&quot;nan&quot;)
+        ),
+    }
+</code></pre>
+
+<p>The two numbers to read together are <code>recovered_pnl_cost</code> and the change in the worst-case tail. If the floor cuts a handful of trades that would have recovered for a small total PnL cost, and it removes a fat left tail, it's earning its keep. If <code>recovered_pnl_cost</code> is large relative to the tail it removes, the multiplier is too tight: raise <code>mult</code> from 2.0 toward 2.5 or 3.0 and re-run. If the floor barely fires, the multiplier is too loose or the strategies' stops are already doing the work.</p>
+<p>Also break the results down by instrument. A floor that looks good in aggregate can be doing all its work on one volatile instrument and nothing elsewhere. If one instrument accounts for most of the fired trades, its <code>strategy_stop_pct</code> is probably mis-specified rather than the floor being wrong.</p>
+<p>Watch the sample size. Floor events are rare by construction, so a backtest with 200 trades may produce a dozen firings, which is not enough to conclude anything. Pool across instruments and across a long enough window that the volatility regime shifts at least once. If the floor's contribution only shows up in a single high-volatility month, you're measuring one event, not an edge.</p>
+<h2 id="when-a-hard-floor-must-override-the-adaptive-value">When a hard floor must override the adaptive value</h2>
+<p>The adaptive threshold assumes <code>strategy_stop_pct</code> is meaningful. That assumption fails in specific, recognisable cases, and in those the hard floor must win outright.</p>
+<p><strong>Stale or missing volatility data.</strong> If ATR is NaN, zero, or computed from a thin book, <code>stop_pct</code> collapses toward zero and the adaptive floor tightens to the 3% minimum. That's benign. But if <code>stop_pct</code> is <em>stale</em> — carried over from a prior regime — the floor can be far too wide. Detect it:</p>
+<pre class="codehilite"><code class="language-python">def effective_floor(stop_pct_now: float,
+                    stop_pct_prev: float,
+                    min_floor: float = 3.0,
+                    mult: float = 2.0,
+                    max_floor: float = 15.0) -&gt; float:
+    if not (stop_pct_now &gt; 0):
+        return min_floor                      # bad data: fall back to hard floor
+    adaptive = max(min_floor, abs(stop_pct_now) * mult)
+    if abs(stop_pct_now - stop_pct_prev) / stop_pct_prev &gt; 0.5:
+        adaptive = max(adaptive, min_floor)   # regime jump: don't trust the ratio
+    return min(adaptive, max_floor)           # hard ceiling regardless
+</code></pre>
+
+<p><strong>A hard ceiling.</strong> The adaptive formula has no upper bound. A strategy with a 10% stop yields a 20% force-close threshold, which for most instruments is not risk management, it's capitulation. Cap it. The <code>max_floor</code> argument above enforces a ceiling that no adaptive value can exceed. The exact number depends on the instrument's typical drawdown distribution, but it should exist and it should be hardcoded, because its purpose is to override the adaptive logic when the adaptive logic produces something absurd.</p>
+<p><strong>Gap and liquidity events.</strong> The floor is evaluated on observed prices. If an instrument gaps through the threshold overnight, the force-close executes at a worse price than the threshold. That's unavoidable, but it means the floor's <em>effective</em> loss can exceed its nominal value. In backtests, model the fill at the next available price, not at the threshold, or the floor will look more protective than it is.</p>
+<p><strong>Strategy stop wider than the ceiling.</strong> If <code>strategy_stop_pct * 2.0</code> exceeds <code>max_floor</code>, the ceiling wins and the strategy's stop is effectively overridden. That's the correct outcome: the strategy has asked for more risk than the account's policy allows, and the policy should win. Log these cases — they usually mean the strategy is mis-parameterised for that instrument, not that the floor is too tight.</p>
+<h2 id="the-design-principle">The design principle</h2>
+<p>The floor exists to catch what the strategy's own stop missed: gaps, stale stops, broker rejects, logic errors. It should be the <em>outer</em> layer of defence, not the first line. Deriving it from <code>strategy_stop_pct</code> keeps it in the right place — wide enough that the strategy's exit logic runs first, tight enough that a runaway loss gets cut before it compounds. The hard floor and the hard ceiling bracket the adaptive value so that bad inputs can't push it into useless territory. Everything between those brackets is the strategy's own risk definition, scaled by a constant.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">stop loss</span><span class="tag-badge">adaptive threshold</span><span class="tag-badge">volatility</span><span class="tag-badge">risk management</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
