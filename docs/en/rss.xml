@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Adaptive Stop-Loss Thresholds Instead of Hardcoded Percentages</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/34.html</link>
+            <description>A fixed -3% stop does not mean the same thing on every instrument....</description>
+            <pubDate>2026-11-01</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Partial Take-Profit: Bank Half at 3%, Let the Rest Run</title>
             <link>https://www.hkcode.dpdns.org/en/posts/33.html</link>
             <description>The Problem With a Single Take-Profit A fixed take-profit forces a binary choice. Set it tight and you cut winners that would have kept running....</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/15.html</link>
             <description>Your alert formatter is probably fine. The problem is that nobody calls it. The Symptom A user reports that instant push notifications stopped working....</description>
             <pubDate>2026-10-12</pubDate>
-            <category>Notifications</category>
-        </item>
-        <item>
-            <title>Notification Deduplication: A Five-Minute Title Window</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/14.html</link>
-            <description>Alerts that fire twice for the same event are worse than alerts that never fire at all....</description>
-            <pubDate>2026-10-11</pubDate>
             <category>Notifications</category>
         </item>
     </channel>
