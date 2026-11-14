@@ -5,18 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>推送优先级设计：为什么MA信号推送要提前执行 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="推送优先级设计：为什么MA信号推送要提前执行
-
-问题背景
-
-我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。...">
+        <meta name="description" content="推送优先级设计：为什么MA信号推送要提前执行 问题背景 我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。最初的实现很&quot;自然&quot;——按业务逻辑顺序串行执行，最后统一推送所有通知。">
     <meta name="keywords" content="推送优先级,MA信号,架构设计,优化">
     <meta property="og:title" content="推送优先级设计：为什么MA信号推送要提前执行">
-    <meta property="og:description" content="推送优先级设计：为什么MA信号推送要提前执行
-
-问题背景
-
-我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。...">
+    <meta property="og:description" content="推送优先级设计：为什么MA信号推送要提前执行 问题背景 我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。最初的实现很&quot;自然&quot;——按业务逻辑顺序串行执行，最后统一推送所有通知。">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/46.html">
