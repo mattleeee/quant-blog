@@ -5,22 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>一次API拉全市场行情：批量持仓估值的工程优化 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="一次API拉全市场行情：批量持仓估值的工程优化
-
-给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
-
-
-
-逻辑没问题，但工程上很糟。...">
+        <meta name="description" content="一次API拉全市场行情：批量持仓估值的工程优化 给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口： 逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个">
     <meta name="keywords" content="批量估值,行情API,性能优化,限频">
     <meta property="og:title" content="一次API拉全市场行情：批量持仓估值的工程优化">
-    <meta property="og:description" content="一次API拉全市场行情：批量持仓估值的工程优化
-
-给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
-
-
-
-逻辑没问题，但工程上很糟。...">
+    <meta property="og:description" content="一次API拉全市场行情：批量持仓估值的工程优化 给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口： 逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/59.html">
