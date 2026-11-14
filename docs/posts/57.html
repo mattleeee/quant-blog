@@ -5,14 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>幂等部署设计：可重复执行的更新脚本 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="幂等部署设计：可重复执行的更新脚本
-
-部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。...">
+        <meta name="description" content="幂等部署设计：可重复执行的更新脚本 部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。此时运维的第一反应是重跑脚本——如果脚本不可重入，重跑轻">
     <meta name="keywords" content="幂等,部署脚本,可重入,补丁">
     <meta property="og:title" content="幂等部署设计：可重复执行的更新脚本">
-    <meta property="og:description" content="幂等部署设计：可重复执行的更新脚本
-
-部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。...">
+    <meta property="og:description" content="幂等部署设计：可重复执行的更新脚本 部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。此时运维的第一反应是重跑脚本——如果脚本不可重入，重跑轻">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/57.html">
