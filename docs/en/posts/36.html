@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reading Paper-Trading Statistics: Win Rate, Profit Factor and Expectancy - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why the Monthly Review Is the Only Review That Matters A paper-trading log accumulates trades faster than anyone reviews...">
+    <meta name="keywords" content="expectancy,profit factor,win rate,monthly review,trade journal">
+    <meta property="og:title" content="Reading Paper-Trading Statistics: Win Rate, Profit Factor and Expectancy">
+    <meta property="og:description" content="Why the Monthly Review Is the Only Review That Matters A paper-trading log accumulates trades faster than anyone reviews...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/36.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Reading Paper-Trading Statistics: Win Rate, Profit Factor and Expectancy</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-03</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A paper-trading log accumulates trades faster than anyone reviews them. By the end of a month you have a <code>trades.json</code> with a few hundred entries and a vague feeling that "it's working." That feeling is not a statistic. The monthly review exists to replace it with a table of numbers that can be wrong in specific, correctable ways.</p>
+<p>This post covers the exact formulas for the core metrics, why they disagree with each other, how fees and funding quietly rewrite the story, and a Python function that turns a raw trade log into a monthly table you can push to WeChat.</p>
+<h2 id="the-trade-record">The Trade Record</h2>
+<p>Everything downstream depends on the shape of the input. A trade needs, at minimum:</p>
+<pre class="codehilite"><code class="language-python">{
+    &quot;id&quot;: &quot;t_20240312_004&quot;,
+    &quot;ts_open&quot;: &quot;2024-03-12T09:14:00Z&quot;,
+    &quot;ts_close&quot;: &quot;2024-03-12T15:41:00Z&quot;,
+    &quot;strategy&quot;: &quot;mom_breakout&quot;,
+    &quot;signal&quot;: &quot;range_break&quot;,
+    &quot;side&quot;: &quot;long&quot;,
+    &quot;qty&quot;: 0.35,
+    &quot;entry&quot;: 41250.0,
+    &quot;exit&quot;: 41810.0,
+    &quot;fee&quot;: 4.12,        # taker/maker fees, both legs, in quote currency
+    &quot;funding&quot;: -1.30,   # net funding paid (negative) or received (positive)
+    &quot;pnl_gross&quot;: 196.0, # (exit - entry) * qty * direction
+    &quot;pnl_net&quot;: 192.58   # pnl_gross - fee + funding
+}
+</code></pre>
+
+<p>Two rules matter here. First, <code>pnl_net</code> must be computed at write time and stored, not recomputed later from <code>entry</code>/<code>exit</code> — exchange fee tiers and funding schedules change, and you want the number that was true when the trade closed. Second, <code>funding</code> is signed: paid is negative, received is positive. Mixing the sign convention is the single most common source of a "profitable" paper account that isn't.</p>
+<h2 id="the-core-formulas">The Core Formulas</h2>
+<p>Given a list of closed trades, define winners as trades with <code>pnl_net &gt; 0</code> and losers as <code>pnl_net &lt; 0</code>. Trades with exactly zero net PnL are excluded from win-rate denominators — they're neither wins nor losses, and counting them as losses flatters nothing and distorts everything.</p>
+<ul>
+<li><strong>Trade count</strong>: <code>N = len(trades)</code></li>
+<li><strong>Win rate</strong>: <code>W / (W + L)</code> where <code>W</code> and <code>L</code> are counts of winners and losers.</li>
+<li><strong>Average win</strong>: <code>mean(pnl_net for winners)</code></li>
+<li><strong>Average loss</strong>: <code>mean(pnl_net for losers)</code> — this is negative; report it as a negative number, not an absolute value, to avoid sign confusion downstream.</li>
+<li><strong>Expectancy (EV per trade)</strong>: <code>mean(pnl_net for all trades)</code>. Equivalently <code>win_rate * avg_win + loss_rate * avg_loss</code>.</li>
+<li><strong>Profit factor</strong>: <code>sum(pnl_net for winners) / abs(sum(pnl_net for losers))</code></li>
+<li><strong>Max drawdown</strong>: computed on the cumulative net PnL curve, <code>max(peak - equity)</code> over time.</li>
+<li><strong>Longest losing streak</strong>: the longest consecutive run of <code>pnl_net &lt; 0</code> in close-time order.</li>
+</ul>
+<pre class="codehilite"><code class="language-python">import statistics as st
+
+def core_metrics(trades):
+    if not trades:
+        return {}
+    pnls = [t[&quot;pnl_net&quot;] for t in trades]
+    wins = [p for p in pnls if p &gt; 0]
+    losses = [p for p in pnls if p &lt; 0]
+
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+
+    equity, peak, max_dd = 0.0, 0.0, 0.0
+    streak = longest = 0
+    for p in pnls:
+        equity += p
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+        streak = streak + 1 if p &lt; 0 else 0
+        longest = max(longest, streak)
+
+    return {
+        &quot;n&quot;: len(pnls),
+        &quot;win_rate&quot;: len(wins) / (len(wins) + len(losses)) if wins or losses else 0.0,
+        &quot;avg_win&quot;: st.mean(wins) if wins else 0.0,
+        &quot;avg_loss&quot;: st.mean(losses) if losses else 0.0,
+        &quot;expectancy&quot;: st.mean(pnls),
+        &quot;profit_factor&quot;: gross_win / gross_loss if gross_loss else float(&quot;inf&quot;),
+        &quot;max_drawdown&quot;: max_dd,
+        &quot;longest_loss_streak&quot;: longest,
+    }
+</code></pre>
+
+<p>Note that drawdown here is in quote currency, not percent. Percent drawdown requires an account equity baseline, which a trade log alone doesn't give you. If you track a starting balance, divide by the running peak equity instead — but be explicit about which one you're reporting, because a 400-unit drawdown means very different things on a 2,000 and a 20,000 account.</p>
+<h2 id="why-win-rate-expectancy-and-profit-factor-disagree">Why Win Rate, Expectancy and Profit Factor Disagree</h2>
+<p>These three numbers answer different questions, and a system can look good on one while being bad on another.</p>
+<p><strong>High win rate, negative expectancy.</strong> A strategy that wins 80% of the time but loses 5x as much on the losers has positive win rate and negative EV. Expectancy catches this; win rate hides it.</p>
+<p><strong>Profit factor and expectancy can point in opposite directions across sample sizes.</strong> Expectancy is per trade, so it scales with trade count in aggregate but stays comparable between strategies with different frequencies. Profit factor is a ratio of sums, so a low-frequency strategy with one huge winner can post a profit factor of 3.0 on ten trades while its per-trade expectancy is mediocre and its variance is enormous. When comparing strategies, read expectancy for "is this worth doing per trade" and profit factor for "how much cushion do the winners give the losers." A profit factor below 1.0 with positive expectancy is possible only when fees dominate — which is a signal that something in the cost model is wrong.</p>
+<p><strong>The honest combination</strong> is expectancy &gt; 0, profit factor comfortably above 1.0 (1.2–1.5 is a reasonable working range for intraday), and a max drawdown you can survive. Any single one in isolation is a vanity metric.</p>
+<h2 id="fees-and-funding-mark-them-or-lie-to-yourself">Fees and Funding: Mark Them or Lie to Yourself</h2>
+<p>The most common paper-trading failure is computing PnL from entry and exit prices only. On a strategy with a 0.3% average edge per trade and 0.08% round-trip taker fees, fees eat over a quarter of the edge. Add funding on a position held overnight and a marginal strategy flips negative.</p>
+<p>Two practices keep this honest:</p>
+<ol>
+<li><strong>Store gross and net separately.</strong> Then run the review on net. Keep gross around only to measure cost drag: <code>total_fees / gross_win</code> tells you what fraction of your winners you're handing to the exchange.</li>
+<li><strong>Attribute funding per trade.</strong> Funding is charged at discrete timestamps; if a trade spans several funding windows, sum the actual charges, don't estimate from average rates.</li>
+</ol>
+<pre class="codehilite"><code class="language-python">def cost_drag(trades):
+    gross = sum(t[&quot;pnl_gross&quot;] for t in trades)
+    fees = sum(t[&quot;fee&quot;] for t in trades)
+    funding = sum(-t[&quot;funding&quot;] for t in trades)  # cost is positive
+    return {
+        &quot;gross_pnl&quot;: gross,
+        &quot;fees&quot;: fees,
+        &quot;funding_cost&quot;: funding,
+        &quot;net_pnl&quot;: gross - fees - funding,
+        &quot;fee_share_of_gross&quot;: fees / gross if gross &gt; 0 else None,
+    }
+</code></pre>
+
+<p>If <code>fee_share_of_gross</code> is above roughly 0.3 for an intraday system, the review should say so explicitly. That number is usually more actionable than the win rate.</p>
+<h2 id="breaking-down-per-strategy-and-per-signal">Breaking Down per Strategy and per Signal</h2>
+<p>Aggregate numbers hide which component is carrying the account and which one is bleeding. The same metrics computed per <code>strategy</code> and per <code>signal</code> are the actual output of the review.</p>
+<pre class="codehilite"><code class="language-python">from collections import defaultdict
+
+def group_metrics(trades, key):
+    buckets = defaultdict(list)
+    for t in trades:
+        buckets[t[key]].append(t)
+    return {k: core_metrics(v) for k, v in buckets.items()}
+</code></pre>
+
+<p>Read the per-strategy table with sample size in view. A strategy with 12 trades and a 1.9 profit factor is noise; a strategy with 180 trades and a 1.1 profit factor is a real, thin edge. Require a minimum count (30 is a common floor) before drawing conclusions, and flag anything below it as "insufficient sample" in the output rather than ranking it.</p>
+<h2 id="the-monthly-table">The Monthly Table</h2>
+<p>The review itself is a filter by close timestamp, then the metrics, then a formatted table.</p>
+<pre class="codehilite"><code class="language-python">from datetime import datetime, timezone
+
+def monthly_review(trades, year, month):
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=timezone.utc)
+    window = [
+        t for t in trades
+        if start &lt;= datetime.fromisoformat(t[&quot;ts_close&quot;].replace(&quot;Z&quot;, &quot;+00:00&quot;)) &lt; end
+    ]
+    window.sort(key=lambda t: t[&quot;ts_close&quot;])
+
+    return {
+        &quot;period&quot;: f&quot;{year}-{month:02d}&quot;,
+        &quot;overall&quot;: core_metrics(window),
+        &quot;by_strategy&quot;: group_metrics(window, &quot;strategy&quot;),
+        &quot;by_signal&quot;: group_metrics(window, &quot;signal&quot;),
+        &quot;costs&quot;: cost_drag(window),
+    }
+</code></pre>
+
+<h2 id="pushing-to-wechat">Pushing to WeChat</h2>
+<p>WeChat Work (企业微信) group bots accept a JSON POST with a <code>markdown</code> content field. Format the table as markdown text and send it.</p>
+<pre class="codehilite"><code class="language-python">import json, urllib.request
+
+def render_markdown(review):
+    o = review[&quot;overall&quot;]
+    c = review[&quot;costs&quot;]
+    lines = [
+        f&quot;**Paper Review {review['period']}**&quot;,
+        f&quot;Trades: {o['n']} | Win rate: {o['win_rate']:.1%}&quot;,
+        f&quot;Avg win: {o['avg_win']:.2f} | Avg loss: {o['avg_loss']:.2f}&quot;,
+        f&quot;Expectancy: {o['expectancy']:.2f}/trade | PF: {o['profit_factor']:.2f}&quot;,
+        f&quot;Max DD: {o['max_drawdown']:.2f} | Longest loss streak: {o['longest_loss_streak']}&quot;,
+        f&quot;Fees: {c['fees']:.2f} | Funding: {c['funding_cost']:.2f}&quot;,
+        &quot;&quot;,
+        &quot;**By strategy**&quot;,
+    ]
+    for name, m in review[&quot;by_strategy&quot;].items():
+        flag = &quot;&quot; if m[&quot;n&quot;] &gt;= 30 else &quot; (low n)&quot;
+        lines.append(
+            f&quot;- {name}: n={m['n']}{flag} EV={m['expectancy']:.2f} &quot;
+            f&quot;PF={m['profit_factor']:.2f} WR={m['win_rate']:.1%}&quot;
+        )
+    return &quot;\n&quot;.join(lines)
+
+def push_wechat(webhook_url, content):
+    payload = json.dumps({&quot;msgtype&quot;: &quot;markdown&quot;, &quot;markdown&quot;: {&quot;content&quot;: content}}).encode()
+    req = urllib.request.Request(
+        webhook_url, data=payload, headers={&quot;Content-Type&quot;: &quot;application/json&quot;}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read().decode()
+</code></pre>
+
+<p>Wire it to a monthly cron job, load <code>trades.json</code>, run <code>monthly_review</code>, render, push. The whole pipeline is under a hundred lines and runs in a second.</p>
+<h2 id="what-to-actually-do-with-the-table">What to Actually Do With the Table</h2>
+<p>The review is not a scoreboard; it's a triage list. Sort by expectancy per strategy. Anything with a negative expectancy and a sample of 30+ trades is a candidate for shutdown or a parameter change. Anything with a positive expectancy but a fee share above 0.3 goes to the execution side — maker orders, wider targets — before the signal side. Anything below 30 trades gets more data, not more tuning. The longest losing streak tells you what the equity curve will feel like; if it's longer than your patience, the system is right and the sizing is wrong.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-03 08:46:50</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ESPORTS</td>
+<td>庄家做空</td>
+<td>$0.0147</td>
+<td>$0.0139</td>
+<td>$0.0153</td>
+<td>1:1.6</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">expectancy</span><span class="tag-badge">profit factor</span><span class="tag-badge">win rate</span><span class="tag-badge">monthly review</span><span class="tag-badge">trade journal</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
