@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Lookahead Bias That Faked a +1702% Backtest - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A one-line timing bug in an EMA-crossover backtester turned a losing strategy into a +1702% equity curve with a Deflated...">
+    <meta name="keywords" content="backtesting,lookahead bias,EMA crossover,signal timing">
+    <meta property="og:title" content="The Lookahead Bias That Faked a +1702% Backtest">
+    <meta property="og:description" content="A one-line timing bug in an EMA-crossover backtester turned a losing strategy into a +1702% equity curve with a Deflated...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/101.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>The Lookahead Bias That Faked a +1702% Backtest</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-14</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A one-line timing bug in an EMA-crossover backtester turned a losing strategy into a +1702% equity curve with a Deflated Sharpe Ratio of 1.000 and p = 0.0000. The fix did not touch the signal logic, the universe, or the costs. It moved one fill by one bar. The same strategy then returned -50.7% with t = -2.93 — a significantly negative expectation. This is a postmortem of how that happened, why code review missed it, and what caught it.</p>
+<h2 id="the-strategy-and-the-bug">The Strategy and the Bug</h2>
+<p>The engine is a standard dual-direction EMA crossover on 4h candles. Long when the fast EMA crosses above the slow EMA, short on the reverse. Signals are computed from closes because EMAs are computed from closes. Fills were modeled at the open of the bar.</p>
+<p>Those two facts are individually correct and jointly catastrophic. Here is the wrong version, reduced to its essentials:</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+def backtest_wrong(df: pd.DataFrame, fast: int = 20, slow: int = 50):
+    df = df.copy()
+    df[&quot;ema_f&quot;] = df[&quot;close&quot;].ewm(span=fast, adjust=False).mean()
+    df[&quot;ema_s&quot;] = df[&quot;close&quot;].ewm(span=slow, adjust=False).mean()
+
+    # Signal state for bar i, computed from close[i]
+    df[&quot;long_sig&quot;]  = (df[&quot;ema_f&quot;] &gt; df[&quot;ema_s&quot;])
+    df[&quot;short_sig&quot;] = (df[&quot;ema_f&quot;] &lt; df[&quot;ema_s&quot;])
+
+    # Cross detected on bar i ...
+    df[&quot;cross_up&quot;]   = df[&quot;long_sig&quot;]  &amp; ~df[&quot;long_sig&quot;].shift(1).fillna(False)
+    df[&quot;cross_down&quot;] = df[&quot;short_sig&quot;] &amp; ~df[&quot;short_sig&quot;].shift(1).fillna(False)
+
+    # ... and filled at the OPEN of the same bar i. This is the bug.
+    df[&quot;entry_long&quot;]  = df[&quot;cross_up&quot;]   * df[&quot;open&quot;]
+    df[&quot;entry_short&quot;] = df[&quot;cross_down&quot;] * df[&quot;open&quot;]
+    return df
+</code></pre>
+
+<p>The line that matters is <code>df["entry_long"] = df["cross_up"] * df["open"]</code>. <code>cross_up</code> at row <code>i</code> depends on <code>close[i]</code>. <code>open[i]</code> occurs four hours <em>before</em> <code>close[i]</code>. The backtest fills a trade at a price that was already history at the moment the signal existed. That is lookahead bias in its purest form: the fill timestamp precedes the information that justified the trade.</p>
+<h3 id="why-it-paid-so-well">Why It Paid So Well</h3>
+<p>Crossovers are not uniformly distributed across candle shapes. A fast EMA crossing a slow EMA requires a sustained move, and on 4h crypto candles those moves are disproportionately large green or red bodies. If you buy the open of the candle that produces the cross, you capture the entire open-to-close move of that candle for free. On a pool of volatile altcoins, where 4h bodies of several percent are routine, that donated move compounds into an absurd curve. The +1702% was not alpha. It was the sum of open-to-close returns on exactly the bars where the strategy "decided" to enter — bars it could not have decided on until they closed.</p>
+<p>Note also that the bug is directionally self-serving. Long entries harvest the up-body of a golden-cross candle; short entries harvest the down-body of a death-cross candle. The bias does not average out. It is systematically positive, which is why the Deflated Sharpe Ratio hit 1.000 and the p-value collapsed to 0.0000. A metric that corrects for multiple testing cannot correct for a fill that sees the future.</p>
+<h2 id="the-correct-version">The Correct Version</h2>
+<p>The fix is to separate <em>signal generation</em> from <em>execution</em> by one bar. A signal confirmed at the close of bar <code>i-1</code> is actionable at the open of bar <code>i</code>:</p>
+<pre class="codehilite"><code class="language-python">def backtest_right(df: pd.DataFrame, fast: int = 20, slow: int = 50):
+    df = df.copy()
+    df[&quot;ema_f&quot;] = df[&quot;close&quot;].ewm(span=fast, adjust=False).mean()
+    df[&quot;ema_s&quot;] = df[&quot;close&quot;].ewm(span=slow, adjust=False).mean()
+
+    df[&quot;long_sig&quot;]  = (df[&quot;ema_f&quot;] &gt; df[&quot;ema_s&quot;])
+    df[&quot;short_sig&quot;] = (df[&quot;ema_f&quot;] &lt; df[&quot;ema_s&quot;])
+
+    df[&quot;cross_up&quot;]   = df[&quot;long_sig&quot;]  &amp; ~df[&quot;long_sig&quot;].shift(1).fillna(False)
+    df[&quot;cross_down&quot;] = df[&quot;short_sig&quot;] &amp; ~df[&quot;short_sig&quot;].shift(1).fillna(False)
+
+    # Signal is only known at close[i]. Execute at open[i+1].
+    # Equivalent: shift the signal forward one bar, then fill at that bar's open.
+    df[&quot;exec_long&quot;]  = df[&quot;cross_up&quot;].shift(1).fillna(False)
+    df[&quot;exec_short&quot;] = df[&quot;cross_down&quot;].shift(1).fillna(False)
+
+    df[&quot;entry_long&quot;]  = df[&quot;exec_long&quot;]  * df[&quot;open&quot;]
+    df[&quot;entry_short&quot;] = df[&quot;exec_short&quot;] * df[&quot;open&quot;]
+    return df
+</code></pre>
+
+<p>Two implementation details are worth pinning down because they are where the bug hides in real codebases:</p>
+<ol>
+<li><strong>Shift the signal, not the price.</strong> Shifting the price (<code>df["open"].shift(1)</code>) is not equivalent and produces a different, also wrong, result. Shift the boolean decision.</li>
+<li><strong>Make the shift part of the execution contract, not the signal code.</strong> If the shift lives inside the strategy function, a future refactor can drop it silently. Put it at the boundary between signal and order:</li>
+</ol>
+<pre class="codehilite"><code class="language-python">def to_orders(signals: pd.DataFrame, bars: pd.DataFrame) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;Signals are timestamped at bar close. Orders execute next bar open.&quot;&quot;&quot;
+    orders = signals.shift(1)          # decision -&gt; next bar
+    orders[&quot;fill_price&quot;] = bars[&quot;open&quot;]
+    # Invariant: fill_time &gt; signal_time, always.
+    assert (orders.index &gt; signals.index).all()
+    return orders
+</code></pre>
+
+<p>The assertion is cheap and it is the whole defense. If <code>fill_time &lt;= signal_time</code> for any row, the backtest is not a backtest.</p>
+<h3 id="the-post-fix-numbers">The Post-Fix Numbers</h3>
+<p>With identical signal parameters, universe, and costs, and only the fill shifted by one bar:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Buggy fill</th>
+<th>Correct fill</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Total return</td>
+<td>+1702%</td>
+<td>-50.7%</td>
+</tr>
+<tr>
+<td>t-stat</td>
+<td>(inflated)</td>
+<td>-2.93</td>
+</tr>
+<tr>
+<td>DSR</td>
+<td>1.000</td>
+<td>(collapsed)</td>
+</tr>
+<tr>
+<td>p-value</td>
+<td>0.0000</td>
+<td>(not significant)</td>
+</tr>
+</tbody>
+</table>
+<p>The corrected t-stat of -2.93 is not noise. It is a statistically significant <em>negative</em> expectation, which is what you would expect from a crossover strategy paying transaction costs in a mean-reverting, high-volatility pool. The buggy version did not merely overstate a weak edge; it inverted the sign of a real, measurable absence of edge.</p>
+<h2 id="why-every-line-looked-correct-in-review">Why Every Line Looked Correct in Review</h2>
+<p>The bug survived review because each line, read alone, is defensible:</p>
+<ul>
+<li><strong>"EMA is computed from closes."</strong> True, and required.</li>
+<li><strong>"The crossover is detected when fast crosses slow."</strong> True.</li>
+<li><strong>"We enter at the open."</strong> True — the open is the first tradeable price after the signal.</li>
+<li><strong>"The index is aligned; no NaNs; no forward-fill leakage."</strong> Also true.</li>
+</ul>
+<p>The error is not in any line. It is in the <em>composition</em> of two lines whose timestamps disagree. Reviewers read code linearly and check each operation against its local contract; they rarely reconstruct the information timeline. <code>cross_up[i]</code> looks like a boolean and <code>open[i]</code> looks like a price, and nothing in either expression advertises that one is four hours in the future of the other.</p>
+<p>There is a second reason it passed: the buggy result was <em>plausible enough to want to believe</em>. A +1702% curve on an altcoin pool is not obviously impossible, so it did not trigger the instinct that a 10,000% curve would. Confirmation bias is a review tool that fails exactly when the bug is subtle.</p>
+<p>The generalizable lesson: unit tests on indicator values and signal booleans will never catch this class of bug, because every intermediate value is correct. You need a test on the <em>relationship between timestamps</em>.</p>
+<h2 id="the-signal-that-exposed-it">The Signal That Exposed It</h2>
+<p>The backtest was not caught by more backtesting. It was caught by a <strong>replay test against the live trading code</strong>.</p>
+<p>The live system consumes closed candles only — it cannot act on a bar until that bar is finalized. We fed the same historical window through the live signal-and-order path, recorded the timestamps of decisions and fills, and compared them to the backtest's. The two disagreed wildly: the backtest was entering on bars where the live code had not yet emitted a signal, and at prices the live code could never have received.</p>
+<p>That divergence is the diagnostic. A backtest and a live engine fed identical data must produce identical decisions with identical timestamps. Any mismatch is either a bug in one of them or a lookahead in the backtest. The replay test is worth more than any statistical robustness check because it tests the one thing statistics cannot: causality of information flow.</p>
+<pre class="codehilite"><code class="language-python">def replay_parity(backtest_orders: pd.DataFrame, live_orders: pd.DataFrame,
+                  tol_bars: int = 0) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;Compare decision timestamps between backtest and live engine.&quot;&quot;&quot;
+    bt = backtest_orders.set_index(&quot;signal_time&quot;)[&quot;side&quot;]
+    lv = live_orders.set_index(&quot;signal_time&quot;)[&quot;side&quot;]
+    joined = pd.concat({&quot;bt&quot;: bt, &quot;live&quot;: lv}, axis=1).dropna(how=&quot;all&quot;)
+    mismatches = joined[joined[&quot;bt&quot;] != joined[&quot;live&quot;]]
+    if len(mismatches):
+        raise AssertionError(
+            f&quot;{len(mismatches)} decision mismatches — check fill timing&quot;
+        )
+    return joined
+</code></pre>
+
+<p>Run this on every strategy before you trust a single return number. If the live path is the source of truth for timing, the backtest must be provably downstream of it.</p>
+<h2 id="defense-checklist">Defense Checklist</h2>
+<ul>
+<li><strong>A fill timestamp can never precede the information that justified the trade.</strong> This is the invariant. Encode it as an assertion, not a convention.</li>
+<li><strong>Shift signals, never prices.</strong> Execution lag belongs at the signal-to-order boundary.</li>
+<li><strong>Timestamp every decision at bar close and every fill at the next bar open.</strong> Store both columns and assert <code>fill_time &gt; signal_time</code> row by row.</li>
+<li><strong>Replay against live code on identical data.</strong> Decision timestamps must match exactly. This is the test that catches what review and unit tests miss.</li>
+<li><strong>Treat suspiciously good DSR and p-values as bug reports, not discoveries.</strong> A DSR of 1.000 on a crossover strategy is a reason to audit the fill logic, not to deploy.</li>
+<li><strong>Test the composition, not just the components.</strong> Indicators and booleans can all be correct while their timestamps are inconsistent.</li>
+</ul>
+<p>The +1702% was never a strategy result. It was the open-to-close return of the crossover bars, collected by a fill that arrived four hours before its own reason to exist.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">backtesting</span><span class="tag-badge">lookahead bias</span><span class="tag-badge">EMA crossover</span><span class="tag-badge">signal timing</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
