@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weak-Signal Blacklisting: Two-Month Windows and a 70% Win-Rate Gate - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Problem with &quot;Just Skip the Weak Ones&quot; Every signal generator eventually produces marginal setups....">
+    <meta name="keywords" content="weak signals,blacklist,win rate gate,rolling window,paper trading">
+    <meta property="og:title" content="Weak-Signal Blacklisting: Two-Month Windows and a 70% Win-Rate Gate">
+    <meta property="og:description" content="The Problem with &quot;Just Skip the Weak Ones&quot; Every signal generator eventually produces marginal setups....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/35.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Weak-Signal Blacklisting: Two-Month Windows and a 70% Win-Rate Gate</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-02</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Every signal generator eventually produces marginal setups. The breakout that barely clears the range, the mean-reversion entry where the z-score is 1.8 instead of 2.0, the momentum flip that fires on a thin bar. Traders eyeball these and skip them, but eyeballing doesn't scale and doesn't leave an audit trail. You need a rule: if a signal type can't clear a win-rate bar over a recent window, it goes on probation, and if it keeps failing, it gets blacklisted until it earns its way back.</p>
+<p>This post describes a small, self-contained implementation of that policy: a two-month rolling window per signal type, a 70% win-rate gate, and a three-strike blacklist. The interesting parts are the bookkeeping details — how you key the statistics, how you persist them safely, and what exactly you're blacklisting.</p>
+<h2 id="defining-a-signal-type-key">Defining a Signal Type Key</h2>
+<p>The whole system collapses if your aggregation key is wrong. A "signal type" is not the instrument, not the timestamp, and not the direction. It's the <em>rule identity</em>: the thing whose historical win rate you're actually trying to estimate.</p>
+<p>A good key is a stable, human-readable string composed of the components that define the rule:</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class SignalType:
+    family: str        # e.g. &quot;range_breakout&quot;
+    timeframe: str     # e.g. &quot;1h&quot;
+    variant: str       # e.g. &quot;atr_buffer_0.5&quot;
+
+    def key(self) -&gt; str:
+        return f&quot;{self.family}|{self.timeframe}|{self.variant}&quot;
+</code></pre>
+
+<p>Three rules for the key:</p>
+<ol>
+<li><strong>Include every parameter that can change the edge.</strong> If <code>atr_buffer_0.5</code> and <code>atr_buffer_1.0</code> behave differently, they're different signal types. Aggregating them hides a weak variant behind a strong one.</li>
+<li><strong>Exclude the instrument.</strong> The same breakout rule applied to ten instruments is still one signal type — you're testing the rule's edge, not its luck on one symbol. (More on this distinction below.)</li>
+<li><strong>Never derive the key from runtime state.</strong> No timestamps, no trade IDs, no randomly generated suffixes. If the key changes between runs, your history silently resets.</li>
+</ol>
+<p>If you version rules, put the version in the key: <code>range_breakout|1h|atr_buffer_0.5|v3</code>. A rule change is a new signal type with no history — which is exactly the conservative behavior you want.</p>
+<h2 id="rolling-window-bookkeeping">Rolling-Window Bookkeeping</h2>
+<p>You don't need a database for this. A JSON file per signal type, or one file with a dict keyed by signal type, is enough — as long as writes are atomic and the window is pruned on every update.</p>
+<p>Each record stores the outcome of one closed paper trade and the timestamp of its close:</p>
+<pre class="codehilite"><code class="language-python">import json
+import os
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+WINDOW_DAYS = 60          # ~two months
+WIN_RATE_GATE = 0.70      # required to stay tradeable
+MIN_SAMPLES = 10          # don't judge on 3 trades
+MAX_CONSECUTIVE_FAILURES = 3
+
+STORE_PATH = Path(&quot;signal_stats.json&quot;)
+
+def _atomic_write(path: Path, data: dict) -&gt; None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=&quot;.tmp&quot;)
+    try:
+        with os.fdopen(fd, &quot;w&quot;) as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)   # atomic on POSIX and Windows
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+def load_stats() -&gt; dict:
+    if not STORE_PATH.exists():
+        return {}
+    with STORE_PATH.open() as f:
+        return json.load(f)
+
+def save_stats(stats: dict) -&gt; None:
+    _atomic_write(STORE_PATH, stats)
+</code></pre>
+
+<p>The <code>os.replace</code> call is the atomicity guarantee: a crash mid-write leaves either the old file or the new one, never a truncated JSON blob. On Windows, <code>os.replace</code> overwrites the destination, which <code>os.rename</code> does not — that's why it's used here.</p>
+<p>Now the update path. Every time a paper trade closes, append it, prune anything older than the window, and recompute the gate:</p>
+<pre class="codehilite"><code class="language-python">def record_outcome(signal_key: str, won: bool, closed_at: datetime | None = None) -&gt; dict:
+    closed_at = closed_at or datetime.now(timezone.utc)
+    stats = load_stats()
+    entry = stats.setdefault(signal_key, {
+        &quot;trades&quot;: [],
+        &quot;consecutive_failures&quot;: 0,
+        &quot;blacklisted&quot;: False,
+    })
+
+    entry[&quot;trades&quot;].append({&quot;closed_at&quot;: closed_at.isoformat(), &quot;won&quot;: won})
+
+    cutoff = closed_at - timedelta(days=WINDOW_DAYS)
+    entry[&quot;trades&quot;] = [
+        t for t in entry[&quot;trades&quot;]
+        if datetime.fromisoformat(t[&quot;closed_at&quot;]) &gt;= cutoff
+    ]
+
+    trades = entry[&quot;trades&quot;]
+    n = len(trades)
+    wins = sum(t[&quot;won&quot;] for t in trades)
+    win_rate = wins / n if n else 0.0
+
+    if n &lt; MIN_SAMPLES:
+        entry[&quot;consecutive_failures&quot;] = 0
+        entry[&quot;blacklisted&quot;] = False
+    elif win_rate &gt;= WIN_RATE_GATE:
+        entry[&quot;consecutive_failures&quot;] = 0
+        entry[&quot;blacklisted&quot;] = False
+    else:
+        entry[&quot;consecutive_failures&quot;] += 1
+        if entry[&quot;consecutive_failures&quot;] &gt;= MAX_CONSECUTIVE_FAILURES:
+            entry[&quot;blacklisted&quot;] = True
+
+    save_stats(stats)
+    return entry
+</code></pre>
+
+<p>A few deliberate choices:</p>
+<ul>
+<li><strong>The failure counter increments per evaluation, not per trade.</strong> The gate is checked when a trade closes. Three consecutive <em>evaluations</em> below 70% (with enough samples) trigger the blacklist. This prevents a single bad stretch from flipping the switch instantly, while still reacting within a few closed trades.</li>
+<li><strong><code>MIN_SAMPLES</code> prevents premature judgment.</strong> A signal type with four paper trades and three wins isn't a 75% winner; it's noise. Until the sample is large enough, the counter resets and nothing gets blacklisted.</li>
+<li><strong>Pruning happens on write, not on read.</strong> Reads stay cheap and consistent; the file never grows unbounded.</li>
+</ul>
+<p>The gate check itself is trivial:</p>
+<pre class="codehilite"><code class="language-python">def is_tradeable(signal_key: str) -&gt; bool:
+    entry = load_stats().get(signal_key)
+    if entry is None:
+        return True  # no history: allow, but it's on probation by default
+    return not entry[&quot;blacklisted&quot;]
+</code></pre>
+
+<p>Note the default: an unknown signal type is tradeable. That's fine for paper trading, where you <em>want</em> new signal types to accumulate history. If you're routing live capital, invert the default and require explicit qualification.</p>
+<h2 id="blacklisting-a-signal-vs-blacklisting-an-instrument">Blacklisting a Signal vs. Blacklisting an Instrument</h2>
+<p>These are different mechanisms and conflating them causes real damage.</p>
+<p><strong>Blacklisting a signal type</strong> says: "This rule, in its current form, doesn't clear the bar." The rule stops generating tradeable entries everywhere. The underlying instrument is untouched.</p>
+<p><strong>Blacklisting an instrument</strong> says: "This symbol is untradeable right now" — because of liquidity, spread, a corporate action, or a data quality problem. The signal rule is untouched; it just can't fire on that symbol.</p>
+<p>Keep them in separate stores with separate lifecycles:</p>
+<pre class="codehilite"><code class="language-python">def is_tradeable(signal_key: str, instrument: str) -&gt; bool:
+    stats = load_stats()
+    if stats.get(signal_key, {}).get(&quot;blacklisted&quot;, False):
+        return False
+    instrument_flags = load_instrument_flags()
+    if instrument_flags.get(instrument, {}).get(&quot;blocked&quot;, False):
+        return False
+    return True
+</code></pre>
+
+<p>Why the separation matters: if you blacklist the <em>signal</em> because it performed poorly on one illiquid instrument, you'll wrongly shut down a rule that works fine elsewhere. Conversely, if you blacklist the <em>instrument</em> because one rule struggles on it, you'll block every other rule that trades it profitably. The statistics only mean something if the key matches the scope of the claim. A win rate is a property of a rule; liquidity is a property of a symbol. Don't mix them.</p>
+<h2 id="start-probation-on-paper-not-live-money">Start Probation on Paper, Not Live Money</h2>
+<p>The three-strike counter is a blunt instrument. It fires after a handful of bad evaluations and can fire on a signal type that was genuinely profitable last quarter but hit a regime shift. You do not want that discovery to happen with real positions.</p>
+<p>So the lifecycle is:</p>
+<ol>
+<li><strong>New signal type → paper trading.</strong> It accumulates outcomes in the rolling window. No capital at risk while the sample is small.</li>
+<li><strong>Paper history clears the gate → eligible for live routing.</strong> The gate decision uses the same window and the same 70% threshold.</li>
+<li><strong>Live performance degrades → back to paper.</strong> When the live win rate over the window drops below the gate for three consecutive evaluations, the signal type is blacklisted and demoted. It re-qualifies only by rebuilding a paper record that clears the gate again.</li>
+</ol>
+<p>The re-qualification step deserves a note. When a blacklisted signal type re-enters paper trading, you have a choice: keep its old trades in the window, or reset the history. Resetting is usually correct — the old trades are what got it blacklisted, and leaving them in the window means the win rate can't recover until they age out (up to two months of dead time). A clean reset gives the rule a fair fresh evaluation:</p>
+<pre class="codehilite"><code class="language-python">def requalify(signal_key: str) -&gt; None:
+    stats = load_stats()
+    entry = stats.get(signal_key)
+    if entry is None:
+        return
+    entry[&quot;trades&quot;] = []
+    entry[&quot;consecutive_failures&quot;] = 0
+    entry[&quot;blacklisted&quot;] = False
+    save_stats(stats)
+</code></pre>
+
+<p>Call this only when you deliberately move a signal type back to paper. Don't automate it — a human should confirm that the rule was actually revised or that the market conditions that caused the failure have plausibly changed.</p>
+<h2 id="operational-notes">Operational Notes</h2>
+<ul>
+<li><strong>Timezones.</strong> Store all timestamps in UTC and parse with <code>datetime.fromisoformat</code>. Mixing local and UTC timestamps in a rolling window produces subtly wrong prunes that are painful to debug.</li>
+<li><strong>Concurrency.</strong> If multiple processes write the same JSON file, <code>os.replace</code> prevents corruption but not lost updates. For anything beyond a single trading loop, wrap the read-modify-write in a file lock (<code>msvcrt.locking</code> on Windows, <code>fcntl.flock</code> on POSIX) or move to SQLite.</li>
+<li><strong>Audit trail.</strong> Keep a separate append-only log of every outcome and every blacklist transition. The JSON store is working state; the log is what lets you reconstruct why a signal type was shut off six weeks ago.</li>
+<li><strong>Window length.</strong> Sixty days is a starting point, not a law. Shorter windows react faster but blacklist on noise; longer windows are stable but slow to catch decay. The two-month default balances the two, and the gate threshold should be tuned against your own paper results, not copied blindly.</li>
+</ul>
+<p>The design is intentionally boring: one key, one window, one threshold, three strikes. Boring bookkeeping is what makes the gate trustworthy — and a gate you don't trust is just a number in a config file.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-02 08:46:42</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AIN</td>
+<td>高质量标的做多</td>
+<td>$0.2872</td>
+<td>$0.3061</td>
+<td>$0.2777</td>
+<td>1:2.0</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">weak signals</span><span class="tag-badge">blacklist</span><span class="tag-badge">win rate gate</span><span class="tag-badge">rolling window</span><span class="tag-badge">paper trading</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
