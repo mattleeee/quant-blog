@@ -7,213 +7,143 @@
         <language>zh-CN</language>
         
         <item>
+            <title>一个前视偏差bug，让我的回测从+1702%变成-50.7%</title>
+            <link>https://www.hkcode.dpdns.org/posts/101.html</link>
+            <description>先说结论：我的EMA均线交叉双向策略回测跑出来 +1702.1%、DSR=1.000、p=0.0000，看起来是一个可以直接上实盘的&quot;圣杯&quot;。修复一个时序bug之后，同一份代码、同一个参数、同一个币池，变成 50.7%、DSR=0.000、t=2.93。...</description>
+            <pubDate>2026-11-14</pubDate>
+            <category>量化回测</category>
+        </item>
+        <item>
             <title>Dev.to API发布实战：tag规则、限流与幂等设计</title>
             <link>https://www.hkcode.dpdns.org/posts/60.html</link>
-            <description>Dev.to API发布实战：tag规则、限流与幂等设计
-
-用脚本把文章自动同步到 Dev.to，听起来是个十分钟的活：拿 API key，POST 一个 /articles 就完事。实际跑起来会踩三个坑：tag 里的连字符直接 422、发布频率高了 429 要等 300 秒、重跑脚本时文章发重了。...</description>
+            <description>Dev.to API发布实战：tag规则、限流与幂等设计 用脚本把文章自动同步到 Dev.to，听起来是个十分钟的活：拿 API key，POST 一个 /articles 就完事。实际跑起来会踩三个坑：tag 里的连字符直接 422、发布频率高了 429 要等 300 秒、重跑脚本时文章发重了。 这篇文章把这三个坑和...</description>
             <pubDate>2026-10-30</pubDate>
             <category>博客运营</category>
         </item>
         <item>
             <title>一次API拉全市场行情：批量持仓估值的工程优化</title>
             <link>https://www.hkcode.dpdns.org/posts/59.html</link>
-            <description>一次API拉全市场行情：批量持仓估值的工程优化
-
-给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口：
-
-
-
-逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个请求都是一次独立的限频计数。...</description>
+            <description>一次API拉全市场行情：批量持仓估值的工程优化 给几十个持仓算实时浮亏，最直观的写法是循环遍历持仓，每个 symbol 调一次行情接口： 逻辑没问题，但工程上很糟。几十个持仓就是几十次 HTTP 请求，串行跑下来几百毫秒到几秒不等，而且每个请求都是一次独立的限频计数。仓位再多一点，或者估值频率提高到每秒一次，很快就会被...</description>
             <pubDate>2026-10-29</pubDate>
             <category>API实战</category>
         </item>
         <item>
             <title>反事实重放回测：如果当时有熔断会怎样</title>
             <link>https://www.hkcode.dpdns.org/posts/58.html</link>
-            <description>反事实重放回测：如果当时有熔断会怎样
-
-问题的本质
-
-假设你有一套跑了两年的实盘策略，交易记录完整。现在你想知道：如果当初就加上&quot;单日亏损超过2%停止开新仓&quot;这条规则，历史曲线会怎么变？
-
-普通回测回答不了这个问题。因为你的历史交易是在旧规则下发生的——每笔开仓的时间、价格、仓位，都是旧规则的产物。...</description>
+            <description>反事实重放回测：如果当时有熔断会怎样 问题的本质 假设你有一套跑了两年的实盘策略，交易记录完整。现在你想知道：如果当初就加上&quot;单日亏损超过2%停止开新仓&quot;这条规则，历史曲线会怎么变？ 普通回测回答不了这个问题。因为你的历史交易是在旧规则下发生的——每笔开仓的时间、价格、仓位，都是旧规则的产物。你重新跑一遍回测，用的是历...</description>
             <pubDate>2026-10-28</pubDate>
             <category>量化回测</category>
         </item>
         <item>
             <title>幂等部署设计：可重复执行的更新脚本</title>
             <link>https://www.hkcode.dpdns.org/posts/57.html</link>
-            <description>幂等部署设计：可重复执行的更新脚本
-
-部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。...</description>
+            <description>幂等部署设计：可重复执行的更新脚本 部署脚本最怕的场景不是失败，而是“失败了一半”。远程打补丁时，网络抖动、SSH 超时、磁盘写满、进程被 kill，任何一步都可能让脚本停在中间状态。此时运维的第一反应是重跑脚本——如果脚本不可重入，重跑轻则报错误判，重则把已完成的步骤再执行一遍，造成配置重复、数据覆盖甚至服务不可用。...</description>
             <pubDate>2026-10-27</pubDate>
             <category>工程实践</category>
         </item>
         <item>
             <title>从xcopy迁移到robocopy：中文路径下的复制可靠性</title>
             <link>https://www.hkcode.dpdns.org/posts/56.html</link>
-            <description>从xcopy迁移到robocopy：中文路径下的复制可靠性
-
-一、故障场景：静默失败的xcopy
-
-一个定时同步脚本，负责把量化策略的日志目录从 D:\策略日志\ 备份到 E:\备份\。...</description>
+            <description>从xcopy迁移到robocopy：中文路径下的复制可靠性 一、故障场景：静默失败的xcopy 一个定时同步脚本，负责把量化策略的日志目录从 D:\策略日志\ 备份到 E:\备份\。脚本用 xcopy 实现，排除文件走 /EXCLUDE： 某天发现备份目录空了一整周，日志文件一个没复制，但脚本退出码是 0，监控没报警。...</description>
             <pubDate>2026-10-26</pubDate>
             <category>Windows自动化</category>
         </item>
         <item>
             <title>Gate.io API的分页陷阱：from+to+limit不能共存</title>
             <link>https://www.hkcode.dpdns.org/posts/55.html</link>
-            <description>Gate.io API的分页陷阱：from+to+limit不能共存
-
-拉历史K线这件事，看起来是最简单的活。一个循环，翻页，拼起来，完事。...</description>
+            <description>Gate.io API的分页陷阱：from+to+limit不能共存 拉历史K线这件事，看起来是最简单的活。一个循环，翻页，拼起来，完事。但Gate.io期货行情API在这件事上埋了个坑：from、to、limit 三个参数只要同时出现，接口直接甩你一个400，而且错误信息里一个字都不提参数冲突，只告诉你请求有问题。你...</description>
             <pubDate>2026-10-25</pubDate>
             <category>API实战</category>
         </item>
         <item>
             <title>回撤断路器的盲区：已实现盈亏遮住的眼睛</title>
             <link>https://www.hkcode.dpdns.org/posts/54.html</link>
-            <description>回撤断路器的盲区：已实现盈亏遮住的眼睛
-
-一、盲区的本质
-
-大多数回撤保护模块的设计逻辑是这样的：
-
-
-
-这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。但它有一个根本性的盲区：所有判断都基于 on_trade_closed，也就是已实现盈亏（realized PnL）。...</description>
+            <description>回撤断路器的盲区：已实现盈亏遮住的眼睛 一、盲区的本质 大多数回撤保护模块的设计逻辑是这样的： 这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。但它有一个根本性的盲区：所有判断都基于 on_trade_closed，也就是已实现盈亏（realized PnL）。 持仓中的浮亏（unrealized loss）在这...</description>
             <pubDate>2026-10-24</pubDate>
             <category>量化风控</category>
         </item>
         <item>
             <title>夏普率自相关校准：Lo修正因子实战</title>
             <link>https://www.hkcode.dpdns.org/posts/53.html</link>
-            <description>夏普率自相关校准：Lo修正因子实战
-
-回测报告上写着夏普率 2.1，年化波动 12%，样本 3 年，t 统计量看起来显著。但如果收益序列存在正自相关，这个&quot;显著&quot;很可能是假的。
-
-这不是理论上的吹毛求疵。...</description>
+            <description>夏普率自相关校准：Lo修正因子实战 回测报告上写着夏普率 2.1，年化波动 12%，样本 3 年，t 统计量看起来显著。但如果收益序列存在正自相关，这个&quot;显著&quot;很可能是假的。 这不是理论上的吹毛求疵。当收益序列的滞后一阶自相关系数 ρ = 0.2 时，按独立同分布（i.i.d.）假设做的显著性检验，名义 5% 的误报率...</description>
             <pubDate>2026-10-23</pubDate>
             <category>量化风控</category>
         </item>
         <item>
             <title>蒙特卡洛置换检验：给交易策略做一次压力审计</title>
             <link>https://www.hkcode.dpdns.org/posts/52.html</link>
-            <description>蒙特卡洛置换检验：给交易策略做一次压力审计
-
-回测报告上那串漂亮的净值曲线，往往藏着一个被忽略的事实：总盈亏与交易顺序无关，但最大回撤和爆仓概率完全由顺序决定。
-
-同一个盈亏序列，先赚后亏和先亏后赚，最终收益一模一样，可中间的最大回撤（Maximum Drawdown, MDD）能差出好几倍。...</description>
+            <description>蒙特卡洛置换检验：给交易策略做一次压力审计 回测报告上那串漂亮的净值曲线，往往藏着一个被忽略的事实：总盈亏与交易顺序无关，但最大回撤和爆仓概率完全由顺序决定。 同一个盈亏序列，先赚后亏和先亏后赚，最终收益一模一样，可中间的最大回撤（Maximum Drawdown, MDD）能差出好几倍。更极端的情况：一个总盈利的策略...</description>
             <pubDate>2026-10-22</pubDate>
             <category>量化风控</category>
         </item>
         <item>
             <title>池级浮亏熔断：用反事实回测决定风控参数</title>
             <link>https://www.hkcode.dpdns.org/posts/51.html</link>
-            <description>池级浮亏熔断：用反事实回测决定风控参数
-
-问题：单笔止损管不住系统性下跌
-
-多策略并行跑模拟盘时，一个反复出现的情况是：市场系统性下跌，池子里所有策略的仓位同步浮亏。每个策略自己的单笔止损逻辑都在正常工作——每笔亏损都没超过设定值——但账户整体的未实现浮亏在快速累积。...</description>
+            <description>池级浮亏熔断：用反事实回测决定风控参数 问题：单笔止损管不住系统性下跌 多策略并行跑模拟盘时，一个反复出现的情况是：市场系统性下跌，池子里所有策略的仓位同步浮亏。每个策略自己的单笔止损逻辑都在正常工作——每笔亏损都没超过设定值——但账户整体的未实现浮亏在快速累积。 原因很简单：单笔止损是局部风控，它只管一笔仓位的亏损上...</description>
             <pubDate>2026-10-21</pubDate>
             <category>量化风控</category>
         </item>
         <item>
             <title>从零搭建量化交易系统：50篇文章的总结与回顾</title>
             <link>https://www.hkcode.dpdns.org/posts/50.html</link>
-            <description>从零搭建量化交易系统：50篇文章的总结与回顾
-
-50篇文章写下来，这套量化交易系统从一行pip install开始，到现在跑在实盘环境里稳定运行了几个月。这一篇做个系统性回顾，把架构全貌、模块设计、踩过的坑和后续方向一次讲清楚。代码细节前面都展开过，这里只提炼方法论。...</description>
+            <description>从零搭建量化交易系统：50篇文章的总结与回顾 50篇文章写下来，这套量化交易系统从一行pip install开始，到现在跑在实盘环境里稳定运行了几个月。这一篇做个系统性回顾，把架构全貌、模块设计、踩过的坑和后续方向一次讲清楚。代码细节前面都展开过，这里只提炼方法论。 一、系统架构全貌 整套系统最终收敛成六个核心层，层与...</description>
             <pubDate>2026-10-20</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>自动化系统监控面板：用Python搭建简单的健康看板</title>
             <link>https://www.hkcode.dpdns.org/posts/49.html</link>
-            <description>自动化系统监控面板：用Python搭建简单的健康看板
-
-跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。数据源断了、API 超时了、定时任务没跑、缓存写爆了——这些问题不会主动报警，只会让你在复盘时发现“咦，昨天怎么没信号”。...</description>
+            <description>自动化系统监控面板：用Python搭建简单的健康看板 跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。数据源断了、API 超时了、定时任务没跑、缓存写爆了——这些问题不会主动报警，只会让你在复盘时发现“咦，昨天怎么没信号”。 这篇文章搭一个轻量级的健康看板，不依赖 Prometheus + Grafa...</description>
             <pubDate>2026-10-19</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>Python日志系统设计：分级输出与文件轮转</title>
             <link>https://www.hkcode.dpdns.org/posts/48.html</link>
-            <description>Python日志系统设计：分级输出与文件轮转
-
-日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。...</description>
+            <description>Python日志系统设计：分级输出与文件轮转 日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。这篇文章拆解一套可直接落地的日志系统设计：分级输出、文件轮转、格式规范、异常捕获，以及长期运行程序的日志管理策略...</description>
             <pubDate>2026-10-18</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>JSON配置文件管理：原子读写与异常恢复</title>
             <link>https://www.hkcode.dpdns.org/posts/47.html</link>
-            <description>JSON配置文件管理：原子读写与异常恢复
-
-量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。...</description>
+            <description>JSON配置文件管理：原子读写与异常恢复 量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。这篇文章分享一套我在实盘项目里用了两年多的配置管理方案，核心解决四件事：原子写入、异常恢复、版本管理、热加载。 为什么直接 jso...</description>
             <pubDate>2026-10-17</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>推送优先级设计：为什么MA信号推送要提前执行</title>
             <link>https://www.hkcode.dpdns.org/posts/46.html</link>
-            <description>推送优先级设计：为什么MA信号推送要提前执行
-
-问题背景
-
-我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。最初的实现很&quot;自然&quot;——按业务逻辑顺序串行执行，最后统一推送所有通知。
-
-这个设计在大多数时候没问题。...</description>
+            <description>推送优先级设计：为什么MA信号推送要提前执行 问题背景 我们的量化交易系统每天盘后需要跑一批定时任务：行情数据同步、持仓更新、MA信号计算、风险检查、报表生成、消息推送。最初的实现很&quot;自然&quot;——按业务逻辑顺序串行执行，最后统一推送所有通知。 这个设计在大多数时候没问题。但当某个模块超时的时候，问题就暴露了。 一次真实的...</description>
             <pubDate>2026-10-16</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>多策略组合系统的架构演进：从单策略到全天候</title>
             <link>https://www.hkcode.dpdns.org/posts/45.html</link>
-            <description>多策略组合系统的架构演进：从单策略到全天候
-
-阶段一：单策略裸奔
-
-最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。...</description>
+            <description>多策略组合系统的架构演进：从单策略到全天候 阶段一：单策略裸奔 最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。 问题清单： - 策略逻辑与执行逻辑耦合，改一行代码要停整个进程 - 没有状态管理，进程挂了持仓状态全靠券商接口反查 - 单点故障，一次异常退出就彻底躺平 - 无法回测与实盘共用同一套...</description>
             <pubDate>2026-10-14</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>历史数据迁移实战：从旧平台到新平台的完整方案</title>
             <link>https://www.hkcode.dpdns.org/posts/44.html</link>
-            <description>历史数据迁移实战：从旧平台到新平台的完整方案
-
-量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。...</description>
+            <description>历史数据迁移实战：从旧平台到新平台的完整方案 量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。 这篇文章以一个真实场景为例：把旧平台的交易记录、缓存数据、配置文件迁移到新平台。方...</description>
             <pubDate>2026-10-13</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>系统重装后的完整恢复流程：从备份到上线</title>
             <link>https://www.hkcode.dpdns.org/posts/43.html</link>
-            <description>系统重装后的完整恢复流程：从备份到上线
-
-系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。整套流程用 Python 脚本半自动化完成，避免手动操作遗漏。...</description>
+            <description>系统重装后的完整恢复流程：从备份到上线 系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。整套流程用 Python 脚本半自动化完成，避免手动操作遗漏。 恢复前的准备：检查清单 重装前如果没做备份，后面全是补救。我的习...</description>
             <pubDate>2026-10-12</pubDate>
             <category>系统运维</category>
         </item>
         <item>
             <title>微信推送绑定失败排查：SQLite数据库清理方案</title>
             <link>https://www.hkcode.dpdns.org/posts/42.html</link>
-            <description>微信推送绑定失败排查：SQLite数据库清理方案
-
-问题现象
-
-上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。...</description>
+            <description>微信推送绑定失败排查：SQLite数据库清理方案 问题现象 上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。方案用的是企业微信应用消息 + 自建绑定服务，整体架构不复杂： - im-service：负责微信扫码绑定、token 管理、消息转发 - push-worker：从 Re...</description>
             <pubDate>2026-10-11</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>Python项目网络环境应对：被墙API的替代方案与配置</title>
-            <link>https://www.hkcode.dpdns.org/posts/41.html</link>
-            <description>Python项目网络环境应对：被墙API的替代方案与配置
-
-做量化交易的朋友大概率遇到过这种情况：同一个脚本,访问某些交易所API一切正常,换一个就超时。最近我在一个多交易所套利项目里就碰到了——Gate.io直连毫无问题,但Binance和OKX的REST接口全部超时,WebSocket也连不上。...</description>
-            <pubDate>2026-10-10</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
