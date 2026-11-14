@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一个前视偏差bug，让我的回测从+1702%变成-50.7% - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="先说结论：我的EMA均线交叉双向策略回测跑出来 +1702.1%、DSR=1.000、p=0.0000，看起来是一个可以直接上实盘的&quot;圣杯&quot;。...">
+    <meta name="keywords" content="回测,前视偏差,lookahead bias,EMA,技术指标">
+    <meta property="og:title" content="一个前视偏差bug，让我的回测从+1702%变成-50.7%">
+    <meta property="og:description" content="先说结论：我的EMA均线交叉双向策略回测跑出来 +1702.1%、DSR=1.000、p=0.0000，看起来是一个可以直接上实盘的&quot;圣杯&quot;。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/101.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>一个前视偏差bug，让我的回测从+1702%变成-50.7%</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-14</span>
+                <span class="category"><span class="tag-badge">量化回测</span></span>
+            </div>
+            <div class="post-content">
+<p>先说结论：我的EMA均线交叉双向策略回测跑出来 <strong>+1702.1%</strong>、DSR=1.000、p=0.0000，看起来是一个可以直接上实盘的"圣杯"。修复一个时序bug之后，同一份代码、同一个参数、同一个币池，变成 <strong>-50.7%</strong>、DSR=0.000、t=-2.93。</p>
+<p>这不是参数过拟合，不是手续费没算，也不是滑点问题。是一个前视偏差（lookahead bias），藏在我自己写的回测引擎里，逐行看代码的时候每一行都"对"。</p>
+<p>这篇文章把这个bug拆开讲：它长什么样、为什么难发现、什么测试能把它逼出来、以及我现在的防御清单。</p>
+<h2 id="_1">一、策略和回测引擎的基本结构</h2>
+<p>策略很简单：EMA8 与 EMA21 的金叉/死叉，双向持仓。</p>
+<ul>
+<li>金叉（EMA8 从下方向上穿越 EMA21）→ 做多</li>
+<li>死叉（EMA8 从上方向下穿越 EMA21）→ 做空</li>
+</ul>
+<p>K线周期 4 小时。回测引擎是逐K线循环的，核心结构大致是这样：</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+
+def ema_cross_signals(df, fast=8, slow=21):
+    df = df.copy()
+    df[&quot;ema_fast&quot;] = df[&quot;close&quot;].ewm(span=fast, adjust=False).mean()
+    df[&quot;ema_slow&quot;] = df[&quot;close&quot;].ewm(span=slow, adjust=False).mean()
+    # 1 = 金叉做多, -1 = 死叉做空, 0 = 无新信号
+    cross_up = (df[&quot;ema_fast&quot;] &gt; df[&quot;ema_slow&quot;]) &amp; \
+               (df[&quot;ema_fast&quot;].shift(1) &lt;= df[&quot;ema_slow&quot;].shift(1))
+    cross_dn = (df[&quot;ema_fast&quot;] &lt; df[&quot;ema_slow&quot;]) &amp; \
+               (df[&quot;ema_fast&quot;].shift(1) &gt;= df[&quot;ema_slow&quot;].shift(1))
+    df[&quot;signal&quot;] = 0
+    df.loc[cross_up, &quot;signal&quot;] = 1
+    df.loc[cross_dn, &quot;signal&quot;] = -1
+    return df
+</code></pre>
+
+<p>信号本身没问题。问题出在循环里怎么"消费"这个信号。</p>
+<h2 id="bug">二、bug的具体形态</h2>
+<h3 id="21">2.1 错误版本</h3>
+<p>我最初的逐K线循环是这样的（简化后保留关键逻辑）：</p>
+<pre class="codehilite"><code class="language-python">def backtest_buggy(df, fee=0.0005):
+    df = ema_cross_signals(df)
+    position = 0          # 当前持仓方向
+    entry_price = 0.0
+    equity = 1.0
+    equity_curve = []
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+
+        # 有信号就按&quot;当前这根K线&quot;的开盘价成交
+        if row[&quot;signal&quot;] != 0 and row[&quot;signal&quot;] != position:
+            # 先平旧仓（按本根开盘价）
+            if position != 0:
+                ret = position * (row[&quot;open&quot;] / entry_price - 1)
+                equity *= (1 + ret - fee)
+            # 再开新仓（按本根开盘价）
+            position = row[&quot;signal&quot;]
+            entry_price = row[&quot;open&quot;]
+
+        equity_curve.append(equity)
+
+    return pd.Series(equity_curve, index=df.index)
+</code></pre>
+
+<p>看起来完全合理：第 i 根K线出现信号，就用第 i 根K线的开盘价成交。逐行读，没有任何一行是错的。</p>
+<p>但 <code>row["signal"]</code> 是怎么算出来的？它来自 <code>cross_up</code>，而 <code>cross_up</code> 比较的是 <strong>第 i 根的收盘价算出的 EMA</strong> 和 <strong>第 i-1 根的收盘价算出的 EMA</strong>。</p>
+<p>也就是说：<strong>信号的判定依赖第 i 根K线的收盘价，成交却发生在第 i 根K线的开盘价。</strong></p>
+<h3 id="22">2.2 时间线错位</h3>
+<p>把时间线画出来就清楚了。一根 4 小时K线，从 <code>t_open</code> 到 <code>t_close</code>：</p>
+<pre class="codehilite"><code>t_open ────────────── 4小时 ────────────── t_close
+   |                                          |
+  成交发生在这里                          信号判定用这里的收盘价
+  （第i根开盘）                          （第i根收盘算EMA）
+</code></pre>
+
+<p>成交时刻比信号判定时刻<strong>早了整整 4 小时</strong>。回测在 <code>t_open</code> 就"知道"了 <code>t_close</code> 才会产生的金叉结果。</p>
+<p>而EMA金叉有一个统计特征：它经常发生在大阳线上——因为大阳线才能把快线快速推过慢线。于是"开盘到收盘"这段涨幅，在回测里被白送给了策略：开盘买入，收盘时这根大阳线已经涨完了，而回测的净值已经把这部分吃掉了。</p>
+<h3 id="23">2.3 正确版本</h3>
+<p>修复方式只有一句话：<strong>信号在第 i-1 根收盘确认，第 i 根开盘成交。</strong></p>
+<pre class="codehilite"><code class="language-python">def backtest_fixed(df, fee=0.0005):
+    df = ema_cross_signals(df)
+    position = 0
+    entry_price = 0.0
+    equity = 1.0
+    equity_curve = []
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+
+        # 用上一根K线已经确认的信号，在本根开盘执行
+        prev_signal = df[&quot;signal&quot;].iloc[i - 1] if i &gt; 0 else 0
+
+        if prev_signal != 0 and prev_signal != position:
+            if position != 0:
+                ret = position * (row[&quot;open&quot;] / entry_price - 1)
+                equity *= (1 + ret - fee)
+            position = prev_signal
+            entry_price = row[&quot;open&quot;]
+
+        # 净值按本根收盘价 mark-to-market
+        if position != 0:
+            unrealized = position * (row[&quot;close&quot;] / entry_price - 1)
+            equity_curve.append(equity * (1 + unrealized))
+        else:
+            equity_curve.append(equity)
+
+    return pd.Series(equity_curve, index=df.index)
+</code></pre>
+
+<p>两段代码的区别只有一行：<code>row["signal"]</code> 换成了 <code>df["signal"].iloc[i-1]</code>。</p>
+<p>结果：</p>
+<table>
+<thead>
+<tr>
+<th>版本</th>
+<th>总收益</th>
+<th>DSR</th>
+<th>p值 / t值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>错误版（信号与成交同根）</td>
+<td>+1702.1%</td>
+<td>1.000</td>
+<td>p=0.0000</td>
+</tr>
+<tr>
+<td>修复版（信号前移一根）</td>
+<td>-50.7%</td>
+<td>0.000</td>
+<td>t=-2.93</td>
+</tr>
+</tbody>
+</table>
+<p>同一策略、同一参数、同一币池。1702% 和 -50.7% 之间，只隔了一根K线的时间差。</p>
+<h2 id="bug_1">三、为什么这个bug极难被发现</h2>
+<h3 id="31">3.1 每一行代码都"对"</h3>
+<p>回测引擎逐行审阅时，你会看到：</p>
+<ul>
+<li><code>ema_cross_signals</code> 用 <code>shift(1)</code> 做穿越判定，标准写法，没问题；</li>
+<li>循环里 <code>signal != position</code> 判断换仓，没问题；</li>
+<li>成交价用 <code>row["open"]</code>，这是"当根开盘价"，看起来是最保守、最不可能前视的写法；</li>
+<li>手续费扣了，滑点可以再加。</li>
+</ul>
+<p>问题不在任何单行，而在<strong>两行之间的时间关系</strong>：信号的计算时点和成交时点不在同一根K线的同一端。这种错误只能靠"把时间轴摊平"才能看出来，靠读代码看不出来。</p>
+<h3 id="32">3.2 "用开盘价成交"反而制造了安全感</h3>
+<p>很多人以为前视偏差就是"用了未来价格"，所以只要成交价用开盘价、不用收盘价，就安全了。恰恰相反：<strong>成交价用当根开盘价 + 信号用当根收盘价，是前视偏差最经典的组合</strong>。开盘价比收盘价"更早"，两者放在同一根K线里，天然就是错的。</p>
+<p>真正的判据不是"用了哪个价格"，而是<strong>成交时点必须晚于或等于信号判定时点</strong>。用当根开盘价成交是合法的，前提是信号在<strong>上一根收盘</strong>就已确认。</p>
+<h3 id="33-bug">3.3 回测指标全部"配合"这个bug</h3>
+<p>错误版本给出的 DSR=1.000、p=0.0000，是统计上"太完美"的典型征兆。但人在看到 +1702% 的时候，第一反应是"策略有效"，而不是"数据泄漏"。DSR 和 p 值在这里不是验证工具，反而成了放大器——它们只告诉你"这个收益序列很显著"，不会告诉你"这个收益序列是怎么来的"。</p>
+<h2 id="_2">四、什么测试能把它逼出来：实盘语义回放</h2>
+<p>真正让我定位到这个bug的，不是代码审查，是一个<strong>实盘语义回放测试</strong>。</p>
+<p>思路很简单：写一个"如果我真的在实盘跑这个策略，每一根K线收盘时我会做什么决策"的模拟器，和回测引擎并行跑同一段历史数据，比较两者的成交记录。</p>
+<pre class="codehilite"><code class="language-python">def live_semantics_replay(df, fee=0.0005):
+    &quot;&quot;&quot;
+    模拟实盘语义：每根K线收盘时才能看到该K线的收盘价，
+    因此信号只能在收盘后确认，成交只能在下一根K线开盘执行。
+    &quot;&quot;&quot;
+    df = ema_cross_signals(df)
+    position = 0
+    entry_price = 0.0
+    equity = 1.0
+    equity_curve = []
+    pending_signal = 0   # 收盘后挂起、下一根开盘执行的信号
+
+    for i in range(len(df)):
+        row = df.iloc[i]
+
+        # 开盘：执行上一根收盘时挂起的信号
+        if pending_signal != 0 and pending_signal != position:
+            if position != 0:
+                ret = position * (row[&quot;open&quot;] / entry_price - 1)
+                equity *= (1 + ret - fee)
+            position = pending_signal
+            entry_price = row[&quot;open&quot;]
+        pending_signal = 0
+
+        # 收盘：此时才看得到本根收盘价，产生信号，挂起到下一根
+        if row[&quot;signal&quot;] != 0 and row[&quot;signal&quot;] != position:
+            pending_signal = row[&quot;signal&quot;]
+
+        if position != 0:
+            unrealized = position * (row[&quot;close&quot;] / entry_price - 1)
+            equity_curve.append(equity * (1 + unrealized))
+        else:
+            equity_curve.append(equity)
+
+    return pd.Series(equity_curve, index=df.index)
+</code></pre>
+
+<p>把回测引擎和回放引擎的成交记录逐笔对比，矛盾立刻暴露：</p>
+<ul>
+<li>回放引擎（实盘语义）：只有微亏；</li>
+<li>原回测引擎：暴赚 +1702%。</li>
+</ul>
+<p>同一个策略、同一段数据，两个引擎的净值曲线天差地别。<strong>当"实盘语义回放"和"回测"严重不一致时，几乎一定是回测里有前视偏差</strong>，而不是回放写错了——因为回放引擎的约束更严（信号必须等收盘），它没有能力"作弊"。</p>
+<p>这个测试的价值在于：它不依赖你审查代码时能否想到时序问题，它直接用"实盘上物理上可能发生什么"来约束回测。凡是回测里做了实盘做不到的事，两条曲线就会分叉。</p>
+<h2 id="_3">五、防御清单</h2>
+<p>我现在每个回测引擎上线前，都会过一遍这几条：</p>
+<ol>
+<li>
+<p><strong>成交时点永远不能早于信号判定时点。</strong> 这是唯一一条硬规则。信号若用到第 i 根收盘价，成交最早只能是第 i+1 根开盘价（或第 i 根收盘价，如果引擎支持收盘成交）。用当根开盘价成交，信号必须来自第 i-1 根及更早。</p>
+</li>
+<li>
+<p><strong>把"信号列"和"成交列"在时间轴上对齐打印。</strong> 对任意一笔交易，打印 <code>signal_bar_time</code> 和 <code>fill_bar_time</code>，断言 <code>fill_bar_time &gt;= signal_bar_time</code>。这一条断言能拦住绝大多数同类bug。</p>
+</li>
+<li>
+<p><strong>必跑实盘语义回放。</strong> 独立实现一个"收盘决策、下一根开盘执行"的模拟器，与回测引擎逐笔对比成交。两条净值曲线分叉即报警。</p>
+</li>
+<li>
+<p><strong>警惕"太完美"的统计量。</strong> DSR=1.000、p=0.0000、夏普高得离谱，第一反应应该是查数据泄漏，而不是庆祝。先怀疑，再相信。</p>
+</li>
+<li>
+<p><strong>指标类信号统一走"确认后一根"约定。</strong> EMA、RSI、MACD 这类由收盘价序列计算的指标，信号天然在收盘时点才成立。在引擎层面统一加一根延迟，比在每个策略里手动 <code>shift</code> 更不容易出错。</p>
+</li>
+<li>
+<p><strong>成交价用 open 不等于安全。</strong> 安全性来自时序关系，不来自价格字段的选择。这条我踩过，写在这里提醒自己。</p>
+</li>
+</ol>
+<h2 id="_4">写在最后</h2>
+<p>+1702% 到 -50.7%，差的不是策略，是一根K线的时间差。前视偏差最阴险的地方在于：它不会让代码报错，不会让指标异常，反而会让回测结果变得"更好看"。你越是想找到一个能跑的策略，越容易在"逐行都对"的代码里放过那个时序错位。</p>
+<p>修复之后，这个EMA8/21双向策略的 t=-2.93 是一个显著的负期望——它不是一个能用的策略，但它是一个<strong>诚实的</strong>回测结果。对我来说，后者比前者值钱得多。</p>
+<p>更多量化回测、前视偏差排查与自动化实战的内容，请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">回测</span><span class="tag-badge">前视偏差</span><span class="tag-badge">lookahead bias</span><span class="tag-badge">EMA</span><span class="tag-badge">技术指标</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
