@@ -7,6 +7,97 @@
         <language>en-us</language>
         
         <item>
+            <title>The Lookahead Bias That Faked a +1702% Backtest</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/101.html</link>
+            <description>A one-line timing bug in an EMA-crossover backtester turned a losing strategy into a +1702% equity curve with a Deflated Sharpe Ratio of 1.000 and p = 0.0000....</description>
+            <pubDate>2026-11-14</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Migrating from xcopy to robocopy: Copy Reliability on Chinese Paths</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/46.html</link>
+            <description>Why xcopy Breaks on Chinese Paths The failure mode is nasty because nothing looks broken....</description>
+            <pubDate>2026-11-13</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
+            <title>Gate.io API Pagination Trap: from+to+limit Cannot Coexist</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/45.html</link>
+            <description>The Symptom: A 400 That Blames the Wrong Parameter If you&#x27;ve wired up Gate.io&#x27;s futures candlestick endpoint, you&#x27;ve probably hit this: you build a request with...</description>
+            <pubDate>2026-11-12</pubDate>
+            <category>API Integration</category>
+        </item>
+        <item>
+            <title>The Drawdown Breaker Blind Spot: Realized PnL Hides Unrealized Bleeding</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/44.html</link>
+            <description>The Drawdown Breaker Blind Spot Most drawdown guards are built on a simple, reasonable-sounding premise: track losses, and when losses pile up, stop trading....</description>
+            <pubDate>2026-11-11</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Correcting Sharpe Ratios for Autocorrelation: The Lo Factor in Practice</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/43.html</link>
+            <description>Why Autocorrelated Returns Break the Standard Sharpe Test The Sharpe ratio&#x27;s standard error formula assumes i.i.d. returns....</description>
+            <pubDate>2026-11-10</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Monte Carlo Permutation Tests: Stress-Auditing a Trading Strategy</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/42.html</link>
+            <description>The Problem With a Single Backtest A backtest gives you a number: total PnL, Sharpe, max drawdown....</description>
+            <pubDate>2026-11-09</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Pool-Level Drawdown Circuit Breaker: Deciding Risk Controls with Counterfactual Backtests</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/41.html</link>
+            <description>The Problem With Per-Position Stops in a Correlated Book A multi-strategy paper account ran fine for weeks, then gave back almost everything in one market-wide ...</description>
+            <pubDate>2026-11-08</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Long-Hold Token Positions: Sizing and Liquidation Protection</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/40.html</link>
+            <description>Long-term holding is often framed as the opposite of active risk management: you pick an asset, size it, and wait....</description>
+            <pubDate>2026-11-07</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Anti-Overfitting for Retail Backtests: Few Rules, Fewer Trades, More Skepticism</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/39.html</link>
+            <description>Why the Fifth Rule Is Usually Noise Every discretionary backtest dies the same death. You start with a simple idea — buy the pullback, exit on a failed retest....</description>
+            <pubDate>2026-11-06</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Whale-Pump Altcoins and the Pullback Problem</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/38.html</link>
+            <description>The Anatomy of an Orchestrated Pump A whale-driven altcoin pump is not a random walk with fat tails. It has a schedule....</description>
+            <pubDate>2026-11-05</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Market Sentiment as an Input: Integrating the Fear &amp; Greed Index</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/37.html</link>
+            <description>The Fear &amp; Greed index is a daily composite scaled 0–100, built from volatility, momentum, social signals, dominance and trend components....</description>
+            <pubDate>2026-11-04</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Reading Paper-Trading Statistics: Win Rate, Profit Factor and Expectancy</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/36.html</link>
+            <description>Why the Monthly Review Is the Only Review That Matters A paper-trading log accumulates trades faster than anyone reviews them....</description>
+            <pubDate>2026-11-03</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
+            <title>Weak-Signal Blacklisting: Two-Month Windows and a 70% Win-Rate Gate</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/35.html</link>
+            <description>The Problem with &quot;Just Skip the Weak Ones&quot; Every signal generator eventually produces marginal setups....</description>
+            <pubDate>2026-11-02</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Adaptive Stop-Loss Thresholds Instead of Hardcoded Percentages</title>
             <link>https://www.hkcode.dpdns.org/en/posts/34.html</link>
             <description>A fixed -3% stop does not mean the same thing on every instrument....</description>
@@ -54,97 +145,6 @@
             <description>Why One Good Backtest Means Nothing A single equity curve is a sample of size one....</description>
             <pubDate>2026-10-26</pubDate>
             <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Enforcing HTTPS on GitHub Pages After a Domain Switch</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/27.html</link>
-            <description>Pointing a new domain at GitHub Pages works on the first try often enough that the greyed-out checkbox comes as a surprise....</description>
-            <pubDate>2026-10-25</pubDate>
-            <category>Domains &amp; Deployment</category>
-        </item>
-        <item>
-            <title>Serving a Bilingual Static Site on GitHub Pages</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/26.html</link>
-            <description>Why one repo, two sites A Chinese blog already lived at the domain root: example.com/....</description>
-            <pubDate>2026-10-24</pubDate>
-            <category>Domains &amp; Deployment</category>
-        </item>
-        <item>
-            <title>Why You Cannot Put a CNAME on the Apex Domain</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/25.html</link>
-            <description>The zone apex is not like other names The apex of a zone — the bare domain itself, hkcode.dpdns.org in this case — is where the DNS machinery for the entire zon...</description>
-            <pubDate>2026-10-23</pubDate>
-            <category>Domains &amp; Deployment</category>
-        </item>
-        <item>
-            <title>The CNAME Trailing Dot: One Character That Broke the Domain</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/24.html</link>
-            <description>The CNAME Trailing Dot: One Character That Broke the Domain The migration was supposed to take ten minutes....</description>
-            <pubDate>2026-10-22</pubDate>
-            <category>Domains &amp; Deployment</category>
-        </item>
-        <item>
-            <title>Free Domain Options in 2026: From eu.org to DigitalPlat dpdns.org</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/23.html</link>
-            <description>The 2026 Free Domain Landscape If you run static sites for side projects, a domain is the one recurring cost you can usually avoid....</description>
-            <pubDate>2026-10-21</pubDate>
-            <category>Domains &amp; Deployment</category>
-        </item>
-        <item>
-            <title>Cross-Posting Automation: One Article, Three Platforms</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/22.html</link>
-            <description>Publishing the same article to three places sounds trivial until you actually build it....</description>
-            <pubDate>2026-10-20</pubDate>
-            <category>API Integration</category>
-        </item>
-        <item>
-            <title>Generating Technical Blog Posts with the DeepSeek API</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/21.html</link>
-            <description>Why the Prompt Is the Whole QA Process A daily pipeline that publishes one or two articles per day in two languages, with no human in the loop, has an uncomfort...</description>
-            <pubDate>2026-10-19</pubDate>
-            <category>API Integration</category>
-        </item>
-        <item>
-            <title>Publishing a Static Site to GitHub Pages Without git</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/20.html</link>
-            <description>Why Skip git at All? Sometimes git isn&#x27;t an option. Corporate proxies strip the smart HTTP protocol....</description>
-            <pubDate>2026-10-18</pubDate>
-            <category>API Integration</category>
-        </item>
-        <item>
-            <title>Publishing to Juejin Through Its Web API: The mark_content Lesson</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/19.html</link>
-            <description>Automating content publishing is a common task for developer-advocates and technical writers....</description>
-            <pubDate>2026-10-17</pubDate>
-            <category>API Integration</category>
-        </item>
-        <item>
-            <title>Making .bat Files Bulletproof Across Windows Machines</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/18.html</link>
-            <description>Batch files are the glue of Windows automation and the most fragile part of it....</description>
-            <pubDate>2026-10-16</pubDate>
-            <category>Encoding</category>
-        </item>
-        <item>
-            <title>PowerShell on Legacy Chinese Windows: UTF-8 with BOM or Bust</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/17.html</link>
-            <description>Windows PowerShell 5.1 does not guess encodings. When it loads a .ps1 file, it looks for a byte-order mark. If it finds one, it decodes accordingly....</description>
-            <pubDate>2026-10-14</pubDate>
-            <category>Encoding</category>
-        </item>
-        <item>
-            <title>UTF-8 vs GBK: The Root Cause of Cross-Machine Script Failures</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/16.html</link>
-            <description>A script that runs fine on your laptop and dies on the server is almost never a logic bug....</description>
-            <pubDate>2026-10-13</pubDate>
-            <category>Encoding</category>
-        </item>
-        <item>
-            <title>The Silent Alert Bug: When Your Instant Push Exists but Never Fires</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/15.html</link>
-            <description>Your alert formatter is probably fine. The problem is that nobody calls it. The Symptom A user reports that instant push notifications stopped working....</description>
-            <pubDate>2026-10-12</pubDate>
-            <category>Notifications</category>
         </item>
     </channel>
 </rss>
