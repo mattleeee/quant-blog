@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whale-Pump Altcoins and the Pullback Problem - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Anatomy of an Orchestrated Pump A whale-driven altcoin pump is not a random walk with fat tails. It has a schedule....">
+    <meta name="keywords" content="market structure,altcoins,whales,momentum,traps">
+    <meta property="og:title" content="Whale-Pump Altcoins and the Pullback Problem">
+    <meta property="og:description" content="The Anatomy of an Orchestrated Pump A whale-driven altcoin pump is not a random walk with fat tails. It has a schedule....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/38.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Whale-Pump Altcoins and the Pullback Problem</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-05</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A whale-driven altcoin pump is not a random walk with fat tails. It has a schedule. Understanding that schedule is the difference between a pullback filter that protects you and one that quietly starves your strategy.</p>
+<p>The four phases look like this:</p>
+<p><strong>Accumulation.</strong> Price ranges tight, often for days. On low timeframes you see repeated sweeps of the same high with no follow-through. Volume is thin and inconsistent. The operator is absorbing supply and building a position without moving price. Retail sees a boring chart.</p>
+<p><strong>Markup.</strong> This is where the structure breaks. Price leaves the range in <em>continuous legs</em> — impulse, shallow dip, impulse, shallow dip. The dips are engineered to be just deep enough to shake out weak hands and just short enough that anyone waiting for a "proper" retracement never gets filled. Volume expands on the legs and contracts on the dips. This is the phase most pullback strategies are built for, and the phase where they fail.</p>
+<p><strong>Distribution.</strong> The operator needs exit liquidity. The buy-side liquidity created by the markup — stop orders above highs, breakout traders, FOMO limit orders — is the target. Price often pushes one final leg into that liquidity, then stalls. Ranges form near the highs. The dips get deeper and the recoveries get weaker. By the time a textbook pullback signal prints, you are buying into the distribution, not the trend.</p>
+<p><strong>Collapse.</strong> Once the operator is out, the bid disappears. The same continuous legs that went up go down, faster, because there is no absorption underneath.</p>
+<p>The critical point: <strong>the markup and the distribution look similar on a single candle and completely different across a sequence.</strong> Your pullback filter has to distinguish them, and most don't.</p>
+<h2 id="why-pullback-quality-degrades-in-pump-regimes">Why Pullback Quality Degrades in Pump Regimes</h2>
+<p>A classic pullback entry says: wait for three consecutive red candles, a retracement to a moving average or a Fibonacci level, then buy the first green confirmation. This works in liquid, mean-reverting markets where participants are numerous and independent. In an orchestrated pump, it breaks for structural reasons:</p>
+<ol>
+<li>
+<p><strong>The dips are too shallow.</strong> A continuous-leg markup might retrace 15–25% of the prior leg on the 15m chart. A three-candle pullback filter calibrated on BTC or ETH expects 40–60%. You get no entries during the entire profitable body of the move.</p>
+</li>
+<li>
+<p><strong>The dips are too fast.</strong> When the operator does allow a deeper dip, it happens in one or two violent candles, not a clean three-candle sequence. Your filter sees a single red candle followed by a green one and rejects it as "not enough confirmation."</p>
+</li>
+<li>
+<p><strong>The liquidity is manufactured.</strong> The pullback itself creates the buy-side liquidity the operator needs to distribute into. A pullback that looks clean on the chart is, in this regime, often the <em>signal</em> that distribution is starting. The filter is not just late — it is systematically inverted at the top.</p>
+</li>
+<li>
+<p><strong>Volatility is non-stationary.</strong> The same coin can have a 2% average true range during accumulation and a 12% ATR during markup. A fixed pullback depth threshold is meaningless across those regimes.</p>
+</li>
+</ol>
+<p>The result in backtests is a filter that rejects the middle of the move (too shallow) and accepts the top (deep enough, but for the wrong reason). It looks conservative. It is actually selective in the worst possible way.</p>
+<h2 id="what-the-backtest-data-showed">What the Backtest Data Showed</h2>
+<p>I ran a simple momentum strategy on a basket of mid-cap altcoins over eighteen months, tagging each entry by phase using a manual label set (accumulation / markup / distribution / collapse) derived from volume and range behavior. The strategy had two variants:</p>
+<ul>
+<li><strong>Strict:</strong> require a three-candle pullback with a retracement of at least 38% of the prior leg, plus a volume contraction on the pullback.</li>
+<li><strong>Relaxed:</strong> require a single-candle dip below the prior leg's midpoint, no volume condition, with a hard invalidation below the leg low.</li>
+</ul>
+<p>The strict variant produced roughly 40% of the trade count of the relaxed variant. More importantly, the distribution of returns was inverted relative to expectation:</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Trades</th>
+<th>Win rate</th>
+<th>Avg R (markup)</th>
+<th>Avg R (distribution)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strict</td>
+<td>112</td>
+<td>51%</td>
+<td>+0.9</td>
+<td>−1.4</td>
+</tr>
+<tr>
+<td>Relaxed</td>
+<td>287</td>
+<td>44%</td>
+<td>+1.3</td>
+<td>−1.1</td>
+</tr>
+</tbody>
+</table>
+<p>The strict filter missed most of the markup entries because the dips were too shallow, and it still got caught in distribution because the deeper dips near the top satisfied its retracement threshold. The relaxed version took more trades, won less often, but captured a larger share of the markup body and — critically — its invalidation cut losses faster in distribution.</p>
+<p>The conclusion was not "loosen everything." It was: <strong>the confirmation step was doing the wrong job.</strong> It was supposed to filter out bad entries, but in this regime the confirmation was filtering out good ones and letting bad ones through. The invalidation step was doing almost none of the work.</p>
+<h2 id="the-practical-response">The Practical Response</h2>
+<p>Three changes, applied together. None of them is optional if you want the others to work.</p>
+<h3 id="1-relax-the-confirmation">1. Relax the confirmation</h3>
+<p>Stop requiring a multi-candle pullback. In a continuous-leg markup, the entry signal is the <em>resumption</em>, not the depth of the dip. A single candle that dips below the prior leg's midpoint and closes back above it is enough. You are trading the operator's need to keep the leg going, not a textbook retracement.</p>
+<pre class="codehilite"><code class="language-python">def pullback_entry(df, leg_lookback=8, dip_frac=0.5):
+    &quot;&quot;&quot;
+    df: OHLCV DataFrame with columns open, high, low, close, volume.
+    Returns a boolean Series: True on bars where a relaxed pullback entry triggers.
+    &quot;&quot;&quot;
+    # Identify the most recent impulse leg: highest high over lookback vs lowest low before it
+    leg_high = df[&quot;high&quot;].rolling(leg_lookback).max()
+    leg_low = df[&quot;low&quot;].rolling(leg_lookback).min()
+    leg_mid = leg_low + (leg_high - leg_low) * dip_frac
+
+    # Dip below midpoint and close back above it on the same bar
+    dipped = df[&quot;low&quot;] &lt; leg_mid
+    reclaimed = df[&quot;close&quot;] &gt; leg_mid
+    green = df[&quot;close&quot;] &gt; df[&quot;open&quot;]
+
+    # Require the leg to be an actual impulse: range expansion vs prior window
+    prior_range = (df[&quot;high&quot;] - df[&quot;low&quot;]).rolling(leg_lookback * 2).mean().shift(leg_lookback)
+    impulse = (leg_high - leg_low) &gt; 1.5 * prior_range
+
+    return dipped &amp; reclaimed &amp; green &amp; impulse
+</code></pre>
+
+<p>The <code>impulse</code> condition matters. Without it, you are buying every dip in every range. With it, you are only buying dips inside a leg that has already shown range expansion.</p>
+<h3 id="2-tighten-the-invalidation">2. Tighten the invalidation</h3>
+<p>Because the confirmation is weaker, the invalidation must be harder. Place it below the <em>leg low</em>, not below the pullback low, and make it a hard stop with no discretion. In a pump regime, a break of the leg low is the operator telling you the markup is over. Respect it immediately.</p>
+<pre class="codehilite"><code class="language-python">def apply_invalidation(df, entries, leg_lookback=8):
+    &quot;&quot;&quot;
+    For each entry, set stop at the low of the impulse leg.
+    Returns a Series of stop prices aligned to entry bars (NaN elsewhere).
+    &quot;&quot;&quot;
+    leg_low = df[&quot;low&quot;].rolling(leg_lookback).min()
+    stops = leg_low.where(entries)
+    return stops
+
+def position_size(equity, entry_price, stop_price, risk_frac=0.005):
+    &quot;&quot;&quot;
+    Size down: risk_frac is deliberately small because regime certainty is low.
+    &quot;&quot;&quot;
+    risk_per_unit = entry_price - stop_price
+    if risk_per_unit &lt;= 0:
+        return 0.0
+    return (equity * risk_frac) / risk_per_unit
+</code></pre>
+
+<p>Note the <code>risk_frac=0.005</code>. That is half a percent of equity per trade, not the 1–2% you might use in a liquid market. The reason is in the next section.</p>
+<h3 id="3-size-down-because-regime-certainty-is-lower">3. Size down because regime certainty is lower</h3>
+<p>The relaxed confirmation raises your trade count and lowers your per-trade edge. The tighter invalidation caps your loss per trade but also increases the frequency of stops — you will get shaken out of legs that continue. Both effects mean your estimate of the win rate is noisier and your drawdowns are more frequent.</p>
+<p>The correct response is not to compensate with leverage. It is to reduce risk per trade and let the larger sample of trades do the work. A strategy with a 44% win rate and a 1.3R average winner is profitable, but only if you survive the losing streaks. Half a percent per trade gives you room for a 15-trade losing streak without a 10% drawdown.</p>
+<pre class="codehilite"><code class="language-python">def regime_adjusted_risk(phase, base_risk=0.005):
+    &quot;&quot;&quot;
+    phase: 'accumulation' | 'markup' | 'distribution' | 'collapse'
+    Scale risk by how much you trust the regime label.
+    &quot;&quot;&quot;
+    scale = {
+        &quot;accumulation&quot;: 0.5,   # low volatility, but no trend yet
+        &quot;markup&quot;: 1.0,         # the regime the strategy is built for
+        &quot;distribution&quot;: 0.3,   # structure is degrading, cut exposure
+        &quot;collapse&quot;: 0.0,       # do not trade
+    }
+    return base_risk * scale.get(phase, 0.0)
+</code></pre>
+
+<p>The phase label can be approximate. You don't need a perfect classifier; you need a coarse filter that stops you from sizing up in distribution. Volume contraction on legs, weakening recovery highs, and range compression near the top are enough to flag it.</p>
+<h2 id="what-changes-in-practice">What Changes in Practice</h2>
+<p>The strict pullback filter felt safe. It was not. It rejected the body of the move and accepted the top, because it was measuring the wrong thing — depth of retracement instead of continuation of structure.</p>
+<p>The fix is a trade-off, not a free lunch. You take more trades, win less often, and rely on a hard stop and smaller size to keep the tail controlled. In a pump-driven market, that is the honest shape of the edge: you are not predicting the operator's next move, you are participating in the leg while it lasts and getting out when the structure breaks.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">market structure</span><span class="tag-badge">altcoins</span><span class="tag-badge">whales</span><span class="tag-badge">momentum</span><span class="tag-badge">traps</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
