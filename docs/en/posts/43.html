@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Correcting Sharpe Ratios for Autocorrelation: The Lo Factor in Practice - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why Autocorrelated Returns Break the Standard Sharpe Test The Sharpe ratio&#x27;s standard error formula assumes i.i.d....">
+    <meta name="keywords" content="Sharpe ratio,autocorrelation,Lo adjustment,deflated Sharpe">
+    <meta property="og:title" content="Correcting Sharpe Ratios for Autocorrelation: The Lo Factor in Practice">
+    <meta property="og:description" content="Why Autocorrelated Returns Break the Standard Sharpe Test The Sharpe ratio&#x27;s standard error formula assumes i.i.d....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/43.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Correcting Sharpe Ratios for Autocorrelation: The Lo Factor in Practice</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-10</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>The Sharpe ratio's standard error formula assumes i.i.d. returns. That assumption is almost always false for real strategies: smoothed marks, overlapping holding periods, illiquid positions, and momentum effects all leave a lag-1 autocorrelation in the return series. When returns are autocorrelated, the effective sample size is smaller than the nominal one, and significance tests fire far too often. With <code>rho = 0.2</code>, a nominal 5% test rejects the null at 18–25% in simulation. That is not a small calibration error; it is the difference between "maybe real" and "coin flip."</p>
+<p>The fix is cheap: correct the Sharpe ratio by the Lo factor before you run any significance test.</p>
+<h2 id="the-lo-adjustment">The Lo Adjustment</h2>
+<p>Lo (2002) derives the asymptotic variance of the Sharpe estimator under serial dependence. For an AR(1)-style dependence with lag-1 autocorrelation <code>rho</code>, the corrected Sharpe is:</p>
+<pre class="codehilite"><code>SR_corrected = SR * sqrt((1 - rho) / (1 + rho))
+</code></pre>
+
+<p>Interpretation:</p>
+<ul>
+<li><code>rho &gt; 0</code> (smoothed or persistent returns): the factor is below 1, so the corrected Sharpe is lower. The raw number overstated the risk-adjusted edge because the sample carried less independent information than its length suggested.</li>
+<li><code>rho &lt; 0</code> (mean-reverting returns): the factor is above 1. Negative autocorrelation means the strategy recovers from drawdowns faster than an i.i.d. process would, so the effective sample is larger.</li>
+<li><code>rho = 0</code>: factor is 1, no change.</li>
+</ul>
+<p>The rule I use: apply the correction whenever <code>|rho| &gt; 0.1</code>. Below that threshold the adjustment is within noise of the estimate itself, and applying it adds churn without information. Above it, ignoring the correction is a methodological error, not a modeling choice.</p>
+<h3 id="a-note-on-the-general-form">A note on the general form</h3>
+<p>The <code>(1 - rho)/(1 + rho)</code> factor is the AR(1) special case. For <code>q</code>-th order dependence, the full Lo variance uses a weighted sum of autocorrelations:</p>
+<pre class="codehilite"><code>eta = 1 + 2 * sum_{k=1}^{q} ((q - k) / q) * rho_k
+SR_corrected = SR * sqrt(eta)   # note: eta in the variance, so sqrt(eta) on the ratio
+</code></pre>
+
+<p>For most daily-frequency strategies, lag-1 dominates and the closed form above is enough. Use the general form when you have overlapping windows (e.g., 5-day returns sampled daily), where lag-<code>k</code> dependence out to <code>k = 4</code> is structural, not noise.</p>
+<h2 id="computing-the-autocorrelation">Computing the Autocorrelation</h2>
+<p>Do not eyeball this from a chart. Compute it, and compute it on the return series you actually test, not on cumulative PnL. Cumulative PnL is a random walk under the null and will show high autocorrelation regardless of the strategy.</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+
+def lag1_autocorr(returns: pd.Series) -&gt; float:
+    &quot;&quot;&quot;Lag-1 autocorrelation of a return series, NaN-safe.&quot;&quot;&quot;
+    r = returns.dropna()
+    if len(r) &lt; 3:
+        return float(&quot;nan&quot;)
+    x = r.to_numpy(dtype=float)
+    x = x - x.mean()
+    denom = np.dot(x, x)
+    if denom == 0.0:
+        return 0.0
+    return float(np.dot(x[1:], x[:-1]) / denom)
+
+def acf(returns: pd.Series, nlags: int = 5) -&gt; np.ndarray:
+    &quot;&quot;&quot;Sample ACF up to nlags, using the same denominator for all lags.&quot;&quot;&quot;
+    x = returns.dropna().to_numpy(dtype=float)
+    x = x - x.mean()
+    denom = np.dot(x, x)
+    return np.array([np.dot(x[k:], x[:-k]) / denom for k in range(nlags + 1)])
+</code></pre>
+
+<p>Two practical checks before you trust the number:</p>
+<ol>
+<li><strong>Sample size.</strong> A lag-1 estimate on 60 observations has a standard error near <code>1/sqrt(60) ≈ 0.13</code>. A raw <code>rho</code> of 0.08 there is indistinguishable from zero. Require at least ~250 observations before acting on the correction, and treat estimates near the 0.1 threshold as borderline.</li>
+<li><strong>Regime stability.</strong> Compute <code>rho</code> on rolling windows. A strategy whose autocorrelation flips sign across regimes is telling you the dependence is not a stable structural feature, and the correction is itself unstable. Report the range, not just the full-sample value.</li>
+</ol>
+<h2 id="implementing-the-adjustment">Implementing the Adjustment</h2>
+<p>Keep the correction in one place so every downstream test uses the same number.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class SharpeReport:
+    sr_raw: float
+    rho: float
+    factor: float
+    sr_corrected: float
+    applied: bool
+
+def lo_adjust(sr_raw: float, rho: float, threshold: float = 0.1) -&gt; SharpeReport:
+    if abs(rho) &lt;= threshold:
+        return SharpeReport(sr_raw, rho, 1.0, sr_raw, applied=False)
+    # guard against |rho| -&gt; 1, where the factor explodes or collapses
+    rho = float(np.clip(rho, -0.99, 0.99))
+    factor = np.sqrt((1.0 - rho) / (1.0 + rho))
+    return SharpeReport(sr_raw, rho, factor, sr_raw * factor, applied=True)
+
+def annualized_sharpe(returns: pd.Series, periods_per_year: int = 252) -&gt; float:
+    r = returns.dropna()
+    sd = r.std(ddof=1)
+    if sd == 0 or len(r) &lt; 2:
+        return float(&quot;nan&quot;)
+    return float(r.mean() / sd * np.sqrt(periods_per_year))
+</code></pre>
+
+<p>Then wire it into your evaluation path:</p>
+<pre class="codehilite"><code class="language-python">def evaluate(returns: pd.Series, periods_per_year: int = 252) -&gt; SharpeReport:
+    sr = annualized_sharpe(returns, periods_per_year)
+    rho = lag1_autocorr(returns)
+    return lo_adjust(sr, rho)
+</code></pre>
+
+<p>The <code>SharpeReport</code> object carries both numbers and a flag. Log the flag. If a strategy's headline Sharpe only survives because the correction was never applied, you want that visible in the report, not buried in a notebook.</p>
+<h3 id="correcting-the-standard-error-not-just-the-point-estimate">Correcting the standard error, not just the point estimate</h3>
+<p>The point estimate correction is what people remember, but the <em>test</em> is where the false positives come from. The corrected Sharpe has standard error approximately:</p>
+<pre class="codehilite"><code>SE(SR) ≈ sqrt((1 + SR^2 / 2) / n) * sqrt((1 + rho) / (1 - rho))
+</code></pre>
+
+<p>Note the direction: positive autocorrelation inflates the standard error by the same factor that deflates the point estimate. Both effects push you toward "not significant," which is the honest conclusion. A quick t-statistic:</p>
+<pre class="codehilite"><code class="language-python">def sharpe_tstat(sr: float, rho: float, n: int) -&gt; float:
+    rho = float(np.clip(rho, -0.99, 0.99))
+    se = np.sqrt((1.0 + 0.5 * sr**2) / n) * np.sqrt((1.0 + rho) / (1.0 - rho))
+    return sr / se
+</code></pre>
+
+<p>Run this on raw and corrected Sharpe with the same <code>rho</code> and the same <code>n</code>. If the raw version clears 3.0 and the corrected one does not, the strategy does not clear 3.0.</p>
+<h2 id="case-study-rho-033">Case Study: rho = -0.33</h2>
+<p>Negative autocorrelation is the less-discussed case, and it is worth walking through because the correction moves the number <em>up</em>, which invites overconfidence.</p>
+<p>Suppose a mean-reversion strategy on a liquid futures contract shows an annualized Sharpe of 1.40 over 500 daily observations, with lag-1 autocorrelation of <code>-0.33</code>. That is a large negative value. Check it against the ACF before proceeding:</p>
+<pre class="codehilite"><code class="language-python">r = strategy_returns  # pd.Series of daily returns
+print(acf(r, nlags=5))
+# [1.0, -0.33, 0.11, -0.04, 0.02, -0.01]
+</code></pre>
+
+<p>The pattern — strong lag-1, weak lag-2, near-zero beyond — is consistent with a genuine AR(1) mean-reverting component rather than an artifact. Now apply the correction:</p>
+<pre class="codehilite"><code>factor = sqrt((1 - (-0.33)) / (1 + (-0.33)))
+       = sqrt(1.33 / 0.67)
+       = sqrt(1.985)
+       ≈ 1.409
+
+SR_corrected = 1.40 * 1.409 ≈ 1.97
+</code></pre>
+
+<p>A Sharpe of 1.40 becomes 1.97. That is a 41% uplift, and it is legitimate under the AR(1) model: negative dependence means each observation carries more independent information than its index suggests, so the effective sample is larger than 500.</p>
+<p>But the standard error moves too:</p>
+<pre class="codehilite"><code class="language-python">n = 500
+print(sharpe_tstat(1.40, -0.33, n))  # raw, corrected SE
+print(sharpe_tstat(1.97, -0.33, n))  # corrected SR, corrected SE
+</code></pre>
+
+<p>With <code>rho = -0.33</code>, the SE factor is <code>sqrt(0.67 / 1.33) ≈ 0.71</code>, so the standard error shrinks by about 29%. The t-statistic rises, but not by the 41% the point estimate suggests. The two adjustments partially offset. This is the honest reading: negative autocorrelation helps, but less than the headline correction implies.</p>
+<p>Two caveats on negative <code>rho</code> specifically:</p>
+<ul>
+<li><strong>Transaction costs.</strong> Strong negative autocorrelation at daily frequency often reflects bid-ask bounce or a strategy that is harvesting microstructure noise. The corrected Sharpe is arithmetically right but economically fragile — the dependence may vanish the moment you widen spreads or add latency.</li>
+<li><strong>Sign instability.</strong> Mean-reversion regimes flip. Compute <code>rho</code> on rolling 126-day windows; if it swings between -0.4 and +0.1, the full-sample -0.33 is an average of different processes and the correction is not meaningful.</li>
+</ul>
+<h2 id="why-this-kills-overfitted-strategies">Why This Kills Overfitted Strategies</h2>
+<p>The autocorrelation correction is the single most common missing step in strategy evaluation, and it interacts badly with multiple testing.</p>
+<p>Consider a grid search over 200 parameter combinations. You keep the best in-sample Sharpe. Two things then compound:</p>
+<ol>
+<li><strong>Selection bias.</strong> The maximum of 200 noisy Sharpe estimates is far above the true Sharpe of any of them. This is the deflated Sharpe problem: the expected maximum grows with the number of trials.</li>
+<li><strong>Autocorrelation inflation.</strong> Each candidate's test statistic is computed under the independence assumption. If the underlying returns have <code>rho = 0.2</code>, each test's false-positive rate is 18–25% instead of 5%. You are not selecting from 200 candidates at a 5% error rate; you are selecting from 200 candidates at roughly a 20% error rate, and then taking the maximum.</li>
+</ol>
+<p>The result is a strategy that looks significant at <code>p &lt; 0.01</code> on the raw numbers and is pure noise. The autocorrelation correction does not fix selection bias on its own, but it is a prerequisite. Deflating a Sharpe that was never corrected for dependence deflates the wrong quantity.</p>
+<p>A minimal evaluation harness that handles both:</p>
+<pre class="codehilite"><code class="language-python">def evaluate_grid(results: pd.DataFrame, n_trials: int, periods_per_year: int = 252):
+    &quot;&quot;&quot;
+    results: columns ['returns'] as pd.Series, one row per candidate.
+    Returns a frame with raw and corrected Sharpe, t-stats, and a
+    deflation threshold based on the number of trials.
+    &quot;&quot;&quot;
+    rows = []
+    for _, row in results.iterrows():
+        r = row[&quot;returns&quot;]
+        rep = evaluate(r, periods_per_year)
+        n = int(r.dropna().shape[0])
+        t_corr = sharpe_tstat(rep.sr_corrected, rep.rho, n)
+        rows.append({
+            &quot;sr_raw&quot;: rep.sr_raw,
+            &quot;rho&quot;: rep.rho,
+            &quot;sr_corrected&quot;: rep.sr_corrected,
+            &quot;t_corrected&quot;: t_corr,
+            &quot;n&quot;: n,
+        })
+    out = pd.DataFrame(rows)
+
+    # Expected max of n_trials standard normals, as a rough selection threshold.
+    # For a rigorous version use the deflated Sharpe ratio (Bailey &amp; Lopez de Prado).
+    from scipy.stats import norm
+    expected_max_z = norm.ppf(1.0 - 1.0 / (2.0 * n_trials)) if n_trials &gt; 1 else 0.0
+    out[&quot;selection_threshold_t&quot;] = expected_max_z
+    out[&quot;passes&quot;] = out[&quot;t_corrected&quot;] &gt; expected_max_z
+    return out
+</code></pre>
+
+<p>The <code>expected_max_z</code> line is a crude proxy for the multiple-testing hurdle, not a substitute for a proper deflated Sharpe. It is there to make the point concrete: once you correct for <code>rho</code>, the bar the best candidate must clear goes up, and the number of candidates that clear it goes down. Usually to zero, which is the correct answer for most grid searches.</p>
+<h2 id="practical-checklist">Practical Checklist</h2>
+<ul>
+<li>Compute <code>rho</code> on returns, not cumulative PnL, and require at least ~250 observations.</li>
+<li>Apply the Lo factor when <code>|rho| &gt; 0.1</code>; clip <code>rho</code> away from ±1 before taking the square root.</li>
+<li>Correct the standard error as well as the point estimate. Both matter, and they push in the same direction for positive <code>rho</code>.</li>
+<li>Check the ACF out to lag 5. A single dominant lag-1 is a clean AR(1) story; a long tail means you need the general form or a different model.</li>
+<li>Compute <code>rho</code> on rolling windows. Unstable autocorrelation makes the correction unstable, and that instability is itself a finding.</li>
+<li>Never deflate an uncorrected Sharpe. Fix the dependence first, then account for the number of trials.</li>
+</ul>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Sharpe ratio</span><span class="tag-badge">autocorrelation</span><span class="tag-badge">Lo adjustment</span><span class="tag-badge">deflated Sharpe</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
