@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pool-Level Drawdown Circuit Breaker: Deciding Risk Controls with Counterfactual Backtests - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Problem With Per-Position Stops in a Correlated Book A multi-strategy paper account ran fine for weeks, then gave ba...">
+    <meta name="keywords" content="circuit breaker,drawdown,counterfactual backtest,risk management">
+    <meta property="og:title" content="Pool-Level Drawdown Circuit Breaker: Deciding Risk Controls with Counterfactual Backtests">
+    <meta property="og:description" content="The Problem With Per-Position Stops in a Correlated Book A multi-strategy paper account ran fine for weeks, then gave ba...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/41.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Pool-Level Drawdown Circuit Breaker: Deciding Risk Controls with Counterfactual Backtests</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-08</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A multi-strategy paper account ran fine for weeks, then gave back almost everything in one market-wide selloff. The post-mortem was not subtle: every open position sank at the same time. Each strategy had its own stop, and every stop was individually reasonable. But stops are local instruments. They answer "is this position wrong?" They do not answer "is the book wrong right now?"</p>
+<p>When correlation goes to one in a crash, per-position stops fire late and in sequence. By the time the last one triggers, the account has already eaten the full synchronized move. The failure mode is structural, not a tuning problem: N independent stops do not sum to one portfolio-level stop.</p>
+<p>The fix we tested is a pool-level circuit breaker. Compute total unrealized PnL across all open positions. If it drops below a threshold, block every new entry until the drawdown recovers above a recovery line. Exits, stops, and take-profits keep working; only new risk is gated.</p>
+<h2 id="designing-the-breaker">Designing the Breaker</h2>
+<p>Three parameters matter:</p>
+<ul>
+<li><strong><code>trigger_u</code></strong>: block entries when <code>total_unrealized_pnl &lt;= -trigger_u</code>.</li>
+<li><strong><code>recover_u</code></strong>: unblock when <code>total_unrealized_pnl &gt;= -recover_u</code>. Set <code>recover_u &lt; trigger_u</code> so you get hysteresis and do not flap around the threshold.</li>
+<li><strong>Evaluation cadence</strong>: once per bar or tick, before the entry pipeline runs.</li>
+</ul>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+
+
+@dataclass
+class PoolBreaker:
+    trigger_u: float = 8.0
+    recover_u: float = 3.0
+    blocked: bool = False
+    triggers: int = 0
+
+    def update(self, total_unrealized_pnl: float) -&gt; bool:
+        &quot;&quot;&quot;Call once per bar before processing entries. Returns True if entries are allowed.&quot;&quot;&quot;
+        if not self.blocked and total_unrealized_pnl &lt;= -self.trigger_u:
+            self.blocked = True
+            self.triggers += 1
+        elif self.blocked and total_unrealized_pnl &gt;= -self.recover_u:
+            self.blocked = False
+        return not self.blocked
+</code></pre>
+
+<p>Two implementation details that matter more than they look:</p>
+<ol>
+<li><strong>Use unrealized PnL, not equity.</strong> Equity includes realized PnL and funding/fees, which muddies the signal. The breaker is about live exposure bleeding, so measure live exposure.</li>
+<li><strong>Gate at the order router, not in each strategy.</strong> Strategies should not know the breaker exists. Put the check in one place where entries are submitted:</li>
+</ol>
+<pre class="codehilite"><code class="language-python">def submit_entry(order, breaker: PoolBreaker, pool):
+    if not breaker.update(pool.total_unrealized_pnl()):
+        return None  # silently dropped, logged by the router
+    return broker.send(order)
+</code></pre>
+
+<p>Log every drop with the current pool PnL. That log is the dataset you will use to tune the threshold.</p>
+<h2 id="choosing-the-threshold-counterfactual-backtests">Choosing the Threshold: Counterfactual Backtests</h2>
+<p>Picking <code>-8U</code> because it feels right is how you end up writing another post-mortem. The threshold is a parameter, so scan it.</p>
+<p>A counterfactual backtest replays the same historical signals and market data, changing only the risk control. That isolates the effect of the breaker from everything else. The critical requirement is <strong>determinism</strong>: same signal timestamps, same fill model, same fees. If your backtester is not deterministic, fix that first; otherwise the comparison is noise.</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+
+def run_backtest(signals: pd.DataFrame, prices: pd.DataFrame,
+                 breaker_cfg: dict | None) -&gt; dict:
+    breaker = PoolBreaker(**breaker_cfg) if breaker_cfg else None
+    pool = PaperPool()
+    equity_curve = []
+
+    for ts, row in prices.iterrows():
+        pool.mark_to_market(ts, row)
+
+        if breaker is not None:
+            allowed = breaker.update(pool.total_unrealized_pnl())
+        else:
+            allowed = True
+
+        for sig in signals_for(signals, ts):
+            if sig.is_entry and not allowed:
+                pool.log_drop(ts, sig, pool.total_unrealized_pnl())
+                continue
+            pool.apply(sig, row)
+
+        equity_curve.append((ts, pool.equity))
+
+    curve = pd.Series(dict(equity_curve))
+    return {
+        &quot;final_pnl&quot;: curve.iloc[-1] - curve.iloc[0],
+        &quot;max_dd_pct&quot;: max_drawdown_pct(curve),
+        &quot;triggers&quot;: breaker.triggers if breaker else 0,
+        &quot;curve&quot;: curve,
+    }
+</code></pre>
+
+<p>Then scan:</p>
+<pre class="codehilite"><code class="language-python">results = {}
+results[&quot;no_breaker&quot;] = run_backtest(signals, prices, None)
+for t in (6, 8, 10, 12):
+    results[f&quot;breaker_{t}u&quot;] = run_backtest(
+        signals, prices, {&quot;trigger_u&quot;: t, &quot;recover_u&quot;: t * 0.4}
+    )
+
+summary = pd.DataFrame({
+    k: {&quot;final_pnl&quot;: v[&quot;final_pnl&quot;],
+        &quot;max_dd_pct&quot;: v[&quot;max_dd_pct&quot;],
+        &quot;triggers&quot;: v[&quot;triggers&quot;]}
+    for k, v in results.items()
+}).T
+print(summary)
+</code></pre>
+
+<h2 id="what-the-scan-showed">What the Scan Showed</h2>
+<p>On this account's history, the difference was not marginal:</p>
+<table>
+<thead>
+<tr>
+<th>Config</th>
+<th>Final PnL</th>
+<th>Max Drawdown</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No breaker</td>
+<td>-71.58U</td>
+<td>96.4%</td>
+</tr>
+<tr>
+<td>Pool breaker</td>
+<td>+46.91U</td>
+<td>20.4%</td>
+</tr>
+</tbody>
+</table>
+<p>The breaker did not just cut the tail; it flipped the sign of the result. That is worth being skeptical about, and we were. Three things explain it:</p>
+<p><strong>1. The loss distribution was fat-tailed and one-sided.</strong> Without the breaker, the account kept adding positions into a falling market. Each new entry was individually fine by strategy logic, but collectively they were doubling down on a correlated move. The breaker's main job was to stop <em>adding</em> to a losing book, not to exit existing positions.</p>
+<p><strong>2. The -71.58U was concentrated.</strong> A handful of sessions did most of the damage. Removing entries during those sessions removed the bulk of the loss without touching the winners much, because winners came from quieter regimes where the breaker never armed.</p>
+<p><strong>3. Max drawdown fell from 96.4% to 20.4%.</strong> This is the more trustworthy number. Final PnL can be lucky; drawdown reduction across a scan is a structural effect. If the breaker only improved final PnL but not drawdown, we would not have shipped it.</p>
+<h3 id="reading-the-threshold-scan">Reading the Threshold Scan</h3>
+<p>The scan across <code>-6/-8/-10/-12U</code> is where the real decision happens:</p>
+<ul>
+<li><strong>-6U</strong>: triggers often, including in normal noise. You lose good entries and the trigger count is high. Expect lower final PnL with a smoother curve.</li>
+<li><strong>-8U</strong>: the sweet spot on this data. Triggers cluster in the deep-drawdown sessions; few false positives in normal regimes.</li>
+<li><strong>-10U / -12U</strong>: too loose. The breaker arms late, after most of the damage is done, and the drawdown reduction largely disappears.</li>
+</ul>
+<p>Do not pick the threshold with the best final PnL. Pick the one with the best drawdown-adjusted result <em>and</em> a trigger count you can explain. A breaker that fires 200 times in a year is a filter, not a circuit breaker. You can quantify this directly from the drop log:</p>
+<pre class="codehilite"><code class="language-python">def trigger_profile(drop_log: pd.DataFrame) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;drop_log: columns [ts, pool_pnl_at_drop, session_id]&quot;&quot;&quot;
+    return (
+        drop_log.groupby(&quot;session_id&quot;)
+        .agg(drops=(&quot;ts&quot;, &quot;count&quot;), worst_pnl=(&quot;pool_pnl_at_drop&quot;, &quot;min&quot;))
+        .sort_values(&quot;worst_pnl&quot;)
+    )
+</code></pre>
+
+<p>If most drops happen in sessions that also end deeply negative, the breaker is doing its job. If drops are spread evenly across PnL levels, your threshold is too tight.</p>
+<h2 id="why-triggers-cluster-in-deep-drawdown-periods">Why Triggers Cluster in Deep-Drawdown Periods</h2>
+<p>This is the mechanism, and it is the reason the breaker works at all.</p>
+<p>Pool unrealized PnL is a sum over correlated positions. In calm markets, positions are roughly independent: some up, some down, the sum stays near zero. In a selloff, correlation rises and the sum moves as one. So the breaker's trigger condition is rarely met in normal conditions and is met almost immediately when a broad move starts. The trigger distribution is bimodal by construction: near-zero in calm regimes, sharply negative in crashes.</p>
+<p>That has two consequences:</p>
+<ol>
+<li><strong>Low false-positive rate.</strong> You are not sacrificing many good entries, because in calm markets the pool PnL never approaches the threshold.</li>
+<li><strong>Fast arming.</strong> The breaker arms at the <em>start</em> of the correlated move, when the book is still shallow. That is exactly when blocking new entries has the most value.</li>
+</ol>
+<p>The failure mode to watch for is a strategy with genuinely uncorrelated, mean-reverting positions where a single loser can drag the pool PnL down while the rest of the book is healthy. In that case a pool-level breaker can block good entries because of one bad position. If you see that, either exclude that strategy from the pool PnL calculation or pair the breaker with a per-strategy cap.</p>
+<h2 id="how-it-complements-basket-level-stops">How It Complements Basket-Level Stops</h2>
+<p>A basket-level stop closes positions when aggregate loss exceeds a limit. The breaker does something different: it stops <em>new</em> risk while leaving existing risk management untouched.</p>
+<p>They cover different failure modes:</p>
+<ul>
+<li><strong>Basket stop</strong>: "the book is losing, get flat." It reduces exposure but also locks in losses and forces re-entry decisions.</li>
+<li><strong>Pool breaker</strong>: "the book is losing, stop adding." It caps the damage from pyramiding into a correlated move without forcing exits.</li>
+</ul>
+<p>In practice you want both, with the breaker triggering <em>before</em> the basket stop. The breaker's threshold should be tighter than the basket stop's, so entries are blocked first and the basket stop only fires if the existing book keeps deteriorating. This ordering is what prevents the "add, add, add, capitulate" pattern that produced the -71.58U result.</p>
+<p>A minimal combined policy:</p>
+<pre class="codehilite"><code class="language-python">def risk_gate(pool, breaker: PoolBreaker, basket_stop_u: float):
+    pnl = pool.total_unrealized_pnl()
+    entries_allowed = breaker.update(pnl)
+    if pnl &lt;= -basket_stop_u:
+        pool.close_all(&quot;basket_stop&quot;)
+        entries_allowed = False
+    return entries_allowed
+</code></pre>
+
+<p>Keep the two limits separate in config and in logs. When you review a bad session, you want to know which control fired and when.</p>
+<h2 id="practical-notes">Practical Notes</h2>
+<ul>
+<li><strong>Recovery line matters.</strong> Without hysteresis (<code>recover_u == trigger_u</code>), the breaker flaps and you get a burst of entries the moment PnL ticks above the line. Use <code>recover_u</code> around 30-40% of <code>trigger_u</code>.</li>
+<li><strong>Re-run the scan after regime changes.</strong> A threshold tuned on a low-volatility quarter will arm too late in a high-volatility one. Re-scan monthly, or scale the threshold by realized volatility of pool PnL.</li>
+<li><strong>Counterfactual means same everything else.</strong> If you change the threshold and also change position sizing, you have learned nothing. One variable per run.</li>
+<li><strong>Log drops, not just triggers.</strong> The drop log is the artifact that lets you defend the threshold choice later, and it is cheap to keep.</li>
+</ul>
+<p>The breaker is a small amount of code. The value is in the counterfactual backtest that tells you where to set it, and in the discipline of keeping it a pure gate on new entries rather than a second, confused exit rule.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">circuit breaker</span><span class="tag-badge">drawdown</span><span class="tag-badge">counterfactual backtest</span><span class="tag-badge">risk management</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
