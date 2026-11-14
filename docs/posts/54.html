@@ -5,26 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>回撤断路器的盲区：已实现盈亏遮住的眼睛 - 代码与量化</title>
     <meta name="author" content="mattleeee">
-        <meta name="description" content="回撤断路器的盲区：已实现盈亏遮住的眼睛
-
-一、盲区的本质
-
-大多数回撤保护模块的设计逻辑是这样的：
-
-
-
-这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。...">
+        <meta name="description" content="回撤断路器的盲区：已实现盈亏遮住的眼睛 一、盲区的本质 大多数回撤保护模块的设计逻辑是这样的： 这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。但它有一个根本性的盲区：所有判断都基于 on_trade_closed，也就是已实现盈亏（">
     <meta name="keywords" content="回撤保护,连亏保护,浮亏,风控盲区">
     <meta property="og:title" content="回撤断路器的盲区：已实现盈亏遮住的眼睛">
-    <meta property="og:description" content="回撤断路器的盲区：已实现盈亏遮住的眼睛
-
-一、盲区的本质
-
-大多数回撤保护模块的设计逻辑是这样的：
-
-
-
-这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。...">
+    <meta property="og:description" content="回撤断路器的盲区：已实现盈亏遮住的眼睛 一、盲区的本质 大多数回撤保护模块的设计逻辑是这样的： 这段代码看起来没问题。日亏损熔断有了，连亏保护也有了。但它有一个根本性的盲区：所有判断都基于 on_trade_closed，也就是已实现盈亏（">
     <meta property="og:type" content="article">
     <meta property="og:site_name" content="代码与量化">
     <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/54.html">
