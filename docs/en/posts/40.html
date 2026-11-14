@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Long-Hold Token Positions: Sizing and Liquidation Protection - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Long-term holding is often framed as the opposite of active risk management: you pick an asset, size it, and wait....">
+    <meta name="keywords" content="long-term holding,position sizing,liquidation,leverage,risk">
+    <meta property="og:title" content="Long-Hold Token Positions: Sizing and Liquidation Protection">
+    <meta property="og:description" content="Long-term holding is often framed as the opposite of active risk management: you pick an asset, size it, and wait....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/40.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Long-Hold Token Positions: Sizing and Liquidation Protection</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-07</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Long-term holding is often framed as the opposite of active risk management: you pick an asset, size it, and wait. That framing breaks down for tokens that move 10–20% in a day. A "side position" that was supposed to sit quietly at 15% of the account can become 40% of it after a drawdown elsewhere, and if any leverage is involved, the liquidation price does not care about your holding horizon.</p>
+<p>This post walks through the engineering side of a long-hold paper account starting at 100U: how to size the core position, how to compute and monitor liquidation distance for leveraged spot positions, and how to build a hard floor that de-risks without a human in the loop.</p>
+<h2 id="the-account-model">The account model</h2>
+<p>The setup is deliberately minimal:</p>
+<ul>
+<li><strong>Equity</strong>: 100U at start, marked to market every cycle.</li>
+<li><strong>Core hold</strong>: one long-term token position, <strong>no leverage</strong>. It can lose value, but it cannot be liquidated.</li>
+<li><strong>Side positions</strong>: leveraged longs, allowed only within a small, explicit budget.</li>
+<li><strong>Risk system</strong>: recomputes exposure and liquidation distance on every cycle, alerts early, and force-reduces when thresholds are breached.</li>
+</ul>
+<p>The rule "no leverage on the core hold" is the single most important design decision. Leverage converts a volatility problem into a solvency problem, and solvency problems have deadlines. A 30% drawdown in an unlevered position is unpleasant; in a 3x position it is a 90% loss, and at 3.3x it is liquidation.</p>
+<h2 id="position-sizing-math">Position sizing math</h2>
+<h3 id="the-volatility-scaled-cap">The volatility-scaled cap</h3>
+<p>A fixed percentage cap ("no position above 25% of equity") is a floor, not a sizing method, because it ignores how much the asset actually moves. Scale the cap by realized volatility instead:</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def realized_vol(returns: np.ndarray, window: int = 30) -&gt; float:
+    &quot;&quot;&quot;Daily realized volatility from log returns.&quot;&quot;&quot;
+    r = returns[-window:]
+    return float(np.std(r, ddof=1))
+
+def position_cap(equity: float, daily_vol: float,
+                 target_daily_risk: float = 0.02,
+                 hard_cap: float = 0.25) -&gt; float:
+    &quot;&quot;&quot;
+    Notional cap for one position, in quote currency.
+    target_daily_risk: fraction of equity you accept as 1-sigma daily PnL.
+    hard_cap: absolute share of equity a single position may occupy.
+    &quot;&quot;&quot;
+    vol_cap = target_daily_risk / max(daily_vol, 1e-6)
+    return equity * min(vol_cap, hard_cap)
+</code></pre>
+
+<p>With <code>target_daily_risk = 0.02</code>, a token with 8% daily vol gets a cap of 25% of equity (2% / 8% = 0.25), which the hard cap also enforces. A token with 4% daily vol would be allowed up to 50% by the vol rule, but the hard cap cuts it to 25%. The hard cap is the binding constraint for most liquid majors; the vol rule matters most when you hold several positions and need their combined risk to stay bounded.</p>
+<h3 id="the-leverage-budget">The leverage budget</h3>
+<p>Leverage is allowed only on side positions, and only out of a separate budget. Treat it as a loss budget rather than a notional budget:</p>
+<pre class="codehilite"><code class="language-python">def max_leveraged_notional(equity: float, leverage: float,
+                           maintenance_margin: float = 0.005,
+                           liq_buffer: float = 0.50,
+                           budget: float = 0.10) -&gt; float:
+    &quot;&quot;&quot;
+    Largest leveraged notional such that liquidation sits at least
+    `liq_buffer` (fraction of entry) below the current price,
+    and total loss at liquidation stays within `budget` of equity.
+    &quot;&quot;&quot;
+    # Distance from entry to liquidation, as a fraction of entry price,
+    # ignoring fees and funding (add them as a haircut in production).
+    liq_distance = 1.0 / leverage - maintenance_margin
+    if liq_distance &lt; liq_buffer:
+        return 0.0
+    # Loss if price falls to liquidation = notional * liq_distance.
+    return equity * budget / liq_distance
+</code></pre>
+
+<p>The check <code>liq_distance &lt; liq_buffer</code> rejects configurations that are liquidatable too close to entry — for example, 50x with 0.5% maintenance margin puts liquidation about 1.5% below entry, which a single hourly candle can reach. The budget term means a full liquidation costs at most 10% of equity, not the whole account.</p>
+<p>For a 100U account at 3x, <code>liq_distance ≈ 0.328</code>, so the notional cap is <code>100 * 0.10 / 0.328 ≈ 30.5U</code>. That is roughly 10U of margin. Small, and intentionally so: leveraged positions on a 100U account are experiments, not core exposure.</p>
+<h2 id="liquidation-price-for-leveraged-spot">Liquidation price for leveraged spot</h2>
+<p>On a leveraged spot (margin) long, the exchange liquidates when equity in the position falls to the maintenance margin requirement. Working from the maintenance-margin definition:</p>
+<pre class="codehilite"><code class="language-text">liq_price = entry * (1 - 1/L + mmr)
+</code></pre>
+
+<p>where <code>L</code> is leverage and <code>mmr</code> is the maintenance margin rate. Derivation: at price <code>P</code>, position equity is <code>N * (P/entry - 1) + N/L</code> (unrealized PnL plus posted margin, with <code>N</code> the notional). Liquidation occurs when this equals <code>N * mmr * P/entry</code>. Solving for <code>P</code> gives the formula above.</p>
+<pre class="codehilite"><code class="language-python">def liquidation_price(entry: float, leverage: float,
+                      mmr: float = 0.005) -&gt; float:
+    return entry * (1.0 - 1.0 / leverage + mmr)
+
+def distance_to_liq(price: float, entry: float, leverage: float,
+                    mmr: float = 0.005) -&gt; float:
+    &quot;&quot;&quot;Fractional distance from current price down to liquidation.&quot;&quot;&quot;
+    liq = liquidation_price(entry, leverage, mmr)
+    return (price - liq) / price
+</code></pre>
+
+<p>Two practical points. First, <code>mmr</code> is tiered by notional on most venues — read it from the exchange's risk-limit table rather than hardcoding 0.5%. Second, funding payments and fees shift the effective liquidation price slightly; a 1–2% haircut on <code>distance_to_liq</code> is a cheap way to stay conservative.</p>
+<h2 id="the-monitoring-loop">The monitoring loop</h2>
+<p>The loop recomputes equity, exposure shares, and liquidation distance every cycle, then escalates through three levels: <strong>alert</strong>, <strong>warn</strong>, and <strong>de-risk</strong>.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+
+@dataclass
+class Position:
+    symbol: str
+    qty: float
+    entry: float
+    leverage: float = 1.0
+    mmr: float = 0.005
+    is_core: bool = False
+
+@dataclass
+class RiskConfig:
+    max_share: float = 0.25          # max single-position share of equity
+    alert_distance: float = 0.50     # alert at 50% distance to liq
+    derisk_distance: float = 0.30    # cut at 30% distance to liq
+    floor_equity: float = 70.0       # hard floor, in quote currency
+    floor_reduce: float = 0.50       # fraction of position cut at the floor
+
+@dataclass
+class RiskState:
+    alerts: list = field(default_factory=list)
+
+def evaluate(positions: list[Position], prices: dict[str, float],
+             cash: float, cfg: RiskConfig, state: RiskState) -&gt; list[dict]:
+    equity = cash + sum(p.qty * prices[p.symbol] for p in positions)
+    actions = []
+
+    for p in positions:
+        price = prices[p.symbol]
+        notional = p.qty * price
+
+        # 1. Concentration check (core hold included).
+        share = notional / equity if equity &gt; 0 else 1.0
+        if share &gt; cfg.max_share:
+            actions.append({&quot;symbol&quot;: p.symbol, &quot;type&quot;: &quot;TRIM&quot;,
+                            &quot;reason&quot;: f&quot;share {share:.1%} &gt; {cfg.max_share:.0%}&quot;})
+
+        # 2. Liquidation distance (leveraged only).
+        if p.leverage &gt; 1.0:
+            dist = distance_to_liq(price, p.entry, p.leverage, p.mmr)
+            if dist &lt; cfg.derisk_distance:
+                actions.append({&quot;symbol&quot;: p.symbol, &quot;type&quot;: &quot;CUT&quot;,
+                                &quot;reason&quot;: f&quot;liq distance {dist:.1%}&quot;})
+            elif dist &lt; cfg.alert_distance:
+                actions.append({&quot;symbol&quot;: p.symbol, &quot;type&quot;: &quot;ALERT&quot;,
+                                &quot;reason&quot;: f&quot;liq distance {dist:.1%}&quot;,
+                                &quot;level&quot;: &quot;warn&quot;})
+
+    # 3. Hard equity floor: de-risk regardless of why equity fell.
+    if equity &lt; cfg.floor_equity:
+        for p in positions:
+            if not p.is_core:
+                actions.append({&quot;symbol&quot;: p.symbol, &quot;type&quot;: &quot;CUT&quot;,
+                                &quot;reason&quot;: f&quot;equity floor {equity:.1f}&quot;,
+                                &quot;fraction&quot;: cfg.floor_reduce})
+        state.alerts.append(f&quot;FLOOR BREACH: equity={equity:.2f}&quot;)
+
+    return actions
+</code></pre>
+
+<p>A few things this loop does that matter more than the code itself:</p>
+<ul>
+<li><strong>Equity is marked to market, not cost basis.</strong> A position that "hasn't been sold" still changes the account's risk profile every time the price moves.</li>
+<li><strong>The concentration check includes the core hold.</strong> If the token rallies and the core position grows past the cap, the system trims it. This is the opposite of instinct — you trim winners — but it keeps the account from becoming a single bet.</li>
+<li><strong>The floor is independent of position logic.</strong> It triggers on equity alone, so it catches correlated drawdowns across positions, funding bleed, and anything else the per-position checks miss.</li>
+</ul>
+<h2 id="why-buy-and-hold-still-needs-an-active-risk-system">Why "buy and hold" still needs an active risk system</h2>
+<p>An unlevered long-hold has no liquidation price, but it has three live risks that a passive posture does not address.</p>
+<p><strong>Concentration drift.</strong> A 25% position that doubles becomes 40% of a rebalanced account and more than 40% of one whose cash has been spent. Token volatility compounds this: a 3x rally in one holding can make the rest of the book irrelevant. The cap has to be re-evaluated on every mark, not set once at entry.</p>
+<p><strong>Volatility regime shifts.</strong> Sizing based on trailing 30-day vol is fine until vol triples. A position sized at 2% daily risk under 4% vol becomes 6% daily risk under 12% vol with no trade made. The loop should re-run <code>position_cap</code> on a schedule and trim when the cap falls below current notional.</p>
+<p><strong>Operational failure.</strong> The most common way a long-hold account dies is not a bad thesis; it is the holder not looking. A floor that cuts exposure at, say, 70% of starting equity converts a potential 100% loss into a bounded one, and it works on a timer rather than on attention.</p>
+<p>None of this requires predicting price. It requires knowing, at every moment, what fraction of the account each position occupies and how far the leveraged ones are from liquidation — and having code that acts on those numbers without waiting for a human.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">long-term holding</span><span class="tag-badge">position sizing</span><span class="tag-badge">liquidation</span><span class="tag-badge">leverage</span><span class="tag-badge">risk</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
