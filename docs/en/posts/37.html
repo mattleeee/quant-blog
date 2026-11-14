@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Market Sentiment as an Input: Integrating the Fear &amp; Greed Index - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Fear &amp; Greed index is a daily composite scaled 0–100, built from volatility, momentum, social signals, dominance and...">
+    <meta name="keywords" content="Fear and Greed,sentiment,filter,data pipeline,crypto">
+    <meta property="og:title" content="Market Sentiment as an Input: Integrating the Fear &amp; Greed Index">
+    <meta property="og:description" content="The Fear &amp; Greed index is a daily composite scaled 0–100, built from volatility, momentum, social signals, dominance and...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/37.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Market Sentiment as an Input: Integrating the Fear &amp; Greed Index</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-04</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>The Fear &amp; Greed index is a daily composite scaled 0–100, built from volatility, momentum, social signals, dominance and trend components. The temptation is to trade it directly: buy at 10, sell at 90. That rarely survives contact with real data — the index spends weeks in "extreme" territory during trending markets, and each reading is a lagging summary of moves that already happened.</p>
+<p>The more defensible use is as a <strong>context layer</strong>. You fetch it once a day, combine it with market internals you already track, and let it bias — not dictate — your execution. In practice that means three things:</p>
+<ol>
+<li>A scheduled job that pulls the index plus internals and computes a composite score.</li>
+<li>A morning summary pushed to wherever you read it.</li>
+<li>A soft filter that suppresses <em>new</em> entries in the direction the crowd is already leaning, while leaving exits and existing positions alone.</li>
+</ol>
+<p>This post walks through the pipeline, the scoring design, the logging that lets you test whether the filter deserves to exist, and the discipline of killing it when the data says so.</p>
+<h2 id="the-data-source-and-caching">The data source and caching</h2>
+<p>The public Fear &amp; Greed endpoints (crypto and equities variants) return a small JSON payload: a value, a classification string, and a timestamp. Two rules apply to any external sentiment source:</p>
+<ul>
+<li><strong>Cache aggressively.</strong> The index updates once a day. Hitting the endpoint on every strategy tick is wasteful and gets you rate-limited.</li>
+<li><strong>Never let a fetch failure break the trading loop.</strong> A missing sentiment value should degrade to neutral, not crash the process.</li>
+</ul>
+<p>A simple file-backed cache with a TTL and a stale-fallback path covers both:</p>
+<pre class="codehilite"><code class="language-python">import json
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import requests
+
+CACHE_PATH = Path(&quot;data/fng_cache.json&quot;)
+TTL_SECONDS = 6 * 60 * 60
+ENDPOINT = &quot;https://api.alternative.me/fng/?limit=1&quot;
+
+def fetch_fng(timeout: float = 10.0) -&gt; dict | None:
+    &quot;&quot;&quot;Return {'value': int, 'label': str, 'ts': iso} or None on failure.&quot;&quot;&quot;
+    if CACHE_PATH.exists():
+        cached = json.loads(CACHE_PATH.read_text())
+        age = time.time() - cached[&quot;fetched_at&quot;]
+        if age &lt; TTL_SECONDS:
+            return cached[&quot;payload&quot;]
+
+    try:
+        resp = requests.get(ENDPOINT, timeout=timeout)
+        resp.raise_for_status()
+        row = resp.json()[&quot;data&quot;][0]
+        payload = {
+            &quot;value&quot;: int(row[&quot;value&quot;]),
+            &quot;label&quot;: row[&quot;value_classification&quot;],
+            &quot;ts&quot;: datetime.fromtimestamp(
+                int(row[&quot;timestamp&quot;]), tz=timezone.utc
+            ).isoformat(),
+        }
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CACHE_PATH.write_text(json.dumps(
+            {&quot;fetched_at&quot;: time.time(), &quot;payload&quot;: payload}
+        ))
+        return payload
+    except Exception:
+        # Fall back to whatever is on disk, even if stale.
+        if CACHE_PATH.exists():
+            return json.loads(CACHE_PATH.read_text())[&quot;payload&quot;]
+        return None
+</code></pre>
+
+<p>The stale fallback matters more than it looks. On a network blip you'd rather filter on yesterday's reading than skip the filter entirely and take a full-size entry into extreme greed.</p>
+<p>Note that the timestamp in the payload is the index's own publication time, not your fetch time. Store both. You'll want the index timestamp when you later align sentiment with trade timestamps.</p>
+<h2 id="designing-the-composite-score">Designing the composite score</h2>
+<p>The raw index is one number. A composite that blends it with internals you trust is more stable and more explainable. The design goal is <em>not</em> to find the single best score — it's to build something whose components you can inspect when it misbehaves.</p>
+<p>A reasonable structure:</p>
+<ul>
+<li><strong>Base component (weight 0.5):</strong> the Fear &amp; Greed value, rescaled to −1..+1.</li>
+<li><strong>Market internals (weight 0.3):</strong> breadth-style measures, e.g. the fraction of your universe above a moving average, mapped to −1..+1.</li>
+<li><strong>Trend/volatility regime (weight 0.2):</strong> realized volatility percentile inverted, so calm regimes score positive.</li>
+</ul>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+
+def rescale(value: float, lo: float, hi: float) -&gt; float:
+    &quot;&quot;&quot;Map [lo, hi] to [-1, 1], clamped.&quot;&quot;&quot;
+    x = (value - lo) / (hi - lo)
+    return max(-1.0, min(1.0, 2 * x - 1))
+
+@dataclass
+class SentimentScore:
+    composite: float      # -1 .. +1
+    fng: float
+    internals: float
+    regime: float
+    label: str
+
+def compute_composite(fng_value: float | None,
+                      breadth: float | None,
+                      vol_pct: float | None) -&gt; SentimentScore:
+    fng = rescale(fng_value, 0, 100) if fng_value is not None else 0.0
+    internals = rescale(breadth, 0.0, 1.0) if breadth is not None else 0.0
+    # High vol percentile -&gt; negative regime score.
+    regime = rescale(1.0 - vol_pct, 0.0, 1.0) if vol_pct is not None else 0.0
+
+    composite = 0.5 * fng + 0.3 * internals + 0.2 * regime
+
+    if composite &gt;= 0.6:
+        label = &quot;extreme_greed&quot;
+    elif composite &lt;= -0.6:
+        label = &quot;extreme_fear&quot;
+    else:
+        label = &quot;neutral&quot;
+
+    return SentimentScore(composite, fng, internals, regime, label)
+</code></pre>
+
+<p>Two properties make this worth the extra code. First, missing inputs collapse to neutral rather than skewing the score. Second, when the composite disagrees with your gut, you can print the three components and see which one moved. A single opaque number gives you nothing to debug.</p>
+<p>The thresholds (±0.6) are arbitrary starting points. They should be tuned against your own trade history, not borrowed from a blog post — including this one.</p>
+<h2 id="the-morning-summary-job">The morning summary job</h2>
+<p>The scheduled job does the fetch, the composite, and the push. Keep it dumb: no order placement, no strategy state mutation. It writes a snapshot to disk and sends a message.</p>
+<pre class="codehilite"><code class="language-python">def morning_job() -&gt; None:
+    fng = fetch_fng()
+    breadth = load_breadth()          # your own internals
+    vol_pct = load_vol_percentile()   # your own regime calc
+
+    score = compute_composite(
+        fng[&quot;value&quot;] if fng else None, breadth, vol_pct
+    )
+
+    snapshot = {
+        &quot;date&quot;: datetime.now(timezone.utc).date().isoformat(),
+        &quot;fng_value&quot;: fng[&quot;value&quot;] if fng else None,
+        &quot;fng_ts&quot;: fng[&quot;ts&quot;] if fng else None,
+        &quot;composite&quot;: round(score.composite, 3),
+        &quot;label&quot;: score.label,
+        &quot;components&quot;: {
+            &quot;fng&quot;: round(score.fng, 3),
+            &quot;internals&quot;: round(score.internals, 3),
+            &quot;regime&quot;: round(score.regime, 3),
+        },
+    }
+    append_snapshot(snapshot)   # one JSON line per day
+    push_summary(snapshot)      # Slack, Telegram, email — your call
+</code></pre>
+
+<p><code>append_snapshot</code> should write JSON lines to a dated file. That file becomes the historical series you'll join against trades later. If you skip this step and only push the summary to chat, you've thrown away the dataset you need to evaluate the filter.</p>
+<h2 id="the-filter-as-a-soft-constraint">The filter as a soft constraint</h2>
+<p>The filter's job is narrow: block <em>new</em> entries in the crowded direction. In extreme greed, suppress new long entries. In extreme fear, suppress new shorts. Exits, stops, and position sizing are untouched — you never want sentiment to trap you in a losing position.</p>
+<p>Wire it in as a gate in the signal path, not inside the strategy logic:</p>
+<pre class="codehilite"><code class="language-python">def allow_new_entry(side: str, score: SentimentScore) -&gt; bool:
+    if side == &quot;long&quot; and score.label == &quot;extreme_greed&quot;:
+        return False
+    if side == &quot;short&quot; and score.label == &quot;extreme_fear&quot;:
+        return False
+    return True
+</code></pre>
+
+<p>"Soft" is the key word. A hard filter that flips entire strategies off based on a daily number will produce long flat periods that are hard to attribute. A gate on new entries only is easier to reason about and easier to A/B.</p>
+<p>If you want a middle ground, scale size instead of blocking:</p>
+<pre class="codehilite"><code class="language-python">def size_multiplier(score: SentimentScore) -&gt; float:
+    if score.label in (&quot;extreme_greed&quot;, &quot;extreme_fear&quot;):
+        return 0.5
+    return 1.0
+</code></pre>
+
+<p>Both approaches are testable. Pick one, don't stack them, and log which one was active.</p>
+<h2 id="logging-sentiment-with-every-trade">Logging sentiment with every trade</h2>
+<p>This is the part people skip, and it's the only part that decides whether the filter survives. Every trade record needs the sentiment state that was in force when the entry was decided.</p>
+<pre class="codehilite"><code class="language-python">def log_trade(trade: dict, score: SentimentScore) -&gt; None:
+    record = {
+        **trade,
+        &quot;sentiment_composite&quot;: round(score.composite, 3),
+        &quot;sentiment_label&quot;: score.label,
+        &quot;sentiment_fng&quot;: score.fng,
+        &quot;sentiment_internals&quot;: score.internals,
+        &quot;sentiment_regime&quot;: score.regime,
+    }
+    with open(&quot;data/trades.jsonl&quot;, &quot;a&quot;) as f:
+        f.write(json.dumps(record) + &quot;\n&quot;)
+</code></pre>
+
+<p>Log the components, not just the label. When you later ask "did the filter help?", you'll want to slice by which component was driving the extreme, because the index component and the internals component may behave very differently.</p>
+<p>Once trades carry the sentiment snapshot, evaluation is a groupby:</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+
+def evaluate_filter(path: str = &quot;data/trades.jsonl&quot;) -&gt; pd.DataFrame:
+    df = pd.read_json(path, lines=True)
+    df[&quot;pnl&quot;] = df[&quot;exit_price&quot;] / df[&quot;entry_price&quot;] - 1
+    df.loc[df[&quot;side&quot;] == &quot;short&quot;, &quot;pnl&quot;] *= -1
+
+    gated = df[&quot;sentiment_label&quot;].isin([&quot;extreme_greed&quot;, &quot;extreme_fear&quot;])
+    blocked = gated &amp; (
+        ((df[&quot;side&quot;] == &quot;long&quot;) &amp; (df[&quot;sentiment_label&quot;] == &quot;extreme_greed&quot;)) |
+        ((df[&quot;side&quot;] == &quot;short&quot;) &amp; (df[&quot;sentiment_label&quot;] == &quot;extreme_fear&quot;))
+    )
+
+    return df.groupby(&quot;sentiment_label&quot;).agg(
+        trades=(&quot;pnl&quot;, &quot;size&quot;),
+        avg_pnl=(&quot;pnl&quot;, &quot;mean&quot;),
+        hit_rate=(&quot;pnl&quot;, lambda s: (s &gt; 0).mean()),
+        blocked_by_filter=(&quot;pnl&quot;, lambda s: blocked.loc[s.index].sum()),
+    )
+</code></pre>
+
+<p>The question you're answering is concrete: among trades taken in extreme greed, what was the average PnL of longs versus shorts? If longs in extreme greed performed the same as longs in neutral, the filter blocked trades for nothing. If they underperformed, it earned its place. Same logic for shorts in extreme fear.</p>
+<p>Watch the sample size. Extreme readings cluster — you may get twenty relevant trades in a year. Treat any conclusion from that with suspicion until you have more, or pool across related markets.</p>
+<h2 id="demoting-a-filter-when-the-data-disagrees">Demoting a filter when the data disagrees</h2>
+<p>Filters accumulate. Someone adds a sentiment gate, someone else adds a volatility gate, and two years later nobody can say which one contributes. The discipline is to give every filter a review date and a demotion path.</p>
+<p>A simple workflow:</p>
+<ol>
+<li><strong>Quarterly review.</strong> Re-run <code>evaluate_filter</code> with the latest trades. Compare gated versus ungated cohorts.</li>
+<li><strong>Define the kill criterion up front.</strong> Example: "If the blocked cohort's average PnL is within ±10 bps of the allowed cohort over at least 50 trades, demote to a size multiplier."</li>
+<li><strong>Demote, don't delete.</strong> Move the rule from a hard gate to a size multiplier, or from a size multiplier to a logged-only annotation. Keep the logging running. You may promote it again in a different regime.</li>
+<li><strong>Record the decision.</strong> A one-line note in the repo — date, criterion, outcome — saves the next person from re-litigating it.</li>
+</ol>
+<p>The demotion step is where most systems rot. A filter that no longer earns its place but stays in the code silently shrinks your opportunity set. Keeping the sentiment fields in the trade log means demotion costs you nothing: the data keeps accumulating while the constraint loosens.</p>
+<p>One more habit worth building: log the sentiment snapshot even when the filter is in "annotation only" mode. The cheapest way to evaluate a hypothetical filter is to run it in shadow for a quarter and compare what it <em>would</em> have blocked against what actually happened.</p>
+<h2 id="wrapping-up">Wrapping up</h2>
+<p>The Fear &amp; Greed index is a decent input and a poor signal. Used as a context layer — cached, composited with internals, applied as a soft gate on new entries, and logged on every trade — it becomes something you can measure. The measurement is the point. A filter that can't be evaluated is just an opinion with a cron job attached.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-04 08:46:36</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AMD</td>
+<td>高质量标的做多</td>
+<td>$507.55</td>
+<td>$528.8671</td>
+<td>$496.8915</td>
+<td>1:2.0</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Fear and Greed</span><span class="tag-badge">sentiment</span><span class="tag-badge">filter</span><span class="tag-badge">data pipeline</span><span class="tag-badge">crypto</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
