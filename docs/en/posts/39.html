@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anti-Overfitting for Retail Backtests: Few Rules, Fewer Trades, More Skepticism - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Why the Fifth Rule Is Usually Noise Every discretionary backtest dies the same death....">
+    <meta name="keywords" content="overfitting,backtest discipline,out-of-sample,rule count">
+    <meta property="og:title" content="Anti-Overfitting for Retail Backtests: Few Rules, Fewer Trades, More Skepticism">
+    <meta property="og:description" content="Why the Fifth Rule Is Usually Noise Every discretionary backtest dies the same death....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/39.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Anti-Overfitting for Retail Backtests: Few Rules, Fewer Trades, More Skepticism</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-06</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Every discretionary backtest dies the same death. You start with a simple idea — buy the pullback, exit on a failed retest. It returns something mediocre. So you add a filter: skip trades when volatility is too high. The equity curve improves. You add another: only take longs when the trend filter agrees. Better. One more: require volume confirmation. Now the curve looks great, and you have five conditions, each of which was chosen because it made the past look better.</p>
+<p>That is the entire failure mode in one sentence. Each added rule is a new degree of freedom, and every degree of freedom is a chance to fit noise rather than signal. A retail backtest with ten boolean conditions and a parameter grid is not a strategy; it is a compression algorithm for historical data. The compression is excellent. The generalization is not.</p>
+<p>The defensive doctrine here is short enough to memorize:</p>
+<ul>
+<li><strong>Few rules over many.</strong> Every added condition must survive its own audit.</li>
+<li><strong>Fewer trades with clear invalidation over many marginal ones.</strong> A trade you cannot invalidate is not a trade, it is a hope.</li>
+<li><strong>Distrust any edge that only appears after tuning.</strong> If it needs the search to exist, the search created it.</li>
+<li><strong>Re-test on unseen data before believing anything.</strong> Including your own improvements.</li>
+</ul>
+<p>Below is how to apply that in code and process.</p>
+<h2 id="the-rule-that-improved-the-backtest-by-rejecting-52-trades">The Rule That "Improved" the Backtest by Rejecting 52 Trades</h2>
+<p>A concrete case. The base strategy took ~400 trades over several years and had a modest expectancy. Adding a filter — "skip entries when the 20-day realized volatility is above its 80th percentile" — removed 52 trades and lifted the profit factor from 1.18 to 1.41. Tempting. Ship it.</p>
+<p>But that filter was not proposed in advance. It was proposed <em>after</em> looking at the losing trades, noticing they clustered in high-volatility regimes, and encoding that observation as a rule. That is a hypothesis generated from the same data used to test it. The 52 rejected trades are not out-of-sample evidence; they are the training set for the filter.</p>
+<p>The fix is an A/B audit of the rule itself, treated as a separate hypothesis with its own test:</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+
+def ab_audit(trades: pd.DataFrame, filter_mask: pd.Series,
+             n_perm: int = 5000, seed: int = 7) -&gt; dict:
+    &quot;&quot;&quot;
+    trades: one row per trade with columns ['pnl', 'entry_time'].
+    filter_mask: True where the filter would REJECT the trade.
+    Question: is the rejected subset's mean pnl meaningfully worse than
+    the kept subset, beyond what random rejection of the same size gives?
+    &quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    pnl = trades[&quot;pnl&quot;].to_numpy()
+    rejected = filter_mask.to_numpy()
+    k = rejected.sum()
+
+    observed_gap = pnl[~rejected].mean() - pnl[rejected].mean()
+
+    gaps = np.empty(n_perm)
+    for i in range(n_perm):
+        idx = rng.choice(len(pnl), size=k, replace=False)
+        mask = np.zeros(len(pnl), dtype=bool)
+        mask[idx] = True
+        gaps[i] = pnl[~mask].mean() - pnl[mask].mean()
+
+    p_value = (gaps &gt;= observed_gap).mean()
+    return {
+        &quot;n_trades&quot;: len(pnl),
+        &quot;n_rejected&quot;: int(k),
+        &quot;observed_gap&quot;: round(observed_gap, 4),
+        &quot;p_value&quot;: round(p_value, 4),
+    }
+</code></pre>
+
+<p>If the p-value is not small — and with 52 trades out of 400, it usually is not — the filter is not evidence of a regime effect. It is a random subset that happened to contain losers. The honest outcome is to drop the rule and keep the simpler system.</p>
+<p>There is a second, cheaper audit: does the rule survive on a holdout period it never saw? Split by time, not randomly. Random splits leak regime information across the boundary; time splits mimic what you will actually face.</p>
+<pre class="codehilite"><code class="language-python">def time_split_ab(trades: pd.DataFrame, filter_mask: pd.Series,
+                  split_frac: float = 0.6) -&gt; pd.DataFrame:
+    trades = trades.sort_values(&quot;entry_time&quot;).reset_index(drop=True)
+    filter_mask = filter_mask.loc[trades.index]
+    cut = int(len(trades) * split_frac)
+
+    rows = []
+    for name, sl in [(&quot;in_sample&quot;, slice(0, cut)), (&quot;holdout&quot;, slice(cut, None))]:
+        sub = trades.iloc[sl]
+        rej = filter_mask.iloc[sl]
+        rows.append({
+            &quot;period&quot;: name,
+            &quot;pf_all&quot;: profit_factor(sub[&quot;pnl&quot;]),
+            &quot;pf_kept&quot;: profit_factor(sub.loc[~rej, &quot;pnl&quot;]),
+            &quot;n_rejected&quot;: int(rej.sum()),
+        })
+    return pd.DataFrame(rows)
+
+
+def profit_factor(pnl: pd.Series) -&gt; float:
+    wins = pnl[pnl &gt; 0].sum()
+    losses = -pnl[pnl &lt; 0].sum()
+    return round(wins / losses, 3) if losses &gt; 0 else float(&quot;inf&quot;)
+</code></pre>
+
+<p>A rule that lifts profit factor in-sample but does nothing in the holdout is a rule you invented, not one the market gave you.</p>
+<h2 id="the-multiple-comparisons-trap-in-parameter-sweeps">The Multiple-Comparisons Trap in Parameter Sweeps</h2>
+<p>Parameter sweeps are where retail backtests quietly become data mining. Run 12 variants of a stop-loss, 8 of a take-profit, 5 of a trend filter — that is 480 configurations. The best one will look good <em>even if every configuration is pure noise</em>. The maximum of 480 random draws is not a discovery; it is the expected maximum of 480 random draws.</p>
+<p>You can quantify this. Under the null hypothesis of no edge, the best in-sample Sharpe across N independent trials has an expected value roughly on the order of <code>sqrt(2 * ln(N))</code> times the standard error of a single trial. That is why "I tested 500 combos and found one with Sharpe 2.1" is not impressive.</p>
+<p>Two practical defenses:</p>
+<p><strong>1. Correct the significance threshold.</strong> If you test N configurations and want a family-wise error rate of α, require each individual result to beat a Bonferroni-style threshold of α/N. Crude, but it kills most false discoveries outright.</p>
+<pre class="codehilite"><code class="language-python">def sweep_report(results: pd.DataFrame, alpha: float = 0.05) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    results: columns ['config_id', 'sharpe', 'n_trades', 'p_value']
+    p_value: from a permutation test of that config's expectancy vs zero.
+    &quot;&quot;&quot;
+    n = len(results)
+    threshold = alpha / n
+    out = results.copy()
+    out[&quot;bonferroni_threshold&quot;] = threshold
+    out[&quot;survives&quot;] = out[&quot;p_value&quot;] &lt; threshold
+    return out.sort_values(&quot;p_value&quot;)
+</code></pre>
+
+<p><strong>2. Count your trials honestly.</strong> Every variant you ran and discarded is a trial. If you cannot remember how many you ran, your effective N is larger than you think, and your best result is weaker than it looks. Keep a log.</p>
+<pre class="codehilite"><code class="language-python">import json, datetime
+
+def log_trial(path: str, config: dict, metrics: dict) -&gt; None:
+    with open(path, &quot;a&quot;) as f:
+        f.write(json.dumps({
+            &quot;ts&quot;: datetime.datetime.utcnow().isoformat(),
+            &quot;config&quot;: config,
+            &quot;metrics&quot;: metrics,
+        }) + &quot;\n&quot;)
+</code></pre>
+
+<p>The log is uncomfortable to keep precisely because it makes the search visible. That is the point.</p>
+<h2 id="honest-metrics">Honest Metrics</h2>
+<p>Most retail backtests report the wrong numbers. Total return and win rate are the worst offenders — win rate in particular rewards strategies that take many small wins and one catastrophic loss. Report these instead:</p>
+<h3 id="expectancy-net-of-fees">Expectancy net of fees</h3>
+<p>Per-trade expectancy after realistic costs, including slippage. If your edge disappears at 2x your assumed fees, it was never an edge.</p>
+<pre class="codehilite"><code class="language-python">def expectancy(pnl: pd.Series, fees_per_trade: float) -&gt; float:
+    net = pnl - fees_per_trade
+    return round(net.mean(), 4)
+</code></pre>
+
+<h3 id="profit-factor">Profit factor</h3>
+<p>Gross wins over gross losses. Above ~1.3 net of costs is worth a second look; below 1.1 is noise territory. But profit factor alone hides path dependence — pair it with drawdown.</p>
+<h3 id="monthly-consistency">Monthly consistency</h3>
+<p>Bucket returns by calendar month. A strategy that makes all its money in three months out of forty-eight is a regime bet, not a system.</p>
+<pre class="codehilite"><code class="language-python">def monthly_consistency(returns: pd.Series) -&gt; pd.DataFrame:
+    monthly = (1 + returns).resample(&quot;ME&quot;).prod() - 1
+    return pd.DataFrame({
+        &quot;month&quot;: monthly.index.strftime(&quot;%Y-%m&quot;),
+        &quot;return&quot;: monthly.round(4),
+        &quot;positive&quot;: monthly &gt; 0,
+    })
+</code></pre>
+
+<p>Look at the fraction of positive months and the worst month. If 80% of the total return comes from the top 10% of months, you are not running a strategy; you are waiting for a handful of lucky regimes and paying fees the rest of the time.</p>
+<h2 id="the-person-who-built-it-cannot-approve-it">The Person Who Built It Cannot Approve It</h2>
+<p>This is the cultural rule, and it matters more than any code above. The person who tuned the parameters has a vested interest in the curve. They have seen every variant. They know which filter "works." That knowledge is contamination, and it does not wash off.</p>
+<p>The fix is procedural, not technical: <strong>the backtester must never be the approver.</strong> Someone else — a partner, a friend, a second account with a written checklist — reviews the out-of-sample report without seeing the parameter search. They get the final config, the holdout results, and the trial count. Nothing else. If the strategy only convinces the person who built it, it does not convince anyone.</p>
+<p>A minimal approval checklist:</p>
+<ul>
+<li>Rule count is small and each rule has an A/B audit with a p-value.</li>
+<li>The trial log exists and the best result survives a multiple-comparisons correction.</li>
+<li>Expectancy is positive after 2x assumed fees.</li>
+<li>Profit factor and monthly consistency hold on the holdout period.</li>
+<li>A second person, who did not tune it, signed off.</li>
+</ul>
+<p>If any line fails, the strategy goes back to the simplest version that passed. Usually that is the version with two rules and a lot of skipped trades — which is exactly the version most people discard on the way to a prettier curve.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-06 08:46:43</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MUU</td>
+<td>庄家做空</td>
+<td>$13.57</td>
+<td>$12.593</td>
+<td>$14.045</td>
+<td>1:2.1</td>
+</tr>
+<tr>
+<td>KOMA</td>
+<td>短平快做空</td>
+<td>$0.0128</td>
+<td>$0.0124</td>
+<td>$0.0131</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">overfitting</span><span class="tag-badge">backtest discipline</span><span class="tag-badge">out-of-sample</span><span class="tag-badge">rule count</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
