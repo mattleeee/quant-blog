@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monte Carlo Permutation Tests: Stress-Auditing a Trading Strategy - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Problem With a Single Backtest A backtest gives you a number: total PnL, Sharpe, max drawdown....">
+    <meta name="keywords" content="Monte Carlo,permutation test,max drawdown,ruin probability">
+    <meta property="og:title" content="Monte Carlo Permutation Tests: Stress-Auditing a Trading Strategy">
+    <meta property="og:description" content="The Problem With a Single Backtest A backtest gives you a number: total PnL, Sharpe, max drawdown....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/42.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Monte Carlo Permutation Tests: Stress-Auditing a Trading Strategy</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-09</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A backtest gives you a number: total PnL, Sharpe, max drawdown. The first two are (roughly) order-independent if you're just summing returns. Max drawdown is not. Neither is the probability that your equity curve touches a ruin threshold before the backtest window ends.</p>
+<p>Consider two strategies with identical trade lists: same 300 trades, same total PnL, same win rate. One sequence happens to cluster its losses early and its wins late. The other does the reverse. Same totals, radically different drawdowns, radically different risk of blowing up mid-stream. Your backtest only sampled <em>one</em> of the possible orderings — the one that actually happened, or worse, the one your optimization pipeline selected for.</p>
+<p>A Monte Carlo permutation test fixes this cheaply. Shuffle the realized trade PnL sequence thousands of times, recompute max drawdown and ruin indicators on every shuffle, then look at the resulting distribution. If your backtest's drawdown sits at the 5th percentile of the shuffled distribution, your headline number is flattering you. If it sits near the median, the strategy's risk is roughly order-neutral and you can trust the backtest more.</p>
+<p>The key assumption: <strong>the multiset of trade PnLs is fixed, only the order is random.</strong> This tests sensitivity to sequencing, not to whether the trades themselves were lucky. It's a stress audit of path risk, not a validation of edge.</p>
+<h2 id="setting-up-the-data">Setting Up the Data</h2>
+<p>Assume you have a vector of per-trade PnL in account currency (or in R-multiples — the math is identical, only the ruin thresholds change units).</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+rng = np.random.default_rng(42)
+
+# Example: 300 trades, mean +0.35R, std 1.2R, slight positive skew
+pnl = rng.normal(0.35, 1.2, size=300)
+
+# Add a few fat losses to make it realistic
+pnl[:5] = -2.5
+</code></pre>
+
+<p>The permutation test only cares about the values, not their original order. If you want to audit the <em>actual</em> backtest drawdown, keep the original array around — you'll compare it against the shuffled distribution.</p>
+<h2 id="vectorized-numpy-implementation">Vectorized NumPy Implementation</h2>
+<p>The naive approach loops over 5000 shuffles in Python and calls <code>np.cumsum</code> each time. That's fine for 300 trades but painful at 5000 trades × 5000 shuffles. Vectorize it: build a matrix of shape <code>(n_sims, n_trades)</code>, cumsum along axis 1, then compute running max and drawdown per row.</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+
+def permutation_drawdowns(pnl, n_sims=5000, seed=0):
+    pnl = np.asarray(pnl, dtype=np.float64)
+    n = pnl.size
+    rng = np.random.default_rng(seed)
+
+    # (n_sims, n) matrix of shuffled PnL
+    idx = rng.permuted(np.tile(np.arange(n), (n_sims, 1)), axis=1)
+    sims = pnl[idx]
+
+    # Cumulative equity per simulation
+    equity = np.cumsum(sims, axis=1)
+
+    # Running peak and drawdown
+    peaks = np.maximum.accumulate(equity, axis=1)
+    # Include starting equity of 0 as a peak
+    peaks = np.maximum(peaks, 0.0)
+    dd = peaks - equity
+
+    max_dd = dd.max(axis=1)
+    return max_dd, equity
+</code></pre>
+
+<p>Two details matter here:</p>
+<ol>
+<li><strong><code>rng.permuted</code></strong> shuffles each row independently in one call. <code>np.random.shuffle</code> on a 2D array shuffles along axis 0 only, which is not what you want.</li>
+<li><strong>Seed the peak at 0.</strong> If the first few trades are losses, equity starts negative and <code>np.maximum.accumulate</code> would treat the first (negative) value as the peak, understating drawdown. Prepending a zero to the equity curve — or folding 0 into the peak via <code>np.maximum</code> — fixes this.</li>
+</ol>
+<p>For 5000 trades and 5000 simulations, that's a 25M-element float64 array — about 200 MB. If memory is tight, chunk the simulations:</p>
+<pre class="codehilite"><code class="language-python">def permutation_drawdowns_chunked(pnl, n_sims=5000, chunk=500, seed=0):
+    pnl = np.asarray(pnl, dtype=np.float64)
+    n = pnl.size
+    rng = np.random.default_rng(seed)
+    out = np.empty(n_sims, dtype=np.float64)
+
+    for start in range(0, n_sims, chunk):
+        stop = min(start + chunk, n_sims)
+        idx = rng.permuted(np.tile(np.arange(n), (stop - start, 1)), axis=1)
+        equity = np.cumsum(pnl[idx], axis=1)
+        peaks = np.maximum(np.maximum.accumulate(equity, axis=1), 0.0)
+        out[start:stop] = (peaks - equity).max(axis=1)
+
+    return out
+</code></pre>
+
+<h2 id="ruin-probability">Ruin Probability</h2>
+<p>Max drawdown is one number per shuffle. Ruin probability is the fraction of shuffles where the equity curve drops below a threshold at <em>any</em> point. Compute it directly from the drawdown matrix — no extra pass needed.</p>
+<pre class="codehilite"><code class="language-python">def ruin_probabilities(pnl, thresholds, n_sims=5000, seed=0):
+    pnl = np.asarray(pnl, dtype=np.float64)
+    n = pnl.size
+    rng = np.random.default_rng(seed)
+
+    idx = rng.permuted(np.tile(np.arange(n), (n_sims, 1)), axis=1)
+    equity = np.cumsum(pnl[idx], axis=1)
+    peaks = np.maximum(np.maximum.accumulate(equity, axis=1), 0.0)
+    dd = peaks - equity
+
+    # For each threshold, fraction of sims that ever exceeded it
+    hits = dd[:, :, None] &gt;= np.asarray(thresholds)[None, None, :]
+    return hits.any(axis=1).mean(axis=0)
+</code></pre>
+
+<p>Pass thresholds in the same units as your PnL. If you're sizing in R-multiples and risking 1% of equity per trade, a 20R drawdown is roughly a 20% equity hit (ignoring compounding). Pick thresholds that map to real operational limits: margin call levels, a hard stop-loss on the strategy, a psychological "I'd shut this down" number.</p>
+<h2 id="pure-python-fallback">Pure-Python Fallback</h2>
+<p>Sometimes you want this in a script with no numpy dependency — a research notebook on a locked-down box, a quick check in a CI step, or a port to another language. The pure-Python version is 20 lines and fast enough for a few hundred trades.</p>
+<pre class="codehilite"><code class="language-python">import random
+
+def permutation_drawdowns_py(pnl, n_sims=5000, seed=0):
+    rnd = random.Random(seed)
+    values = list(pnl)
+    n = len(values)
+    result = []
+
+    for _ in range(n_sims):
+        rnd.shuffle(values)  # in-place, O(n)
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for x in values:
+            equity += x
+            if equity &gt; peak:
+                peak = equity
+            dd = peak - equity
+            if dd &gt; max_dd:
+                max_dd = dd
+        result.append(max_dd)
+
+    return result
+</code></pre>
+
+<p><code>random.Random.shuffle</code> mutates the list in place, so you don't rebuild it every iteration — that's the main cost saver. If you need ruin probabilities too, track the minimum equity inside the loop and collect it. For 1000 trades × 5000 sims this takes a few seconds; the numpy version is roughly 50–100× faster.</p>
+<h2 id="reading-the-percentiles">Reading the Percentiles</h2>
+<p>Now the part that actually matters. You have a distribution of 5000 max drawdowns. What do you do with it?</p>
+<pre class="codehilite"><code class="language-python">max_dd = permutation_drawdowns(pnl, n_sims=5000, seed=42)
+backtest_dd = 12.4  # your actual backtest max DD, same units
+
+p50, p95, p99 = np.percentile(max_dd, [50, 95, 99])
+print(f&quot;P50: {p50:.2f}  P95: {p95:.2f}  P99: {p99:.2f}&quot;)
+print(f&quot;Backtest DD: {backtest_dd:.2f}&quot;)
+print(f&quot;Percentile of backtest DD: {(max_dd &lt;= backtest_dd).mean() * 100:.1f}%&quot;)
+</code></pre>
+
+<p>Interpretation:</p>
+<ul>
+<li><strong>P50</strong> is the median drawdown over all orderings. If your backtest DD equals P50, you got an average-luck ordering. Nothing suspicious.</li>
+<li><strong>P95</strong> is the drawdown you'd exceed in 5% of orderings. This is the number to size against. If your risk limits are calibrated to the backtest DD and P95 is 2× higher, you're under-reserved.</li>
+<li><strong>P99</strong> is your tail scenario. If P99 exceeds your ruin threshold, the strategy has a material chance of hitting it under sequencing alone.</li>
+</ul>
+<p>The percentile of your backtest DD tells you how flattering the realized order was. A backtest DD at the 10th percentile means 90% of orderings produce a worse drawdown — the strategy's risk is understated. At the 50th, you're unbiased. At the 90th, your backtest was unusually unlucky and the strategy is probably better than it looks (rare, but it happens with short samples).</p>
+<h2 id="the-passreject-decision-rule">The Pass/Reject Decision Rule</h2>
+<p>A concrete rule that works in practice:</p>
+<ol>
+<li><strong>Compute P95 of max drawdown.</strong> This is your planning number.</li>
+<li><strong>Compare to your operational drawdown limit</strong> — the level at which you'd cut the strategy (margin, mandate, or discipline).</li>
+<li><strong>Compute ruin probability at that limit.</strong> This is the fraction of shuffles that touch it.</li>
+</ol>
+<p>Decision:</p>
+<ul>
+<li><strong>Pass</strong> if P95 max DD &lt; operational limit <em>and</em> ruin probability at the limit &lt; 5%.</li>
+<li><strong>Marginal</strong> if P95 max DD &lt; limit but ruin probability is 5–15%. Reduce size or tighten stops.</li>
+<li><strong>Reject</strong> if P95 max DD ≥ limit or ruin probability &gt; 15%. The strategy's headline drawdown is not representative of its path risk.</li>
+</ul>
+<pre class="codehilite"><code class="language-python">def audit(pnl, limit, n_sims=5000, seed=0):
+    dd = permutation_drawdowns(pnl, n_sims=n_sims, seed=seed)
+    p50, p95 = np.percentile(dd, [50, 95])
+    ruin = (dd &gt;= limit).mean()
+
+    verdict = &quot;PASS&quot;
+    if p95 &gt;= limit or ruin &gt; 0.15:
+        verdict = &quot;REJECT&quot;
+    elif ruin &gt; 0.05:
+        verdict = &quot;MARGINAL&quot;
+
+    return {&quot;p50&quot;: p50, &quot;p95&quot;: p95, &quot;ruin&quot;: ruin, &quot;verdict&quot;: verdict}
+</code></pre>
+
+<p>One caveat worth stating plainly: this test assumes trade PnLs are exchangeable. Real strategies have autocorrelation — volatility clustering, regime shifts, correlated losses during stress. Permutation tests ignore that, so they can <em>understate</em> tail drawdowns when losses cluster. If you suspect serial dependence, the permutation test is a lower bound on path risk, not an upper one. Combine it with a block bootstrap or a regime-conditional analysis if the strategy is sensitive to volatility regimes.</p>
+<h2 id="what-this-test-does-and-doesnt-tell-you">What This Test Does and Doesn't Tell You</h2>
+<p>It tells you whether your backtest drawdown is representative of the drawdown distribution over all orderings of the same trades. It does not tell you whether the trades themselves are predictive, whether the sample is large enough, or whether the strategy will work out of sample. Those are separate questions with separate tests.</p>
+<p>What it does well: it catches the specific failure mode where a strategy looks safe because the backtest got a lucky ordering. That failure mode is common, cheap to test for, and expensive to discover live. Five thousand shuffles and a percentile lookup is a small price.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-09 08:46:35</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLAUDIA</td>
+<td>短平快做多</td>
+<td>$0.0061</td>
+<td>$0.0063</td>
+<td>$0.0059</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BLESS</td>
+<td>衰竭做空</td>
+<td>$0.0081</td>
+<td>$0.0078</td>
+<td>$0.0084</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Monte Carlo</span><span class="tag-badge">permutation test</span><span class="tag-badge">max drawdown</span><span class="tag-badge">ruin probability</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
