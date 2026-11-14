@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Drawdown Breaker Blind Spot: Realized PnL Hides Unrealized Bleeding - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Drawdown Breaker Blind Spot Most drawdown guards are built on a simple, reasonable-sounding premise: track losses, a...">
+    <meta name="keywords" content="drawdown protection,consecutive losses,unrealized PnL,risk blind spot">
+    <meta property="og:title" content="The Drawdown Breaker Blind Spot: Realized PnL Hides Unrealized Bleeding">
+    <meta property="og:description" content="The Drawdown Breaker Blind Spot Most drawdown guards are built on a simple, reasonable-sounding premise: track losses, a...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/44.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>The Drawdown Breaker Blind Spot: Realized PnL Hides Unrealized Bleeding</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-11</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Most drawdown guards are built on a simple, reasonable-sounding premise: track losses, and when losses pile up, stop trading. The implementation almost always looks at the same number — <em>realized</em> PnL. A trade closes, the result is booked, the counter increments. Three losses in a row? Cool off. Daily loss limit hit? Flatten and stop.</p>
+<p>The problem is that this guard is blind to the exact moment it matters most: while positions are open and bleeding. An unrealized loss of 4% sitting in three open positions is invisible to a realized-PnL guard. The counter still reads zero. Every safety number is green. Then the positions close — and the drawdown "suddenly" appears, fully formed, in one tick of the counter.</p>
+<p>This post dissects the blind spot, walks through a scenario where every guard reads fine while the account is drowning, and presents a dual-viewport design: realized drawdown and pool-wide mark-to-market unrealized PnL tracked separately, with the unrealized view gating new entries.</p>
+<h2 id="the-blind-spot-precisely">The Blind Spot, Precisely</h2>
+<p>Consider a typical consecutive-loss breaker:</p>
+<pre class="codehilite"><code class="language-python">class RealizedLossBreaker:
+    def __init__(self, max_consecutive_losses: int = 3,
+                 daily_loss_limit: float = 0.02):
+        self.max_consecutive_losses = max_consecutive_losses
+        self.daily_loss_limit = daily_loss_limit
+        self.consecutive_losses = 0
+        self.day_start_equity = None
+        self.realized_pnl_today = 0.0
+
+    def on_trade_closed(self, pnl: float) -&gt; None:
+        self.realized_pnl_today += pnl
+        if pnl &lt; 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+    def can_open_new(self, current_equity: float) -&gt; bool:
+        if self.consecutive_losses &gt;= self.max_consecutive_losses:
+            return False
+        if self.day_start_equity is None:
+            self.day_start_equity = current_equity
+        day_return = self.realized_pnl_today / self.day_start_equity
+        return day_return &gt; -self.daily_loss_limit
+</code></pre>
+
+<p>This code is correct for what it measures. The issue is what it <em>doesn't</em> measure. <code>on_trade_closed</code> only fires when a trade closes. Between the open and the close, <code>consecutive_losses</code> and <code>realized_pnl_today</code> are frozen. If you have five positions open and all five are down 1.5% each, the breaker sees zero losses, zero realized drawdown, and happily approves a sixth entry.</p>
+<p>The guard is not wrong. It is answering a different question than the one you think you're asking. "How much have I lost?" and "How much am I currently down?" are different quantities, and the gap between them is where accounts die.</p>
+<h3 id="why-people-build-it-this-way">Why people build it this way</h3>
+<p>It's not laziness. Realized PnL is <em>easy</em>: it's a single scalar that updates on a discrete event. Unrealized PnL is a moving target that requires a mark price per position, updates continuously, and has to handle stale quotes, funding, and partial fills. The realized-only guard is the 80% solution that ships in an afternoon. It's just missing the 20% that contains the worst days.</p>
+<h2 id="a-scenario-where-every-number-looks-fine">A Scenario Where Every Number Looks Fine</h2>
+<p>Here's the concrete version. Suppose the account is 100,000 units of quote currency, the consecutive-loss breaker is set to 3, and the daily loss limit is 2%. Position sizing is 20,000 notional per entry, so a 1.5% adverse move on a position is a 300-unit unrealized loss (0.3% of equity).</p>
+<p><strong>09:30</strong> — Two positions open. Both drift against you. Unrealized: −600. Realized today: 0. <code>consecutive_losses</code>: 0. Breaker: open for business.</p>
+<p><strong>10:15</strong> — The market trends against the book. A third and fourth position open (the breaker approved them, because nothing has closed). Unrealized across four positions: −2,400 (2.4% of equity). Realized today: still 0. <code>consecutive_losses</code>: still 0. <code>can_open_new</code> returns <code>True</code>.</p>
+<p><strong>11:00</strong> — A fifth entry. Unrealized: −3,600. The daily loss limit is 2%, but it's computed on realized PnL, so it reads 0%. The breaker is <em>structurally incapable</em> of firing.</p>
+<p><strong>13:00</strong> — Stops trigger across the book in a correlated move. All five close within twenty minutes. Realized today: −3,900. <code>consecutive_losses</code>: 5. The breaker finally fires — after the entire drawdown has been realized, and after it approved two entries during the bleed.</p>
+<p>At 11:00, the account was down 3.6% on a mark-to-market basis. Every guard reported it was down 0%. The pool was drowning while the dashboard showed a calm surface. This is the blind spot: the guard's measurement point (trade close) is downstream of the risk event (adverse mark-to-market drift on open exposure).</p>
+<h2 id="the-fix-two-viewports-one-gate">The Fix: Two Viewports, One Gate</h2>
+<p>The design change is to stop treating "drawdown" as one number. Track two:</p>
+<ol>
+<li><strong>Realized drawdown</strong> — the existing view. It governs cooldowns and post-loss behavior, because it's the ground truth of what you've actually given up.</li>
+<li><strong>Pool-wide unrealized PnL</strong> — mark every open position to market, sum it, and express it as a fraction of equity. This view updates on every tick (or every bar, or every N seconds — whatever your infrastructure supports). It gates <em>new entries</em>.</li>
+</ol>
+<p>The realized view answers "how bad has it been?" The unrealized view answers "how bad is it right now?" Entries should require both to be acceptable.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+
+@dataclass
+class Position:
+    symbol: str
+    qty: float           # signed: + long, - short
+    entry_price: float
+    mark_price: float
+
+    @property
+    def unrealized_pnl(self) -&gt; float:
+        return (self.mark_price - self.entry_price) * self.qty
+
+
+class DualViewportGuard:
+    def __init__(self, equity: float,
+                 max_realized_dd: float = 0.02,
+                 max_consecutive_losses: int = 3,
+                 max_unrealized_dd: float = 0.015):
+        self.equity = equity
+        self.max_realized_dd = max_realized_dd
+        self.max_consecutive_losses = max_consecutive_losses
+        self.max_unrealized_dd = max_unrealized_dd
+
+        self.positions: dict[str, Position] = {}
+        self.realized_pnl_today = 0.0
+        self.consecutive_losses = 0
+
+    def mark(self, symbol: str, price: float) -&gt; None:
+        if symbol in self.positions:
+            self.positions[symbol].mark_price = price
+
+    def unrealized_pnl(self) -&gt; float:
+        return sum(p.unrealized_pnl for p in self.positions.values())
+
+    def unrealized_dd(self) -&gt; float:
+        # negative when the pool is under water
+        return self.unrealized_pnl() / self.equity
+
+    def realized_dd(self) -&gt; float:
+        return self.realized_pnl_today / self.equity
+
+    def can_open_new(self) -&gt; tuple[bool, str]:
+        if self.consecutive_losses &gt;= self.max_consecutive_losses:
+            return False, &quot;consecutive_loss_breaker&quot;
+        if self.realized_dd() &lt;= -self.max_realized_dd:
+            return False, &quot;realized_daily_limit&quot;
+        if self.unrealized_dd() &lt;= -self.max_unrealized_dd:
+            return False, &quot;unrealized_pool_limit&quot;
+        return True, &quot;ok&quot;
+</code></pre>
+
+<p>Two details matter here.</p>
+<p><strong>The mark-to-market gate is checked on entry, not on a timer.</strong> You don't need a background thread recomputing the pool every millisecond. You need the check to run at the one moment it can still do something: before a new order goes out. If the pool is down 1.6% and the cap is 1.5%, the next entry is refused — regardless of what the realized counter says.</p>
+<p><strong>The two limits are separate knobs with separate meanings.</strong> <code>max_unrealized_dd</code> is typically <em>tighter</em> than the realized limit, because unrealized losses are still recoverable and you want to stop adding risk early. <code>max_realized_dd</code> can be looser, because realized losses are sunk and the response there is cooldown, not prevention. Conflating them into one number forces a bad compromise.</p>
+<h3 id="handling-the-its-just-noise-objection">Handling the "it's just noise" objection</h3>
+<p>The obvious pushback: mark-to-market is noisy, and a tight unrealized cap will block entries on harmless intraday wicks. Two mitigations, both cheap:</p>
+<ul>
+<li><strong>Use a smoothed mark.</strong> Instead of the last tick, mark against a short moving average of recent prices (say, a 5-minute VWAP or EMA). This filters single-print spikes without hiding a genuine trend against the book.</li>
+<li><strong>Gate on <em>new</em> entries only.</strong> The unrealized cap never forces liquidation and never touches existing positions. It only says "not now." A wick that blocks one entry costs you almost nothing; a correlated bleed that blocks five entries is exactly what the guard is for.</li>
+</ul>
+<pre class="codehilite"><code class="language-python">from collections import deque
+
+class SmoothedMark:
+    def __init__(self, window: int = 60):
+        self.prices: deque[float] = deque(maxlen=window)
+
+    def update(self, price: float) -&gt; float:
+        self.prices.append(price)
+        return sum(self.prices) / len(self.prices)
+</code></pre>
+
+<p>Feed <code>SmoothedMark.update(price)</code> into <code>guard.mark(symbol, smoothed)</code> and the gate becomes resistant to single-tick noise while still tracking real adverse drift.</p>
+<h2 id="instrumenting-the-blind-spot">Instrumenting the Blind Spot</h2>
+<p>The guard change fixes the behavior; you also want the <em>diagnostic</em> so you can see the blind spot forming. Log both viewports on every entry decision, and log the gap:</p>
+<pre class="codehilite"><code class="language-python">def log_entry_decision(guard: DualViewportGuard, ts, symbol: str) -&gt; None:
+    ok, reason = guard.can_open_new()
+    log.info(
+        &quot;entry_check ts=%s sym=%s ok=%s reason=%s &quot;
+        &quot;realized_dd=%.4f unrealized_dd=%.4f gap=%.4f&quot;,
+        ts, symbol, ok, reason,
+        guard.realized_dd(),
+        guard.unrealized_dd(),
+        guard.realized_dd() - guard.unrealized_dd(),
+    )
+</code></pre>
+
+<p>The <code>gap</code> column is the interesting one. When <code>realized_dd − unrealized_dd</code> grows large and negative — realized flat, unrealized deeply negative — you are inside the blind spot of a realized-only guard. If you ever run a realized-only breaker in parallel (legacy system, comparison study), this log tells you exactly how many entries it approved that the dual-viewport guard would have refused, and what those entries cost on a mark-to-market basis.</p>
+<h2 id="what-this-does-not-solve">What This Does Not Solve</h2>
+<p>Be clear about the scope. The unrealized gate does not prevent the first position from going against you, and it does not replace per-position stops. It addresses one specific failure mode: <em>the guard that approves new risk while existing risk is already underwater</em>. Correlation is the amplifier here — five positions that all bleed together look like five independent decisions to the entry logic and like one concentrated bet to the mark-to-market pool. The pool view catches that; the per-trade view never will.</p>
+<p>The general principle generalizes beyond drawdown breakers: any risk control whose measurement event is downstream of the risk event has a blind window. Realized PnL is downstream of unrealized PnL. Trade close is downstream of trade open. The fix is always the same — measure at the point where the risk actually lives, and gate at the point where you can still act.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-11 08:46:07</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>XRP</td>
+<td>强做空</td>
+<td>$1.0555</td>
+<td>$1.0112</td>
+<td>$1.0924</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">drawdown protection</span><span class="tag-badge">consecutive losses</span><span class="tag-badge">unrealized PnL</span><span class="tag-badge">risk blind spot</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
