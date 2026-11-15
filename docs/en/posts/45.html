@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gate.io API Pagination Trap: from+to+limit Cannot Coexist - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Symptom: A 400 That Blames the Wrong Parameter If you&#x27;ve wired up Gate.io&#x27;s futures candlestick endpoint, you&#x27;ve pro...">
+    <meta name="keywords" content="Gate.io,pagination,candlestick API,API pitfalls">
+    <meta property="og:title" content="Gate.io API Pagination Trap: from+to+limit Cannot Coexist">
+    <meta property="og:description" content="The Symptom: A 400 That Blames the Wrong Parameter If you&#x27;ve wired up Gate.io&#x27;s futures candlestick endpoint, you&#x27;ve pro...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/45.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Gate.io API Pagination Trap: from+to+limit Cannot Coexist</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-12</span>
+                <span class="category"><span class="tag-badge">API Integration</span></span>
+            </div>
+            <div class="post-content">
+<p>If you've wired up Gate.io's futures candlestick endpoint, you've probably hit this: you build a request with a start time, an end time, and a page size, and the server replies <code>HTTP 400</code>. You strip out <code>to</code>, retry, and it works. You add it back, it breaks. The error message doesn't mention <code>to</code> at all — it usually complains about something generic like an invalid parameter or an empty result set, which sends you chasing the wrong thing for an hour.</p>
+<p>Here's the endpoint in question (USDT-margined perpetual futures):</p>
+<pre class="codehilite"><code>GET https://api.gateio.ws/api/v4/futures/usdt/candlesticks
+</code></pre>
+
+<p>Query parameters that matter for history:</p>
+<ul>
+<li><code>contract</code> — e.g. <code>BTC_USDT</code></li>
+<li><code>interval</code> — e.g. <code>1m</code>, <code>5m</code>, <code>1h</code></li>
+<li><code>from</code> — Unix timestamp in <strong>seconds</strong></li>
+<li><code>to</code> — Unix timestamp in <strong>seconds</strong></li>
+<li><code>limit</code> — max number of points returned</li>
+</ul>
+<p>The rule the docs bury: <strong><code>from</code>, <code>to</code>, and <code>limit</code> are mutually constrained.</strong> <code>from</code>+<code>limit</code> works. <code>from</code>+<code>to</code> works. <code>to</code>+<code>limit</code> works. All three together returns 400. And there's a second constraint that bites later: any single call returns at most the <strong>most recent 10,000 data points</strong>, regardless of how wide your range is.</p>
+<h2 id="reproducing-it">Reproducing It</h2>
+<p>Let's pin down the failure so it's not folklore. The code below is the minimal reproduction — no retry logic, no abstractions.</p>
+<pre class="codehilite"><code class="language-python">import time
+import requests
+
+BASE = &quot;https://api.gateio.ws/api/v4&quot;
+CONTRACT = &quot;BTC_USDT&quot;
+INTERVAL = &quot;1m&quot;
+
+def fetch_candles(from_ts: int, to_ts: int | None = None, limit: int | None = None):
+    params = {&quot;contract&quot;: CONTRACT, &quot;interval&quot;: INTERVAL, &quot;from&quot;: from_ts}
+    if to_ts is not None:
+        params[&quot;to&quot;] = to_ts
+    if limit is not None:
+        params[&quot;limit&quot;] = limit
+
+    r = requests.get(f&quot;{BASE}/futures/usdt/candlesticks&quot;, params=params, timeout=10)
+    return r
+
+now = int(time.time())
+start = now - 3600  # one hour back
+
+# Case A: from + limit -&gt; 200
+r = fetch_candles(start, limit=100)
+print(&quot;from+limit        :&quot;, r.status_code)
+
+# Case B: from + to -&gt; 200
+r = fetch_candles(start, to_ts=now)
+print(&quot;from+to           :&quot;, r.status_code)
+
+# Case C: from + to + limit -&gt; 400
+r = fetch_candles(start, to_ts=now, limit=100)
+print(&quot;from+to+limit     :&quot;, r.status_code, r.text[:200])
+</code></pre>
+
+<p>Typical output:</p>
+<pre class="codehilite"><code>from+limit        : 200
+from+to           : 200
+from+to+limit     : 400 {&quot;label&quot;:&quot;INVALID_PARAM_VALUE&quot;,&quot;message&quot;:&quot;...&quot;}
+</code></pre>
+
+<p>The message varies and is never "you sent too many parameters." That's the trap: the API validates combinations, not individual fields, and the error text doesn't say which combination it rejected.</p>
+<p>One more detail worth knowing: <code>from</code> and <code>to</code> are in <strong>seconds</strong>, but the timestamps inside the returned candle objects are also in seconds. Mixing in milliseconds (easy to do if you're used to other exchanges) silently produces empty arrays or absurd ranges rather than an error.</p>
+<h2 id="the-correct-pattern-from-limit-paging">The Correct Pattern: from + limit Paging</h2>
+<p>The fix is to pick one paging axis and stick to it. <code>from</code>+<code>limit</code> is the most robust because it's forward-only: you always ask for "the next N candles starting at timestamp T," and you advance <code>T</code> using the data you got back.</p>
+<p>The rule: <strong>next page's <code>from</code> = last candle's timestamp + interval seconds.</strong> Not <code>+1</code> second in general — <code>+1</code> only works for the <code>1s</code> interval. For <code>1m</code> it's <code>+60</code>, for <code>1h</code> it's <code>+3600</code>. If you use the interval length, you never re-request the boundary candle and you never skip one.</p>
+<pre class="codehilite"><code class="language-python">INTERVAL_SECONDS = {
+    &quot;10s&quot;: 10, &quot;1m&quot;: 60, &quot;5m&quot;: 300, &quot;15m&quot;: 900, &quot;30m&quot;: 1800,
+    &quot;1h&quot;: 3600, &quot;4h&quot;: 14400, &quot;8h&quot;: 28800, &quot;1d&quot;: 86400,
+}
+
+def fetch_page(from_ts: int, limit: int = 1000) -&gt; list[dict]:
+    &quot;&quot;&quot;One page of candles. Returns [] when the server has nothing more.&quot;&quot;&quot;
+    params = {
+        &quot;contract&quot;: CONTRACT,
+        &quot;interval&quot;: INTERVAL,
+        &quot;from&quot;: from_ts,
+        &quot;limit&quot;: limit,
+    }
+    r = requests.get(f&quot;{BASE}/futures/usdt/candlesticks&quot;, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_range(from_ts: int, to_ts: int, interval: str, page_size: int = 1000) -&gt; list[dict]:
+    step = INTERVAL_SECONDS[interval]
+    out: list[dict] = []
+    cursor = from_ts
+
+    while cursor &lt; to_ts:
+        page = fetch_page(cursor, limit=page_size)
+        if not page:
+            break
+
+        # Keep only candles inside the requested window.
+        page = [c for c in page if from_ts &lt;= int(c[&quot;t&quot;]) &lt;= to_ts]
+        if not page:
+            break
+
+        out.extend(page)
+        last_t = int(page[-1][&quot;t&quot;])
+
+        # Guard against a stalled cursor (server returns same page again).
+        if last_t &lt; cursor:
+            break
+        cursor = last_t + step
+
+        if len(page) &lt; page_size:
+            # Short page usually means we've reached the live edge.
+            break
+
+    return out
+</code></pre>
+
+<p>A few things this loop gets right that naive versions don't:</p>
+<ul>
+<li><strong>Cursor advances by <code>last_t + interval</code>, not by <code>page_size * interval</code>.</strong> The server may return fewer candles than requested (missing data, delisted windows, exchange downtime). Deriving the next cursor from the actual data keeps you correct.</li>
+<li><strong>Filtering by <code>to_ts</code> happens client-side.</strong> Since we never send <code>to</code>, the server can't clip the end for us, so the last page may overshoot. Trim it yourself.</li>
+<li><strong>Stall detection.</strong> If <code>last_t &lt; cursor</code>, something is wrong and you should bail rather than loop forever.</li>
+<li><strong>Short-page exit.</strong> If the server returns fewer than <code>page_size</code>, you're at the live edge; there's no point asking again.</li>
+</ul>
+<h2 id="when-the-range-exceeds-the-10000-point-cap">When the Range Exceeds the 10,000-Point Cap</h2>
+<p>The 10,000-point cap is per call, not per range, and it's applied to the <strong>most recent</strong> data in the window you asked for. This has a nasty consequence: if you request <code>from = now - 30 days</code> with <code>limit = 1000</code> on <code>1m</code>, you get the 1,000 most recent minutes of that window — not the first 1,000 minutes. Your pagination loop's first page is fine, but the <em>semantics</em> of "most recent within the window" mean that a naive loop which advances <code>from</code> will eventually get stuck asking for data older than what the server will serve in a single call.</p>
+<p>The clean way to handle it is to <strong>split the overall range into windows of at most 10,000 intervals</strong>, and paginate inside each window. That way each <code>from+limit</code> call is guaranteed to fall inside the server's per-call ceiling.</p>
+<pre class="codehilite"><code class="language-python">MAX_POINTS_PER_CALL = 10_000
+
+def fetch_history(from_ts: int, to_ts: int, interval: str) -&gt; list[dict]:
+    step = INTERVAL_SECONDS[interval]
+    window = MAX_POINTS_PER_CALL * step
+
+    all_candles: list[dict] = []
+    win_start = from_ts
+
+    while win_start &lt; to_ts:
+        win_end = min(win_start + window, to_ts)
+        chunk = fetch_range(win_start, win_end, interval)
+        all_candles.extend(chunk)
+        win_start = win_end + step  # move past the window boundary
+
+    # Deduplicate on timestamp in case windows overlap at the seam.
+    seen: dict[int, dict] = {}
+    for c in all_candles:
+        seen[int(c[&quot;t&quot;])] = c
+    return [seen[t] for t in sorted(seen)]
+</code></pre>
+
+<p>Two subtleties:</p>
+<ul>
+<li><strong>Window size is <code>MAX_POINTS * step</code>, not <code>MAX_POINTS</code>.</strong> The cap is in points, so the calendar span of a window depends on the interval. A 10,000-point window is ~7 days on <code>1m</code> and ~277 days on <code>1h</code>.</li>
+<li><strong>Deduplicate at the seam.</strong> The <code>win_start = win_end + step</code> line avoids an overlap in theory, but off-by-one drift is common enough that a dict keyed on <code>t</code> is cheap insurance. It also catches duplicates if the server ever returns a boundary candle twice.</li>
+</ul>
+<p>If you're pulling months of <code>1m</code> data, this is dozens of HTTP round-trips. That's expected — there is no bulk export endpoint, and hammering the server with parallel requests will get you rate-limited. Serialize, add a small sleep between windows, and cache to disk.</p>
+<h2 id="debugging-unfamiliar-parameter-rules-with-bisection">Debugging Unfamiliar Parameter Rules with Bisection</h2>
+<p>The Gate.io case is one instance of a general problem: undocumented parameter interactions. When you hit a 400 and the message is unhelpful, don't guess — bisect.</p>
+<p>The idea: start with a request you <em>know</em> works, then add parameters one at a time, and when it breaks, remove one at a time to confirm which combination is fatal. For a small parameter set this is a few requests.</p>
+<pre class="codehilite"><code class="language-python">from itertools import combinations
+
+def probe(params_pool: dict, required: dict, endpoint: str) -&gt; dict:
+    &quot;&quot;&quot;Find the largest working subset of optional params.&quot;&quot;&quot;
+    optional = list(params_pool)
+    results = {}
+
+    # Test every subset, largest first.
+    for size in range(len(optional), -1, -1):
+        for combo in combinations(optional, size):
+            params = {**required, **{k: params_pool[k] for k in combo}}
+            r = requests.get(endpoint, params=params, timeout=10)
+            results[combo] = r.status_code
+            if r.status_code == 200:
+                return {&quot;ok&quot;: combo, &quot;all&quot;: results}
+    return {&quot;ok&quot;: None, &quot;all&quot;: results}
+
+pool = {
+    &quot;from&quot;: int(time.time()) - 3600,
+    &quot;to&quot;:   int(time.time()),
+    &quot;limit&quot;: 100,
+}
+required = {&quot;contract&quot;: &quot;BTC_USDT&quot;, &quot;interval&quot;: &quot;1m&quot;}
+print(probe(pool, required, f&quot;{BASE}/futures/usdt/candlesticks&quot;))
+</code></pre>
+
+<p>For three optional parameters this is at most 8 requests and it tells you definitively that <code>{from, to, limit}</code> is the failing triple and <code>{from, limit}</code> is the maximal working pair. That's far faster than reading docs that don't mention the rule.</p>
+<p>When the parameter space is larger — say, ten optional query params — exhaustive subsets are 1,024 requests, which is too many. Switch to a <strong>greedy bisection</strong>: add params one at a time in the order you suspect matters; when adding one breaks the request, mark it as conflicting with the current set and try it alone against the required params. That's <code>O(n)</code> in practice.</p>
+<pre class="codehilite"><code class="language-python">def greedy_probe(pool: dict, required: dict, endpoint: str) -&gt; dict:
+    working, rejected = dict(required), []
+    for k, v in pool.items():
+        trial = {**working, k: v}
+        r = requests.get(endpoint, params=trial, timeout=10)
+        if r.status_code == 200:
+            working = trial
+        else:
+            rejected.append(k)
+    return {&quot;working&quot;: working, &quot;rejected&quot;: rejected}
+</code></pre>
+
+<p>Run it, and you get a working parameter set plus the list of params that broke it. In the Gate.io case, <code>rejected</code> would contain whichever of <code>from</code>/<code>to</code>/<code>limit</code> was added third — which is exactly the information the error message withheld.</p>
+<h2 id="practical-notes">Practical Notes</h2>
+<ul>
+<li><strong>Timestamps are seconds.</strong> Multiply by 1000 only for libraries that want milliseconds, and convert back before sending.</li>
+<li><strong><code>limit</code> has its own ceiling.</strong> Even below 10,000, the server may cap <code>limit</code> at some lower value per interval. If you ask for 10,000 and get 1,000 back, that's the effective cap — treat the short page as the signal to advance, not as an error.</li>
+<li><strong>Rate limits are real.</strong> Serial paging with a short sleep between windows is the difference between a working backfill and a 429 loop.</li>
+<li><strong>Cache raw responses.</strong> When you're bisecting parameter rules, you'll re-request the same windows repeatedly. Dump each page to disk keyed on <code>(contract, interval, from, limit)</code> and the debugging loop gets fast and free.</li>
+<li><strong>The error message is not the diagnosis.</strong> When a 400 doesn't name the offending field, treat it as "the combination is invalid" and bisect rather than reading the message literally.</li>
+</ul>
+<p>The general lesson transfers: when an API's parameters interact, the docs often describe each field in isolation and leave the constraints implicit. Build a small probe harness once, and every new endpoint becomes a five-minute investigation instead of an afternoon of guessing.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-12 08:46:26</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Q</td>
+<td>短平快做空</td>
+<td>$0.029</td>
+<td>$0.0281</td>
+<td>$0.0297</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">Gate.io</span><span class="tag-badge">pagination</span><span class="tag-badge">candlestick API</span><span class="tag-badge">API pitfalls</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
