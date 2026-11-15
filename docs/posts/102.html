@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>三层验证为什么拦不住前视偏差：DSR、蒙特卡洛、前后半段的盲区 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="一、先说结论
+
+我的策略验证流程原本有三层：
+
+1. DSR（Deflated Sharpe Ratio）：考虑偏度、峰度和多重试验后，策略夏普仍然显著的概率
+2. 币块蒙特卡洛重采样：几百次随机重排，看破产率和收益分布
+3. 前后半段期望...">
+    <meta name="keywords" content="策略验证,DSR,蒙特卡洛,统计检验,回测">
+    <meta property="og:title" content="三层验证为什么拦不住前视偏差：DSR、蒙特卡洛、前后半段的盲区">
+    <meta property="og:description" content="一、先说结论
+
+我的策略验证流程原本有三层：
+
+1. DSR（Deflated Sharpe Ratio）：考虑偏度、峰度和多重试验后，策略夏普仍然显著的概率
+2. 币块蒙特卡洛重采样：几百次随机重排，看破产率和收益分布
+3. 前后半段期望...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/102.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>三层验证为什么拦不住前视偏差：DSR、蒙特卡洛、前后半段的盲区</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-15</span>
+                <span class="category"><span class="tag-badge">量化回测</span></span>
+            </div>
+            <div class="post-content">
+<p>我的策略验证流程原本有三层：</p>
+<ol>
+<li><strong>DSR（Deflated Sharpe Ratio）</strong>：考虑偏度、峰度和多重试验后，策略夏普仍然显著的概率</li>
+<li><strong>币块蒙特卡洛重采样</strong>：几百次随机重排，看破产率和收益分布</li>
+<li><strong>前后半段期望一致性</strong>：把样本切成两半，看盈亏期望是否稳定</li>
+</ol>
+<p>这三层跑下来，我的策略拿到了近乎完美的成绩单：</p>
+<ul>
+<li>DSR = 1.000</li>
+<li>MC 破产率 = 0%</li>
+<li>前后半段期望：+78U / +3326U</li>
+</ul>
+<p>然后实盘上线，曲线和回测完全对不上。追查下去，问题出在一个成交时序的前视偏差上——而这三层验证，没有一层能拦住它。</p>
+<p>核心论点只有一句：<strong>这三层验证的都是"同一份交易序列的统计性质"，它们默认这份交易序列本身是真实的。而前视偏差污染的是交易序列的生成过程，不是它的统计分布。</strong> 你拿一份被污染的序列去做 DSR、做重采样、做分段，得到的只是"这份假序列很漂亮"的结论。</p>
+<p>下面逐层拆。</p>
+<hr />
+<h2 id="_1">二、三层验证各自在验证什么</h2>
+<h3 id="21-dsr">2.1 DSR：验证的是"这份收益序列的显著性"</h3>
+<p>DSR 的输入是策略的收益率序列，加上试验次数 N。它回答的问题是：在考虑了非正态性和多重比较之后，这个夏普是不是运气。</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def deflated_sharpe_ratio(returns, n_trials, sr_benchmark=0.0):
+    r = np.asarray(returns, dtype=float)
+    T = len(r)
+    sr = r.mean() / r.std(ddof=1)          # 单期夏普
+    skew = ((r - r.mean())**3).mean() / r.std(ddof=1)**3
+    kurt = ((r - r.mean())**4).mean() / r.std(ddof=1)**4
+
+    # 多重试验下的期望最大夏普
+    e_max = norm.ppf(1 - 1.0 / n_trials) * (
+        1 - np.euler_gamma / np.log(n_trials)
+    ) if n_trials &gt; 1 else 0.0
+
+    num = (sr - e_max) * np.sqrt(T - 1)
+    den = np.sqrt(1 - skew * sr + (kurt - 1) / 4 * sr**2)
+    return norm.cdf(num / den)
+</code></pre>
+
+<p>注意它的分母里出现了偏度、峰度，分子里是夏普和试验次数。<strong>它从头到尾只碰了 <code>returns</code> 这个数组。</strong> 数组里每个值是怎么来的——成交价用的当根收盘还是下一根开盘、信号在 bar 收盘触发还是 bar 开盘触发——DSR 完全不知道，也无从判断。</p>
+<p>所以当序列本身因为前视偏差被系统性抬高时，DSR 会老老实实地告诉你"很显著"。它没撒谎，它只是被喂了一份假的输入。</p>
+<h3 id="22">2.2 币块蒙特卡洛：验证的是"这份序列重排后的稳健性"</h3>
+<p>币块重采样保留局部自相关，打乱整体顺序，看策略在"运气重新洗牌"下的表现。</p>
+<pre class="codehilite"><code class="language-python">def block_bootstrap(returns, block=20, n_sim=500, init_capital=10000):
+    r = np.asarray(returns, dtype=float)
+    n = len(r)
+    n_blocks = int(np.ceil(n / block))
+    ruin = 0
+    finals = []
+    for _ in range(n_sim):
+        starts = np.random.randint(0, n - block, size=n_blocks)
+        path = np.concatenate([r[s:s+block] for s in starts])[:n]
+        equity = init_capital * np.cumprod(1 + path)
+        if equity.min() &lt;= 0:
+            ruin += 1
+        finals.append(equity[-1])
+    return ruin / n_sim, np.array(finals)
+</code></pre>
+
+<p>同样的道理：<strong>重采样只改变元素的顺序，不改变元素的来源。</strong> 如果每个元素的收益本身就被前视偏差抬高了，那么无论你怎么重排，破产率都是 0。蒙特卡洛检验的是"顺序运气"，不是"数据生成正确性"。</p>
+<h3 id="23">2.3 前后半段一致性：验证的是"这份序列在时间上的稳定性"</h3>
+<pre class="codehilite"><code class="language-python">def half_split_consistency(pnl):
+    pnl = np.asarray(pnl, dtype=float)
+    h = len(pnl) // 2
+    return pnl[:h].sum(), pnl[h:].sum()
+</code></pre>
+
+<p>这个更直接。它把同一份序列切成两段比大小。前视偏差如果是<strong>全样本一致</strong>的（比如每个信号都用当根 bar 的收盘价成交，而这根 bar 的最高价在收盘后已经知道），那么前后半段会被同等程度地抬高——两段都好看，一致性检查自然通过。</p>
+<p>我那次的结果 +78U / +3326U，两段都是正的，看起来"稳定"。实际上两段都被同一个时序错误污染了，稳定性检查反而成了共谋。</p>
+<hr />
+<h2 id="_2">三、盲区的共同根源</h2>
+<p>把三层放在一起看，它们的输入是同一个东西：</p>
+<pre class="codehilite"><code>成交序列 (trades / returns)
+        │
+        ├── DSR          → 看分布形状
+        ├── 蒙特卡洛      → 看顺序重排
+        └── 前后半段      → 看时间稳定性
+</code></pre>
+
+<p>三条路径全部从 <code>trades</code> 出发，全部在<strong>这份序列内部</strong>做文章。它们共享一个未言明的前提：</p>
+<blockquote>
+<p>这份交易序列是真实成交过程的忠实记录。</p>
+</blockquote>
+<p>前视偏差破坏的恰恰是这个前提。信号在 bar 收盘时用到了该 bar 的收盘价（甚至最高价）去决定"这根 bar 内成交"，回测引擎顺手用同一个价格撮合——于是每一笔交易都"买在最低卖在最高"附近。这个错误发生在<strong>序列生成阶段</strong>，等序列交到验证层手里时，它已经是一份自洽、平滑、漂亮的假数据。</p>
+<p>统计检验无法证伪一个自洽的假数据生成器。这是三层验证的结构性盲区，不是参数没调好。</p>
+<hr />
+<h2 id="_3">四、补第四层：实盘语义回放测试</h2>
+<p>思路很朴素：<strong>不要让回测引擎自己生成成交序列，而是让生产交易代码本体在历史数据上跑一遍，再和回测引擎的成交序列逐笔对账。</strong></p>
+<ul>
+<li>回测引擎：我写的 <code>BacktestEngine</code>，负责撮合、记账</li>
+<li>生产代码：实盘真正跑的那套 <code>Strategy.run()</code>，负责信号、下单</li>
+</ul>
+<p>如果两者在同一段历史、同一份 K 线上产出的成交序列对不上，说明至少有一方的成交语义是错的。前视偏差通常就藏在这个差异里——回测引擎"知道"了 bar 收盘后的信息，生产代码在逐根推进时不可能知道。</p>
+<h3 id="41">4.1 回放骨架</h3>
+<p>关键点：<strong>mock 掉所有网络函数</strong>，用内存里的 K 线迭代器逐根喂给生产代码，让 <code>run()</code> 以为自己在实时运行。</p>
+<pre class="codehilite"><code class="language-python">import copy
+from dataclasses import dataclass, field
+
+@dataclass
+class Bar:
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+class ReplayHarness:
+    &quot;&quot;&quot;用真实历史K线逐根驱动生产交易代码，记录其成交序列。&quot;&quot;&quot;
+
+    def __init__(self, strategy, klines, init_capital=10000.0):
+        self.strategy = strategy
+        self.klines = klines              # List[Bar]，按时间升序
+        self.cash = init_capital
+        self.position = 0.0
+        self.trades = []                  # 生产代码视角的成交序列
+        self._cursor = 0
+        self._install_mocks()
+
+    # ---- mock 网络层：生产代码调用这些函数时拿到的是&quot;当前时刻可见&quot;的数据 ----
+    def _install_mocks(self):
+        harness = self
+
+        def fetch_klines(symbol, interval, limit):
+            # 只返回游标之前（含当前根）的K线，杜绝未来函数
+            end = harness._cursor + 1
+            start = max(0, end - limit)
+            return copy.deepcopy(harness.klines[start:end])
+
+        def fetch_price(symbol):
+            # 实时报价 = 当前这根bar的收盘价（模拟&quot;此刻&quot;）
+            return harness.klines[harness._cursor].close
+
+        def place_order(symbol, side, qty, price=None):
+            px = fetch_price(symbol) if price is None else price
+            harness._fill(side, qty, px)
+
+        # 注入到生产代码依赖的模块命名空间
+        import strategy_module as sm   # 生产代码所在模块
+        sm.fetch_klines = fetch_klines
+        sm.fetch_price = fetch_price
+        sm.place_order = place_order
+
+    def _fill(self, side, qty, px):
+        if side == &quot;buy&quot;:
+            cost = qty * px
+            if cost &gt; self.cash:
+                qty = self.cash / px
+                cost = qty * px
+            self.cash -= cost
+            self.position += qty
+        else:
+            qty = min(qty, self.position)
+            self.cash += qty * px
+            self.position -= qty
+        self.trades.append({
+            &quot;ts&quot;: self.klines[self._cursor].ts,
+            &quot;side&quot;: side, &quot;qty&quot;: qty, &quot;price&quot;: px,
+        })
+
+    def run(self):
+        for i in range(len(self.klines)):
+            self._cursor = i
+            self.strategy.run()           # 生产代码本体，逐根推进
+        return self.trades
+</code></pre>
+
+<h3 id="42">4.2 对账</h3>
+<p>回放跑完后，把生产代码的 <code>trades</code> 和回测引擎的 <code>trades</code> 按时间戳对齐逐笔比较：</p>
+<pre class="codehilite"><code class="language-python">def reconcile(bt_trades, live_trades, price_tol=1e-6):
+    mismatches = []
+    for i, (a, b) in enumerate(zip(bt_trades, live_trades)):
+        if a[&quot;ts&quot;] != b[&quot;ts&quot;] or a[&quot;side&quot;] != b[&quot;side&quot;]:
+            mismatches.append((i, &quot;timing/side&quot;, a, b))
+        elif abs(a[&quot;price&quot;] - b[&quot;price&quot;]) &gt; price_tol:
+            mismatches.append((i, &quot;price&quot;, a, b))
+    if len(bt_trades) != len(live_trades):
+        mismatches.append((&quot;len&quot;, len(bt_trades), len(live_trades)))
+    return mismatches
+</code></pre>
+
+<p>我那次跑完，<code>mismatches</code> 里密密麻麻全是 price 差异——回测引擎的成交价系统性地比生产代码更优，方向一致、幅度稳定。这就是前视偏差的指纹：<strong>不是随机误差，是单向偏移。</strong> 回测虚高被这一层直接钉死。</p>
+<hr />
+<h2 id="_4">五、四层验证的分工</h2>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>验证对象</th>
+<th>能拦住什么</th>
+<th>拦不住什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DSR</td>
+<td>收益序列显著性</td>
+<td>多重试验、非正态下的假显著</td>
+<td>序列生成错误</td>
+</tr>
+<tr>
+<td>蒙特卡洛</td>
+<td>顺序稳健性</td>
+<td>路径依赖、运气集中</td>
+<td>数据生成错误</td>
+</tr>
+<tr>
+<td>前后半段</td>
+<td>时间稳定性</td>
+<td>参数漂移、市场状态切换</td>
+<td>全样本一致的偏差</td>
+</tr>
+<tr>
+<td><strong>语义回放</strong></td>
+<td><strong>成交序列正确性</strong></td>
+<td><strong>前视偏差、撮合语义错位</strong></td>
+<td>逻辑之外的未知未知</td>
+</tr>
+</tbody>
+</table>
+<p>前三层是<strong>统计层</strong>，第四层是<strong>语义层</strong>。统计层再厚，也补不上语义层的洞。反过来，语义回放也不能替代统计检验——它只保证"回测和生产说的是同一件事"，不保证"这件事本身能赚钱"。两层缺一不可，但顺序不能反：<strong>先保证序列是真的，再谈它好不好。</strong></p>
+<hr />
+<h2 id="_5">六、几个实现细节</h2>
+<ol>
+<li><strong><code>fetch_klines</code> 的游标是命门</strong>。<code>end = cursor + 1</code> 保证生产代码永远看不到未来 bar。任何一处 <code>limit</code> 越界，回放本身就引入了前视偏差，测试失去意义。</li>
+<li><strong><code>place_order</code> 的默认价用 <code>fetch_price</code></strong>，即当前 bar 收盘。如果你的生产逻辑是市价单，这就是真实语义；如果是限价单，要把挂单价传进来，让 harness 判断能否在后续 bar 成交。</li>
+<li><strong>状态要内存化</strong>。生产代码里任何写文件、写数据库、发请求的地方都要 mock 成内存对象，否则回放不可重放。</li>
+<li><strong>对账要逐笔，不要只比总盈亏</strong>。总盈亏相同可能掩盖成交时点错位；逐笔对账才能定位偏差方向。</li>
+</ol>
+<hr />
+<h2 id="_6">七、小结</h2>
+<p>DSR、蒙特卡洛、前后半段，三层加起来看起来固若金汤，但它们共享同一个输入假设：交易序列是真实的。前视偏差攻击的正是这个假设，所以三层集体失明，还给出了 DSR=1.000、破产率 0%、+78U/+3326U 的绿灯。</p>
+<p>补上的第四层——实盘语义回放——把验证对象从"序列的统计性质"换成了"序列的生成过程"。用生产代码本体在真实历史上逐根跑，和回测引擎对账，前视偏差就无处可藏。</p>
+<p>一句话记住：<strong>统计检验验证结果，语义回放验证过程。前视偏差是过程错误，只能靠过程验证来抓。</strong></p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">策略验证</span><span class="tag-badge">DSR</span><span class="tag-badge">蒙特卡洛</span><span class="tag-badge">统计检验</span><span class="tag-badge">回测</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
