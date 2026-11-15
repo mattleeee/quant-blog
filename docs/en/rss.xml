@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>After Fixing One Line of a Backtest, I Re-Ran Every Strategy</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/102.html</link>
+            <description>A fill-timing bug in the shared backtest engine is one of those findings that starts small and ends with a full re-validation cascade....</description>
+            <pubDate>2026-11-15</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>The Lookahead Bias That Faked a +1702% Backtest</title>
             <link>https://www.hkcode.dpdns.org/en/posts/101.html</link>
             <description>A one-line timing bug in an EMA-crossover backtester turned a losing strategy into a +1702% equity curve with a Deflated Sharpe Ratio of 1.000 and p = 0.0000....</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/29.html</link>
             <description>The Setup: One Strategy, Two Filters The base strategy is a long-only momentum entry on 15-minute candles....</description>
             <pubDate>2026-10-27</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Three-Layer Validation Before You Trust a Backtest</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/28.html</link>
-            <description>Why One Good Backtest Means Nothing A single equity curve is a sample of size one....</description>
-            <pubDate>2026-10-26</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
