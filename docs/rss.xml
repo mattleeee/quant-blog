@@ -7,6 +7,21 @@
         <language>zh-CN</language>
         
         <item>
+            <title>三层验证为什么拦不住前视偏差：DSR、蒙特卡洛、前后半段的盲区</title>
+            <link>https://www.hkcode.dpdns.org/posts/102.html</link>
+            <description>一、先说结论
+
+我的策略验证流程原本有三层：
+
+1. DSR（Deflated Sharpe Ratio）：考虑偏度、峰度和多重试验后，策略夏普仍然显著的概率
+2. 币块蒙特卡洛重采样：几百次随机重排，看破产率和收益分布
+3. 前后半段期望一致性：把样本切成两半，看盈亏期望是否稳定
+
+这三层跑下来，...</description>
+            <pubDate>2026-11-15</pubDate>
+            <category>量化回测</category>
+        </item>
+        <item>
             <title>一个前视偏差bug，让我的回测从+1702%变成-50.7%</title>
             <link>https://www.hkcode.dpdns.org/posts/101.html</link>
             <description>先说结论：我的EMA均线交叉双向策略回测跑出来 +1702.1%、DSR=1.000、p=0.0000，看起来是一个可以直接上实盘的&quot;圣杯&quot;。修复一个时序bug之后，同一份代码、同一个参数、同一个币池，变成 50.7%、DSR=0.000、t=2.93。...</description>
@@ -137,13 +152,6 @@
             <link>https://www.hkcode.dpdns.org/posts/43.html</link>
             <description>系统重装后的完整恢复流程：从备份到上线 系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。整套流程用 Python 脚本半自动化完成，避免手动操作遗漏。 恢复前的准备：检查清单 重装前如果没做备份，后面全是补救。我的习...</description>
             <pubDate>2026-10-12</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>微信推送绑定失败排查：SQLite数据库清理方案</title>
-            <link>https://www.hkcode.dpdns.org/posts/42.html</link>
-            <description>微信推送绑定失败排查：SQLite数据库清理方案 问题现象 上周给量化系统加了一个微信推送模块，用于把每日的实盘信号、持仓变动、风控告警推送到微信。方案用的是企业微信应用消息 + 自建绑定服务，整体架构不复杂： - im-service：负责微信扫码绑定、token 管理、消息转发 - push-worker：从 Re...</description>
-            <pubDate>2026-10-11</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
