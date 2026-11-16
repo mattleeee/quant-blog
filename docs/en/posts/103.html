@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three-Layer Strategy Validation and the Blind Spot That Bit Me - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Three-Layer Strategy Validation and the Blind Spot That Bit Me My validation stack had three layers, and all three were ...">
+    <meta name="keywords" content="DSR,Monte Carlo,split-half,strategy validation">
+    <meta property="og:title" content="Three-Layer Strategy Validation and the Blind Spot That Bit Me">
+    <meta property="og:description" content="Three-Layer Strategy Validation and the Blind Spot That Bit Me My validation stack had three layers, and all three were ...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/103.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Three-Layer Strategy Validation and the Blind Spot That Bit Me</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-16</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>My validation stack had three layers, and all three were green. DSR came out at 1.000. Coin-block Monte Carlo showed a 0% ruin rate across hundreds of randomized pool combinations. Split-half stability was positive in both halves of the trade sequence. I shipped it, and the strategy was garbage, because the backtest that produced those numbers had a lookahead bug that leaked future candle data into the entry decision.</p>
+<p>The uncomfortable lesson: all three layers evaluate the statistical properties of <em>one trade sequence</em>. They assume that sequence was generated honestly. None of them audits <em>how</em> trades were generated. A poisoned sequence can be perfectly well-behaved statistically — in fact, a lookahead bug usually makes it <em>more</em> well-behaved, because the strategy is effectively peeking at the answer. High DSR, zero ruin, clean split-half — that's exactly what a leak looks like.</p>
+<p>This post is the four-layer design I run now, with the code signatures and a table of what each layer actually catches. The fourth layer is the one that would have saved me.</p>
+<h2 id="layer-1-deflated-sharpe-ratio">Layer 1: Deflated Sharpe Ratio</h2>
+<p>The DSR (Bailey &amp; López de Prado) adjusts an observed Sharpe ratio for the number of trials you ran, and for the non-normality of returns. If you tried 40 parameter sets and kept the best, the DSR asks: given 40 trials, skew, and kurtosis, is this Sharpe still distinguishable from the maximum you'd expect from noise?</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def deflated_sharpe_ratio(
+    returns: np.ndarray,
+    n_trials: int,
+    sr_variance: float | None = None,
+    periods_per_year: int = 252,
+) -&gt; float:
+    &quot;&quot;&quot;
+    Returns the probability that the true Sharpe exceeds zero,
+    after deflating for n_trials and return non-normality.
+
+    returns: per-period (e.g. daily) strategy returns, chronological
+    n_trials: number of configurations you actually evaluated
+    sr_variance: variance of Sharpe across your trials; if None,
+                 use the estimator below (conservative for small n_trials)
+    &quot;&quot;&quot;
+    r = np.asarray(returns, dtype=float)
+    r = r[np.isfinite(r)]
+    n = r.size
+    if n &lt; 30 or n_trials &lt; 1:
+        return 0.0
+
+    mu, sd = r.mean(), r.std(ddof=1)
+    if sd == 0:
+        return 0.0
+    sr = mu / sd                      # per-period Sharpe
+    g1 = ((r - mu) ** 3).mean() / sd**3
+    g2 = ((r - mu) ** 4).mean() / sd**4
+
+    # Variance of the Sharpe estimator under skew/kurtosis
+    sr_var = (1 - g1 * sr + (g2 - 1) / 4 * sr**2) / (n - 1)
+
+    if sr_variance is None:
+        # Expected max of n_trials draws from N(0, sr_var)
+        e_max = np.sqrt(sr_var) * (
+            (1 - np.euler_gamma) * norm.ppf(1 - 1 / n_trials)
+            + np.euler_gamma * norm.ppf(1 - 1 / (n_trials * np.e))
+        )
+    else:
+        e_max = np.sqrt(sr_variance) * norm.ppf(1 - 1 / n_trials)
+
+    z = (sr - e_max) / np.sqrt(sr_var)
+    return float(norm.cdf(z))
+</code></pre>
+
+<p>Two things matter operationally. First, <code>n_trials</code> must be honest — every grid point, every filter variant, every "quick check" counts. Second, the DSR is only as good as the return series you feed it. It has no opinion on whether that series is real.</p>
+<h2 id="layer-2-coin-block-monte-carlo">Layer 2: Coin-Block Monte Carlo</h2>
+<p>I don't bootstrap individual trades. Trades cluster — volatility regimes, correlated entries, streaks. So I resample in blocks with random block boundaries, and I randomize the <em>pool composition</em> across hundreds of runs: which assets or sub-strategies are included, in what weights, drawn from the eligible universe. The output I care about is the ruin rate — the fraction of simulated paths that breach a drawdown or capital threshold.</p>
+<pre class="codehilite"><code class="language-python">def coin_block_monte_carlo(
+    trade_pnls: np.ndarray,
+    n_sims: int = 500,
+    mean_block: int = 10,
+    ruin_dd: float = 0.25,
+    initial_capital: float = 1.0,
+    rng: np.random.Generator | None = None,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Resample the trade sequence in random-length blocks and measure
+    the fraction of paths that breach ruin_dd.
+
+    trade_pnls: per-trade PnL as a fraction of capital, chronological
+    mean_block: average block length (geometric block lengths)
+    ruin_dd: drawdown threshold as fraction of peak equity
+    &quot;&quot;&quot;
+    rng = rng or np.random.default_rng(7)
+    pnl = np.asarray(trade_pnls, dtype=float)
+    n = pnl.size
+    ruins, finals = 0, np.empty(n_sims)
+
+    for s in range(n_sims):
+        path, i = [], 0
+        while len(path) &lt; n:
+            blk = max(1, int(rng.geometric(1.0 / mean_block)))
+            start = rng.integers(0, n)
+            idx = (start + np.arange(blk)) % n   # wrap-around blocks
+            path.extend(pnl[idx])
+            i += blk
+        eq = initial_capital + np.cumsum(np.array(path[:n]))
+        peak = np.maximum.accumulate(np.concatenate([[initial_capital], eq]))
+        dd = 1.0 - eq / peak[1:]
+        if dd.max() &gt;= ruin_dd:
+            ruins += 1
+        finals[s] = eq[-1]
+
+    return {
+        &quot;ruin_rate&quot;: ruins / n_sims,
+        &quot;median_final&quot;: float(np.median(finals)),
+        &quot;p05_final&quot;: float(np.percentile(finals, 5)),
+    }
+</code></pre>
+
+<p>This layer answers: <em>given this sequence's dependence structure, how fragile is the equity path?</em> It does not answer whether the sequence could have been produced by the strategy in the first place. If the sequence is a fabrication, the Monte Carlo is resampling fiction with great rigor.</p>
+<h2 id="layer-3-split-half-stability">Layer 3: Split-Half Stability</h2>
+<p>The simplest and most brutal check: split the trade sequence in two, require positive expectation in both halves. I also require the halves to be roughly comparable in magnitude — a strategy whose entire edge lives in the first 30% of trades is a regime artifact, not a strategy.</p>
+<pre class="codehilite"><code class="language-python">def split_half_stability(
+    trade_pnls: np.ndarray,
+    min_trades_per_half: int = 30,
+    max_decay_ratio: float = 0.5,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Require positive mean in both halves and that the second half
+    retains at least max_decay_ratio of the first half's mean.
+
+    trade_pnls: per-trade PnL, chronological
+    &quot;&quot;&quot;
+    pnl = np.asarray(trade_pnls, dtype=float)
+    n = pnl.size
+    if n &lt; 2 * min_trades_per_half:
+        return {&quot;pass&quot;: False, &quot;reason&quot;: &quot;insufficient trades&quot;}
+
+    h1, h2 = pnl[: n // 2], pnl[n // 2 :]
+    m1, m2 = h1.mean(), h2.mean()
+    ok = m1 &gt; 0 and m2 &gt; 0 and m2 &gt;= max_decay_ratio * m1
+    return {
+        &quot;pass&quot;: bool(ok),
+        &quot;mean_h1&quot;: float(m1),
+        &quot;mean_h2&quot;: float(m2),
+        &quot;decay_ratio&quot;: float(m2 / m1) if m1 &gt; 0 else float(&quot;nan&quot;),
+    }
+</code></pre>
+
+<p>Split-half catches overfitting to a specific time window, edge decay, and single-regime dependence. It cannot catch a leak, because a leak inflates <em>both</em> halves. My lookahead bug made the second half look better than the first, and I read that as "edge improving."</p>
+<h2 id="the-blind-spot">The Blind Spot</h2>
+<p>Here's the thing all three layers share: they take <code>trade_pnls</code> as an axiom. Every one of them is a function of the sequence, not of the process that generated it. The DSR deflates for <em>how many sequences you tried</em>, not for <em>whether each sequence was built from legal information</em>. The Monte Carlo reshuffles the sequence. Split-half cuts it. None of them opens the strategy code and asks: at the moment of this entry decision, what data was visible?</p>
+<p>My bug was mundane. The feature pipeline computed a rolling statistic with <code>center=True</code> on a window that extended past the decision timestamp, then joined features to signals on bar index. The backtest engine was happy to serve it. Every trade was entered with a few bars of future information baked into the feature. The resulting sequence had a Sharpe that survived 40 trials, zero ruin across 500 block simulations, and positive expectation in both halves. DSR = 1.000. Ruin = 0%. Both halves positive. All three green, all three meaningless.</p>
+<p>The failure mode is structural: statistical validation is <em>orthogonal</em> to implementation correctness. You can have a flawless validation stack and a broken data path, and the stack will report success with total confidence.</p>
+<h2 id="layer-4-replay-testing">Layer 4: Replay Testing</h2>
+<p>The fix is to stop trusting the backtest's trade sequence and instead force two independent code paths to agree on the same history. Replay testing drives the <em>production</em> trading code — the same signal generator, the same risk module, the same order logic that runs live — over real historical candles, bar by bar, with the data feed truncated at each decision timestamp. Then it diffs the resulting trades against the backtest's trades. Any divergence is a bug in one of the two, and the diff tells you where.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+from typing import Callable, Iterable
+
+@dataclass
+class Candle:
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+@dataclass
+class Trade:
+    ts: int
+    side: str
+    qty: float
+    price: float
+
+def replay_production(
+    candles: Iterable[Candle],
+    on_candle: Callable[[list[Candle]], list[Trade]],
+    warmup: int = 200,
+) -&gt; list[Trade]:
+    &quot;&quot;&quot;
+    Drive production code over history with a strictly causal feed.
+    on_candle receives ONLY candles visible at the current timestamp.
+    Returns the trade list the production code would have produced.
+    &quot;&quot;&quot;
+    history: list[Candle] = []
+    trades: list[Trade] = []
+    for c in candles:
+        history.append(c)
+        if len(history) &lt;= warmup:
+            continue
+        # The engine must never see beyond `history` here.
+        trades.extend(on_candle(history))
+    return trades
+
+def compare_trade_streams(
+    backtest: list[Trade],
+    replay: list[Trade],
+    ts_tolerance: int = 0,
+    qty_rel_tol: float = 1e-6,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Diff two trade streams. Any mismatch is a validation failure,
+    regardless of what layers 1-3 said.
+    &quot;&quot;&quot;
+    if len(backtest) != len(replay):
+        return {&quot;match&quot;: False, &quot;reason&quot;: &quot;trade count differs&quot;,
+                &quot;backtest_n&quot;: len(backtest), &quot;replay_n&quot;: len(replay)}
+
+    mismatches = []
+    for i, (b, r) in enumerate(zip(backtest, replay)):
+        if abs(b.ts - r.ts) &gt; ts_tolerance or b.side != r.side:
+            mismatches.append({&quot;i&quot;: i, &quot;kind&quot;: &quot;timing_or_side&quot;,
+                               &quot;backtest&quot;: b, &quot;replay&quot;: r})
+            continue
+        rel = abs(b.qty - r.qty) / max(abs(b.qty), 1e-12)
+        if rel &gt; qty_rel_tol:
+            mismatches.append({&quot;i&quot;: i, &quot;kind&quot;: &quot;qty&quot;,
+                               &quot;backtest&quot;: b, &quot;replay&quot;: r})
+
+    return {&quot;match&quot;: not mismatches, &quot;mismatches&quot;: mismatches[:20],
+            &quot;n_mismatches&quot;: len(mismatches)}
+</code></pre>
+
+<p>The critical property is <em>causality enforcement</em>. The replay harness hands the production code a list that ends at the current bar — there is no future data in the object, so a <code>center=True</code> bug becomes a crash or an obviously wrong feature, not a silent edge. If the production code needs a warmup window, it gets only the past. If it tries to index forward, it raises.</p>
+<p>Two practical notes from running this:</p>
+<ol>
+<li><strong>Diff at the trade level, not the signal level.</strong> Signals can diverge harmlessly due to float ordering. Trades — timestamp, side, quantity — must match. A single-trade mismatch is worth a full investigation.</li>
+<li><strong>Run replay on the same candles the backtest used, byte for byte.</strong> If the backtest reads from a research store and replay reads from a production feed, you're testing data plumbing, not strategy logic. Pin one dataset.</li>
+</ol>
+<p>When I added this layer, the lookahead bug surfaced in minutes. The replay trade stream diverged from the backtest at the first signal after warmup, and the diff pointed straight at the feature join. The first three layers had been reporting success on a sequence the production code could never have generated.</p>
+<h2 id="what-each-layer-catches">What Each Layer Catches</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Catches</th>
+<th>Does not catch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DSR</strong></td>
+<td>Multiple-testing inflation, non-normal Sharpe, selection bias across trials</td>
+<td>Lookahead, data leakage, execution mismatches, regime fragility</td>
+</tr>
+<tr>
+<td><strong>Coin-block Monte Carlo</strong></td>
+<td>Path fragility, drawdown/ruin risk under dependence, pool-composition sensitivity</td>
+<td>Whether the trade sequence is achievable by production code</td>
+</tr>
+<tr>
+<td><strong>Split-half</strong></td>
+<td>Edge decay, single-regime dependence, time-window overfitting</td>
+<td>Leaks (they inflate both halves), implementation divergence</td>
+</tr>
+<tr>
+<td><strong>Replay</strong></td>
+<td>Lookahead, engine/production divergence, data-path bugs, timestamp handling</td>
+<td>Overfitting, multiple testing, ruin risk, regime dependence</td>
+</tr>
+</tbody>
+</table>
+<p>The layers are complementary, and the order matters less than the coverage. Layers 1–3 audit the <em>statistics of the sequence</em>. Layer 4 audits the <em>provenance of the sequence</em>. You need both, and the provenance check is the one that's cheap to skip and expensive to omit.</p>
+<p>The general principle: every validation layer should be tested against a deliberately broken strategy. Feed your DSR a known-leaky sequence — it should pass, and now you know its blind spot. Feed your replay harness a strategy with a one-bar peek — it should fail loudly. A validation layer you've never seen fail is a layer you don't understand.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-16 08:46:12</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SOXL</td>
+<td>高质量标的做多</td>
+<td>$57.98</td>
+<td>$59.8354</td>
+<td>$56.8204</td>
+<td>1:1.6</td>
+</tr>
+</tbody>
+</table>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>EVAA</td>
+<td>热点跟涨</td>
+<td>$2.7639</td>
+<td>$2.6257</td>
+<td>$2.8606</td>
+<td>1:1.4</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">DSR</span><span class="tag-badge">Monte Carlo</span><span class="tag-badge">split-half</span><span class="tag-badge">strategy validation</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
