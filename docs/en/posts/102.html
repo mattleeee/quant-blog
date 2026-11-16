@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>After Fixing One Line of a Backtest, I Re-Ran Every Strategy - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A fill-timing bug in the shared backtest engine is one of those findings that starts small and ends with a full re-valid...">
+    <meta name="keywords" content="validation culture,backtest regression,reproducibility">
+    <meta property="og:title" content="After Fixing One Line of a Backtest, I Re-Ran Every Strategy">
+    <meta property="og:description" content="A fill-timing bug in the shared backtest engine is one of those findings that starts small and ends with a full re-valid...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/102.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>After Fixing One Line of a Backtest, I Re-Ran Every Strategy</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-15</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A fill-timing bug in the shared backtest engine is one of those findings that starts small and ends with a full re-validation cascade. In our case, a single line — the point at which a signal was evaluated relative to the bar whose close it used — introduced a one-bar lookahead into every fill. The line was easy to fix. The hard part was accepting what the fix implied: every strategy validated on that engine had been validated against a slightly different, more optimistic world.</p>
+<p>This post is about the cost and benefit of that cascade. The bug itself is almost trivial; the process of deciding what to re-run, and having the metadata to do it, is the part worth writing down.</p>
+<h2 id="the-bug-and-why-it-invalidated-everything-downstream">The bug and why it invalidated everything downstream</h2>
+<p>The engine evaluated a signal on bar <code>t</code> but filled at the close of bar <code>t</code> using information that was only fully available after that close. In practice, the strategy got to peek at the bar it was trading on. For slow-moving daily strategies this is a small distortion. For anything sensitive to entry timing — mean reversion, fast EMA crossovers — it inflates results by exactly the amount that makes a backtest look shippable.</p>
+<p>The fix:</p>
+<pre class="codehilite"><code class="language-python"># Before: signal computed on bar t, filled at close of bar t (lookahead)
+for t in range(1, len(bars)):
+    signal = strategy.signal(bars[:t+1])      # sees bar t fully
+    fill_price = bars[t].close                 # fills on the same bar
+    ...
+
+# After: signal computed on bar t, filled at the open of bar t+1
+for t in range(1, len(bars) - 1):
+    signal = strategy.signal(bars[:t+1])      # decision made with data through close of t
+    fill_price = bars[t+1].open                # execution happens on the next bar
+    ...
+</code></pre>
+
+<p>That is the whole change. Now the important part: this engine was shared infrastructure. Every strategy, every parameter sweep, every "shipped yesterday" conclusion depended on it. A bug in shared infrastructure doesn't invalidate one result — it multiplicatively invalidates every result that flowed through it. The blast radius is the dependency graph, not the diff.</p>
+<h2 id="deciding-the-scope-42-configurations">Deciding the scope: 42 configurations</h2>
+<p>The first instinct was to re-run only the strategy that had just been promoted. That instinct is wrong. The correct scope is "everything whose validation metadata points at the buggy engine version." We keep that metadata per strategy precisely so this question has a mechanical answer.</p>
+<p>Our re-run covered 42 configurations:</p>
+<ul>
+<li><strong>3 modes:</strong> dual (long and short), long-only, short-only</li>
+<li><strong>7 EMA parameter pairs</strong></li>
+<li><strong>2 pools:</strong> 7 majors over 4 years, and 20 altcoins over 200 days</li>
+</ul>
+<p>That's <code>3 × 7 × 2 = 42</code>. Not enormous, but enough that running it by hand would guarantee inconsistency. The cascade has to be scripted, or you'll re-run some cells with one data snapshot and others with another, and you'll have introduced a second, self-inflicted reproducibility bug on top of the original.</p>
+<h2 id="making-the-cascade-reproducible">Making the cascade reproducible</h2>
+<p>The rule we enforce now: a validation run is identified by a manifest, and the manifest is what you re-run, not "the strategy." If the engine version changes, you re-run every manifest that references the old version.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, asdict
+import hashlib, json
+
+@dataclass(frozen=True)
+class ValidationManifest:
+    strategy_id: str
+    engine_version: str
+    data_snapshot: str          # hash of the exact price/volume files used
+    mode: str                   # &quot;dual&quot; | &quot;long&quot; | &quot;short&quot;
+    ema_pair: tuple
+    pool: str                   # &quot;majors_4y&quot; | &quot;alts_200d&quot;
+    code_commit: str
+
+    def fingerprint(self) -&gt; str:
+        blob = json.dumps(asdict(self), sort_keys=True).encode()
+        return hashlib.sha256(blob).hexdigest()[:16]
+</code></pre>
+
+<p>Every backtest result row carries a <code>fingerprint</code>. When the engine version bumps, the re-run query is one line:</p>
+<pre class="codehilite"><code class="language-python">stale = [m for m in manifests if m.engine_version != CURRENT_ENGINE_VERSION]
+print(f&quot;{len(stale)} manifests to re-run&quot;)
+</code></pre>
+
+<p>This is the concrete payoff of validation metadata. Without per-strategy engine version and data range, the only safe answer to "what do we re-run?" is "everything, from scratch, and hope we remember the data snapshot." With it, the answer is a filtered list and a bounded job.</p>
+<h2 id="the-results-were-brutal">The results were brutal</h2>
+<p>The re-run finished and the numbers did not flatter anyone.</p>
+<p>The strategy shipped yesterday — the one sitting in the <code>observe</code> tier — dropped from a Deflated Sharpe Ratio above 0.9 to <strong>0.18</strong>. That is not a marginal degradation. It went from "plausibly real after multiple-testing correction" to "indistinguishable from noise." The lookahead had been doing most of the work.</p>
+<p>The directional breakdown was just as clear. Across the dual-mode configurations, the long leg returned <strong>+295.7%</strong> while the short leg returned <strong>−37.9%</strong>. The short side of essentially everything was negative once timing was correct. This matters for more than P&amp;L: it tells you the original dual-mode results were not a balanced edge with two legs, they were a long-only edge plus a short leg that the lookahead had been quietly subsidizing. Any conclusion that depended on the short leg being additive was built on the bug.</p>
+<p>One framework survived untouched. It had been validated on a <strong>different engine</strong> that had correct fill timing from day one — 156 trades, t-statistic <strong>+2.53</strong>. It needed no re-run because it never depended on the buggy code path. That is the strongest argument for keeping more than one engine in the validation stack: independent implementations cross-check each other, and a bug in one is caught by disagreement with the other rather than by luck.</p>
+<h2 id="what-the-cascade-cost-and-why-it-was-still-cheap">What the cascade cost, and why it was still cheap</h2>
+<p>The re-run cost roughly a day of compute and a day of attention. The alternative — shipping the <code>observe</code>-tier strategy on a DSR of 0.9 that was really 0.18 — costs far more, just later and less visibly. The cost/benefit here is not close. The expensive scenario is the one where you never find the bug.</p>
+<p>The subtler cost is trust. After a cascade like this, every number produced before the fix is suspect until re-run. That is uncomfortable, and it is correct. The productive response is not to re-litigate each result individually but to make the re-run cheap and complete, then move on with a clean baseline.</p>
+<h2 id="practices-that-made-the-difference">Practices that made the difference</h2>
+<h3 id="treat-the-engine-as-versioned-infrastructure">Treat the engine as versioned infrastructure</h3>
+<p>The engine gets a version, and that version is a first-class field in every validation record. A change to fill logic, cost model, or data alignment is a version bump, full stop — even a one-line change. The one-line fix here was exactly the kind of change that looks too small to version. It wasn't.</p>
+<h3 id="store-validation-metadata-per-strategy-not-per-repo">Store validation metadata per strategy, not per repo</h3>
+<p>Engine version and data range belong next to the result, not in a changelog someone has to reconstruct. If you can't answer "which engine version and which data snapshot produced this DSR?" from the result row alone, you can't scope a re-run.</p>
+<h3 id="cross-check-with-a-second-engine">Cross-check with a second engine</h3>
+<p>The framework that survived did so because it was validated elsewhere. Maintaining a second, independently written engine for cross-checks is real work, but it converts "we hope our engine is right" into "two engines agree, or we investigate." Disagreement between engines is a signal; agreement is weak evidence but better than none.</p>
+<h3 id="script-the-cascade-pin-the-data">Script the cascade, pin the data</h3>
+<p>Re-runs must be deterministic. Pin the data snapshot by hash, run all 42 cells from the same manifest set, and write results keyed by fingerprint so you can diff old versus new per configuration rather than eyeballing aggregates.</p>
+<pre class="codehilite"><code class="language-python">def rerun(manifests, engine, data_store):
+    results = {}
+    for m in manifests:
+        bars = data_store.load(m.data_snapshot, m.pool)
+        res = engine.run(bars, mode=m.mode, ema_pair=m.ema_pair)
+        results[m.fingerprint()] = {
+            &quot;dsr&quot;: res.deflated_sharpe,
+            &quot;long_ret&quot;: res.long_return,
+            &quot;short_ret&quot;: res.short_return,
+            &quot;trades&quot;: res.n_trades,
+        }
+    return results
+</code></pre>
+
+<h2 id="the-takeaway">The takeaway</h2>
+<p>A one-line fill-timing fix triggered a 42-configuration re-validation, collapsed a shipped strategy from DSR 0.9+ to 0.18, exposed that the short side of everything was negative (+295.7% long versus −37.9% short), and left exactly one framework standing — the one validated on a different engine with correct timing from day one (156 trades, t=+2.53). The bug was cheap to fix. The cascade was cheap to run because we had the metadata to scope it. The lesson is that validation culture is mostly about making the uncomfortable re-run mechanical, so that finding a bug is an inconvenience rather than a crisis.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">validation culture</span><span class="tag-badge">backtest regression</span><span class="tag-badge">reproducibility</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
