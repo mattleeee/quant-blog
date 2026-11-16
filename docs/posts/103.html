@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>给策略做减法：多空贡献拆分后，我把做空腿直接砍了 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="一、一个&quot;看着不错&quot;的回测
+
+先上数据。EMA20/50 双向趋势跟随，7 个主流币，4 年日线数据，固定仓位、无杠杆、手续费按 taker 双边计算：
+
+| 指标 | 数值 |
+|||
+| 累计收益 | +265.8% |
+| 最大回撤 ...">
+    <meta name="keywords" content="策略设计,多空拆分,EMA,趋势跟随">
+    <meta property="og:title" content="给策略做减法：多空贡献拆分后，我把做空腿直接砍了">
+    <meta property="og:description" content="一、一个&quot;看着不错&quot;的回测
+
+先上数据。EMA20/50 双向趋势跟随，7 个主流币，4 年日线数据，固定仓位、无杠杆、手续费按 taker 双边计算：
+
+| 指标 | 数值 |
+|||
+| 累计收益 | +265.8% |
+| 最大回撤 ...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/103.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>给策略做减法：多空贡献拆分后，我把做空腿直接砍了</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-16</span>
+                <span class="category"><span class="tag-badge">量化策略</span></span>
+            </div>
+            <div class="post-content">
+<p>先上数据。EMA20/50 双向趋势跟随，7 个主流币，4 年日线数据，固定仓位、无杠杆、手续费按 taker 双边计算：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>数值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>累计收益</td>
+<td>+265.8%</td>
+</tr>
+<tr>
+<td>最大回撤</td>
+<td>33.1%</td>
+</tr>
+<tr>
+<td>交易笔数</td>
+<td>438</td>
+</tr>
+<tr>
+<td>t 统计量</td>
+<td>1.61</td>
+</tr>
+<tr>
+<td>p 值</td>
+<td>0.107</td>
+</tr>
+</tbody>
+</table>
+<p>收益数字很好看，但 t=1.61、p=0.107，在常规显著性门槛下<strong>不显著</strong>。这意味着什么？意味着这 +265.8% 有相当概率是运气，而不是策略真的有效。</p>
+<p>问题在于：一个双向策略，做多腿和做空腿混在一起，你根本不知道收益是谁挣的、亏损是谁亏的。混合统计量会把一个有效的方向和无效的方向平均掉，也可能让一个本来显著的信号变得不显著。</p>
+<p>所以第一步不是调参，不是加过滤，是<strong>拆开看</strong>。</p>
+<h2 id="_1">二、多空贡献拆分：同一引擎，按方向过滤</h2>
+<p>拆分的核心原则：<strong>不要写两套策略代码</strong>。两套代码意味着两套 bug、两套逻辑漂移，最后你连对比的基础都不存在。</p>
+<p>正确做法是：同一个回测引擎，跑同一套信号逻辑，只在成交记录层面按方向过滤，分别统计。</p>
+<p>先看信号生成部分。EMA 交叉逻辑本身是方向对称的：</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+
+def generate_signals(df: pd.DataFrame, fast=20, slow=50) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    df 需包含 'close' 列，索引为时间。
+    返回带 ema_fast / ema_slow / signal 的 DataFrame。
+    signal: 1 表示金叉后持多，-1 表示死叉后持空，0 表示空仓
+    &quot;&quot;&quot;
+    out = df.copy()
+    out[&quot;ema_fast&quot;] = out[&quot;close&quot;].ewm(span=fast, adjust=False).mean()
+    out[&quot;ema_slow&quot;] = out[&quot;close&quot;].ewm(span=slow, adjust=False).mean()
+
+    raw = np.where(out[&quot;ema_fast&quot;] &gt; out[&quot;ema_slow&quot;], 1, -1)
+    out[&quot;signal&quot;] = pd.Series(raw, index=out.index).shift(1).fillna(0)
+    return out
+</code></pre>
+
+<p>注意 <code>shift(1)</code>：信号在收盘后生成，下一根 K 线才生效，避免未来函数。这一步做错，后面所有拆分都是垃圾。</p>
+<p>接下来是成交记录。关键设计是：<strong>每笔交易记录方向字段</strong>，而不是在开仓时就区分策略：</p>
+<pre class="codehilite"><code class="language-python">def run_backtest(df: pd.DataFrame, fee=0.0005) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;
+    按 signal 持仓，signal 变化时换仓。
+    返回逐笔成交记录 trades，含 direction / entry / exit / pnl。
+    &quot;&quot;&quot;
+    df = df.copy()
+    df[&quot;pos&quot;] = df[&quot;signal&quot;].fillna(0)
+    df[&quot;pos_change&quot;] = df[&quot;pos&quot;].diff().fillna(df[&quot;pos&quot;])
+
+    trades = []
+    entry_price, entry_time, direction = None, None, 0
+
+    for ts, row in df.iterrows():
+        if row[&quot;pos_change&quot;] == 0:
+            continue
+        # 平掉旧仓
+        if direction != 0 and entry_price is not None:
+            exit_price = row[&quot;close&quot;]
+            gross = direction * (exit_price / entry_price - 1)
+            net = gross - 2 * fee
+            trades.append({
+                &quot;entry_time&quot;: entry_time,
+                &quot;exit_time&quot;: ts,
+                &quot;direction&quot;: direction,   # 1 多 / -1 空
+                &quot;entry&quot;: entry_price,
+                &quot;exit&quot;: exit_price,
+                &quot;pnl&quot;: net,
+            })
+        # 开新仓
+        direction = int(row[&quot;pos&quot;])
+        entry_price = row[&quot;close&quot;] if direction != 0 else None
+        entry_time = ts if direction != 0 else None
+
+    return pd.DataFrame(trades)
+</code></pre>
+
+<p>有了带 <code>direction</code> 的成交记录，拆分就是一行 groupby 的事：</p>
+<pre class="codehilite"><code class="language-python">def split_by_direction(trades: pd.DataFrame) -&gt; dict:
+    result = {}
+    for name, d in [(&quot;long&quot;, 1), (&quot;short&quot;, -1)]:
+        sub = trades[trades[&quot;direction&quot;] == d]
+        pnl = sub[&quot;pnl&quot;].values
+        n = len(pnl)
+        total = pnl.sum()
+        # 单笔收益的 t 检验（零假设：均值 = 0）
+        if n &gt; 1:
+            t_stat = pnl.mean() / (pnl.std(ddof=1) / np.sqrt(n))
+        else:
+            t_stat = np.nan
+        result[name] = {
+            &quot;trades&quot;: n,
+            &quot;total_return&quot;: total,
+            &quot;avg_pnl&quot;: pnl.mean() if n else np.nan,
+            &quot;t_stat&quot;: t_stat,
+        }
+    return result
+</code></pre>
+
+<p>注意这里的 t 检验是对<strong>单笔收益率序列</strong>做的，不是对净值曲线做的。对单笔 pnl 做 t 检验，回答的是"这笔交易的期望收益是否显著大于 0"，这是判断方向是否有效的更直接口径。净值 t 检验会被复利和路径依赖污染，两者不要混用。</p>
+<p>跑完，结果是：</p>
+<table>
+<thead>
+<tr>
+<th>方向</th>
+<th>笔数</th>
+<th>累计收益</th>
+<th>t 统计量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>做多腿</td>
+<td>298</td>
+<td>+295.7%</td>
+<td>显著为正</td>
+</tr>
+<tr>
+<td>做空腿</td>
+<td>140</td>
+<td>-37.9%</td>
+<td>-1.61</td>
+</tr>
+</tbody>
+</table>
+<p>双向合计 +265.8%，做多腿单独就 +295.7%。也就是说，<strong>做空腿不仅亏了 37.9%，还把整体收益从 295.7% 拖到 265.8%，同时把整体显著性拉没了</strong>。做空腿的 t=-1.61，和双向整体的 t=1.61 数值上正好对称——这不是巧合，是混合样本稀释效应的直接体现：一个显著的正向信号，被一个不显著的负向信号平均后，变成了"正但不显著"。</p>
+<h2 id="_2">三、为什么做空在加密趋势策略里难赚钱</h2>
+<p>拆出来看是结果，理解原因是决策的前提。做空腿在趋势跟随框架下亏钱，有三个结构性原因。</p>
+<h3 id="31">3.1 收益分布右偏</h3>
+<p>加密资产的长期收益分布是右偏的：上涨幅度大、持续时间长、少数极端行情贡献大部分涨幅；下跌则往往急促、时间短、幅度被快速修复。趋势跟随策略的盈利模式是"截断亏损、让利润奔跑"，这个模式天然适配右偏分布——做多腿能吃到长尾上涨，做空腿却只能吃到短促下跌，长尾在错误的一侧。</p>
+<p>用代码量化这个偏态，比空谈直观：</p>
+<pre class="codehilite"><code class="language-python">def return_skew_stats(df: pd.DataFrame) -&gt; pd.Series:
+    r = df[&quot;close&quot;].pct_change().dropna()
+    return pd.Series({
+        &quot;mean&quot;: r.mean(),
+        &quot;skew&quot;: r.skew(),
+        &quot;kurt&quot;: r.kurt(),
+        &quot;p99&quot;: r.quantile(0.99),
+        &quot;p01&quot;: r.quantile(0.01),
+        &quot;up_down_ratio&quot;: r[r &gt; 0].mean() / abs(r[r &lt; 0].mean()),
+    })
+</code></pre>
+
+<p>在样本上，日收益偏度为正，且 p99 的绝对幅度明显大于 p01。做多腿的盈利来自右尾，做空腿的盈利需要左尾，而左尾更薄。</p>
+<h3 id="32">3.2 插针与滑点不对称</h3>
+<p>做空腿对"插针"极其敏感。一根长上影线打穿止损，空单被扫出局，随后价格回落——方向判断对了，但仓位已经没了。做多腿遇到向下插针同样会被扫，但加密市场向上插针的频率和幅度整体更高，空单的止损被打掉的概率系统性偏高。</p>
+<p>回测里这一点很难完全复现，因为回测用的是收盘价或固定滑点。实盘里空单的滑点分布是右偏的（极端行情下流动性瞬间消失），回测按对称滑点处理，等于系统性高估了做空腿的表现。也就是说，<strong>-37.9% 这个数字还算乐观的</strong>。</p>
+<h3 id="33">3.3 资金费率与持有成本</h3>
+<p>永续合约做空要付资金费率。在趋势性上涨行情中，资金费率长期为正，空头持续付费。这部分成本在纯价格回测里如果没建模，做空腿的真实表现会更差。做多腿在同样行情下是收资金费的一方，成本结构完全相反。</p>
+<p>三个原因叠加，结论很清楚：<strong>在加密趋势跟随框架里，做空腿不是"少赚"，是结构性劣势</strong>。它不是参数没调好，是方向本身和这个市场的收益分布不匹配。</p>
+<h2 id="_3">四、决策：砍掉做空腿，改成单向只做多</h2>
+<p>拆分结果出来后，决策其实没有太多纠结空间。改法很具体：</p>
+<ul>
+<li>金叉开多</li>
+<li>死叉平多</li>
+<li><strong>不反手</strong></li>
+</ul>
+<p>第三条是关键。"不反手"意味着死叉时清仓离场，而不是反向开空。这砍掉的正是那 140 笔亏损交易，同时保留了做多腿的 298 笔。</p>
+<p>代码上，只需要在信号层把 -1 映射为 0：</p>
+<pre class="codehilite"><code class="language-python">def long_only_signal(df: pd.DataFrame, fast=20, slow=50) -&gt; pd.DataFrame:
+    out = generate_signals(df, fast, slow)
+    # 死叉不反手，直接空仓
+    out[&quot;signal&quot;] = out[&quot;signal&quot;].clip(lower=0)
+    return out
+</code></pre>
+
+<p>一行 <code>clip(lower=0)</code>。策略从双向变单向，逻辑复杂度下降，代码分支减少，实盘出错面收窄——这是"做减法"的直接收益。</p>
+<p>改完重跑，做多腿的统计量保持 +295.7% / 298 笔 / 显著为正。但这里必须诚实：<strong>这是样本内拆分出来的结果，不是样本外验证</strong>。拆方向本身是一种多重比较，你从两个方向里挑了一个好的，天然带选择偏差。</p>
+<p>所以最终日志里我写的是：</p>
+<blockquote>
+<p>单向做多版本：收益为正且单笔 t 检验显著，但样本内方向选择存在偏差，定位为<strong>观察盘</strong>，不直接上线。</p>
+</blockquote>
+<h2 id="_4">五、纪律：验证不达标就降级，而不是硬上</h2>
+<p>这次决策里，比"砍掉做空腿"更重要的是<strong>砍掉之后怎么处理</strong>。</p>
+<p>一个常见的错误路径是：拆分发现做多腿显著 → 直接改成单向 → 上线。这跳过了样本外验证，把样本内的方向选择当成了策略结论。t 检验显著只说明"在这个样本里这个方向的单笔收益均值不为零"，不说明"未来这个方向继续有效"。</p>
+<p>我的处理是把策略状态分级：</p>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>条件</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>上线盘</td>
+<td>样本外 t 检验显著 + 回撤可接受</td>
+<td>小仓位实盘</td>
+</tr>
+<tr>
+<td>观察盘</td>
+<td>样本内显著、样本外未验证</td>
+<td>纸面跟踪，记录每日信号</td>
+</tr>
+<tr>
+<td>淘汰</td>
+<td>样本内外均不显著</td>
+<td>归档</td>
+</tr>
+</tbody>
+</table>
+<p>单向做多版本当前处于<strong>观察盘</strong>：纸面跟踪，每日记录信号和理论成交，等样本外数据积累到足够笔数再做一次 t 检验。达标再升级，不达标就归档。这个过程可能需要几个月，但比拿真金白银去验证一个带选择偏差的结论便宜得多。</p>
+<p>这个纪律的核心是：<strong>显著性检验是准入门槛，不是上线许可证</strong>。p&lt;0.05 只说明"值得继续观察"，不说明"可以下注"。把"验证不达标"和"策略无效"区分开，前者降级观察，后者直接淘汰，中间态才是大多数策略的真实位置。</p>
+<h2 id="_5">六、小结</h2>
+<p>这次迭代没有加任何新指标、新过滤、新参数。做的是三件事：</p>
+<ol>
+<li><strong>拆分</strong>：同一引擎按方向过滤成交记录，把混合统计量拆成两个独立方向的口径。</li>
+<li><strong>归因</strong>：做空腿 -37.9%、t=-1.61，是拖累项而非贡献项；原因在收益右偏、插针不对称、资金费率三个结构性因素。</li>
+<li><strong>减法</strong>：<code>clip(lower=0)</code> 砍掉做空腿，策略从双向变单向，代码和逻辑同时变简单。</li>
+</ol>
+<p>收益数字从 +265.8% 变成 +295.7%，但真正的收获不是这 30 个百分点，而是<strong>知道了这 295.7% 是从哪来的、以及它为什么还不算数</strong>。一个说不清贡献来源的策略，收益再高也只是黑箱；拆开之后哪怕数字变小，你也拿到了可以继续迭代的基础。</p>
+<p>策略优化的方向不总是加东西。很多时候，把不贡献的部分砍掉，剩下的才看得清。</p>
+<p>更多量化策略拆解与自动化实战内容，请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">策略设计</span><span class="tag-badge">多空拆分</span><span class="tag-badge">EMA</span><span class="tag-badge">趋势跟随</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
