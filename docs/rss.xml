@@ -7,6 +7,22 @@
         <language>zh-CN</language>
         
         <item>
+            <title>给策略做减法：多空贡献拆分后，我把做空腿直接砍了</title>
+            <link>https://www.hkcode.dpdns.org/posts/103.html</link>
+            <description>一、一个&quot;看着不错&quot;的回测
+
+先上数据。EMA20/50 双向趋势跟随，7 个主流币，4 年日线数据，固定仓位、无杠杆、手续费按 taker 双边计算：
+
+| 指标 | 数值 |
+|||
+| 累计收益 | +265.8% |
+| 最大回撤 | 33.1% |
+| 交易笔数 | 438 |
+| t 统...</description>
+            <pubDate>2026-11-16</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>三层验证为什么拦不住前视偏差：DSR、蒙特卡洛、前后半段的盲区</title>
             <link>https://www.hkcode.dpdns.org/posts/102.html</link>
             <description>一、先说结论
@@ -145,13 +161,6 @@
             <link>https://www.hkcode.dpdns.org/posts/44.html</link>
             <description>历史数据迁移实战：从旧平台到新平台的完整方案 量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。 这篇文章以一个真实场景为例：把旧平台的交易记录、缓存数据、配置文件迁移到新平台。方...</description>
             <pubDate>2026-10-13</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>系统重装后的完整恢复流程：从备份到上线</title>
-            <link>https://www.hkcode.dpdns.org/posts/43.html</link>
-            <description>系统重装后的完整恢复流程：从备份到上线 系统重装不是终点，恢复才是。这篇文章记录我最近一次重装 Windows 后的完整恢复流程，涵盖脚本迁移、依赖安装、定时任务重建、历史数据迁移和功能验证。整套流程用 Python 脚本半自动化完成，避免手动操作遗漏。 恢复前的准备：检查清单 重装前如果没做备份，后面全是补救。我的习...</description>
-            <pubDate>2026-10-12</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
