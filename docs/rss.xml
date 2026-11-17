@@ -7,6 +7,17 @@
         <language>zh-CN</language>
         
         <item>
+            <title>模拟盘几个月不开仓的排查：35%信号达标率下的零开仓悖论</title>
+            <link>https://www.hkcode.dpdns.org/posts/104.html</link>
+            <description>一个做空的模拟盘连续几个月零开仓。第一反应和大多数人一样：最近没行情，或者信号条件太严。
+
+但直觉不靠谱。用历史数据离线复现信号扫描器之后，结论完全相反——硬条件满足率高达35%，平均每天都能出一个合格做空信号。信号根本不缺。
+
+问题出在信号产生之后的链路。...</description>
+            <pubDate>2026-11-17</pubDate>
+            <category>量化策略</category>
+        </item>
+        <item>
             <title>给策略做减法：多空贡献拆分后，我把做空腿直接砍了</title>
             <link>https://www.hkcode.dpdns.org/posts/103.html</link>
             <description>一、一个&quot;看着不错&quot;的回测
@@ -154,13 +165,6 @@
             <link>https://www.hkcode.dpdns.org/posts/45.html</link>
             <description>多策略组合系统的架构演进：从单策略到全天候 阶段一：单策略裸奔 最早的量化系统就是一根筋：一个策略，一个进程，定时拉数据、算信号、发单。 问题清单： - 策略逻辑与执行逻辑耦合，改一行代码要停整个进程 - 没有状态管理，进程挂了持仓状态全靠券商接口反查 - 单点故障，一次异常退出就彻底躺平 - 无法回测与实盘共用同一套...</description>
             <pubDate>2026-10-14</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>历史数据迁移实战：从旧平台到新平台的完整方案</title>
-            <link>https://www.hkcode.dpdns.org/posts/44.html</link>
-            <description>历史数据迁移实战：从旧平台到新平台的完整方案 量化交易系统跑了一两年，积累了大量交易记录、缓存数据和配置文件。当需要从旧平台迁移到新平台时，数据迁移就成了一个绕不开的工程问题。搞好了，平滑过渡；搞砸了，数据丢失、策略异常，甚至影响实盘。 这篇文章以一个真实场景为例：把旧平台的交易记录、缓存数据、配置文件迁移到新平台。方...</description>
-            <pubDate>2026-10-13</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
