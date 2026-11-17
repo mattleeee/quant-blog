@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模拟盘几个月不开仓的排查：35%信号达标率下的零开仓悖论 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="一个做空的模拟盘连续几个月零开仓。第一反应和大多数人一样：最近没行情，或者信号条件太严。
+
+但直觉不靠谱。用历史数据离线复现信号扫描器之后，结论完全相反——硬条件满足率高达35%，平均每天都能出一个合格做空信号。信号根本不缺。...">
+    <meta name="keywords" content="模拟盘,信号链路,排查,周期错配">
+    <meta property="og:title" content="模拟盘几个月不开仓的排查：35%信号达标率下的零开仓悖论">
+    <meta property="og:description" content="一个做空的模拟盘连续几个月零开仓。第一反应和大多数人一样：最近没行情，或者信号条件太严。
+
+但直觉不靠谱。用历史数据离线复现信号扫描器之后，结论完全相反——硬条件满足率高达35%，平均每天都能出一个合格做空信号。信号根本不缺。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/104.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>模拟盘几个月不开仓的排查：35%信号达标率下的零开仓悖论</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-17</span>
+                <span class="category"><span class="tag-badge">量化策略</span></span>
+            </div>
+            <div class="post-content">
+<p>一个做空的模拟盘连续几个月零开仓。第一反应和大多数人一样：最近没行情，或者信号条件太严。</p>
+<p>但直觉不靠谱。用历史数据离线复现信号扫描器之后，结论完全相反——硬条件满足率高达35%，平均每天都能出一个合格做空信号。信号根本不缺。</p>
+<p>问题出在信号产生之后的链路。这篇文章把整个排查过程拆开讲，重点不是"这个bug怎么修"，而是<strong>怎么系统性地定位一个"信号明明有、订单就是不出"的问题</strong>。</p>
+<h2 id="_1">一、先别猜，把"信号供给"量化出来</h2>
+<p>排查零开仓，最常见的错误是从执行层往上猜：是不是API挂了？是不是风控拦了？是不是下单参数错了？这些都要查，但顺序错了。</p>
+<p>正确的第一步是回答一个问题：<strong>这个策略在给定时间段内，理论上应该产生多少个信号？</strong></p>
+<p>如果答案是"接近零"，那问题在信号逻辑本身；如果是"每天都该有"，那问题一定在信号之后的消费链路。这一步不做，后面全是拍脑袋。</p>
+<h3 id="_2">离线复现信号扫描器</h3>
+<p>思路很简单：拿一批标的的历史K线，用和线上完全一致的硬条件去扫，统计满足率。这里用24个跌幅榜币种 × 4个月 × 720根4h K线。</p>
+<pre class="codehilite"><code class="language-python">import pandas as pd
+import numpy as np
+
+def compute_ema(series: pd.Series, span: int) -&gt; pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+def hard_condition(df: pd.DataFrame) -&gt; pd.Series:
+    &quot;&quot;&quot;
+    做空硬条件：EMA8 &lt; EMA21 且 收盘价 &lt; EMA200
+    df 需包含 close 列，按时间升序
+    &quot;&quot;&quot;
+    ema8 = compute_ema(df[&quot;close&quot;], 8)
+    ema21 = compute_ema(df[&quot;close&quot;], 21)
+    ema200 = compute_ema(df[&quot;close&quot;], 200)
+    cond = (ema8 &lt; ema21) &amp; (df[&quot;close&quot;] &lt; ema200)
+    return cond
+
+def signal_density_report(kline_map: dict, period_per_day: int = 6):
+    &quot;&quot;&quot;
+    kline_map: {symbol: DataFrame(4h K线)}
+    period_per_day: 4h K线一天6根
+    返回信号密度统计
+    &quot;&quot;&quot;
+    total_bars = 0
+    total_hits = 0
+    per_symbol = []
+
+    for sym, df in kline_map.items():
+        if len(df) &lt; 200:
+            continue
+        cond = hard_condition(df)
+        # 去掉EMA200预热期，避免前200根全是False拉低统计
+        valid = cond.iloc[200:]
+        hits = int(valid.sum())
+        bars = len(valid)
+        total_bars += bars
+        total_hits += hits
+        per_symbol.append({
+            &quot;symbol&quot;: sym,
+            &quot;bars&quot;: bars,
+            &quot;hits&quot;: hits,
+            &quot;hit_rate&quot;: hits / bars if bars else 0.0,
+        })
+
+    report = pd.DataFrame(per_symbol).sort_values(&quot;hit_rate&quot;, ascending=False)
+    overall = total_hits / total_bars if total_bars else 0.0
+    print(f&quot;总K线数: {total_bars}, 命中数: {total_hits}, 整体满足率: {overall:.2%}&quot;)
+    print(f&quot;按每天{period_per_day}根4h K线折算，平均每日信号数: &quot;
+          f&quot;{overall * period_per_day:.2f}&quot;)
+    return report, overall
+</code></pre>
+
+<p>跑出来的结果：<strong>整体满足率 35%</strong>。折算下来，平均每天出一个合格做空信号。</p>
+<p>24个标的、4个月、720根4h K线，这个样本量不算小，35%的满足率说明硬条件一点都不苛刻。所谓"最近没行情"，不成立。</p>
+<p>那零开仓只可能来自一个地方：信号产生之后，到真正下单之前，中间某个环节把信号吃掉了。</p>
+<h2 id="_3">二、把消费链路拆成环节，逐段统计过滤率</h2>
+<p>信号从产生到下单，中间通常有一串过滤器：复验、超卖过滤、风控、仓位检查、下单前校验。零开仓意味着<strong>整条链路的通过率是0</strong>，但0是结果，不是原因。要把每一段的过滤率单独打出来。</p>
+<p>我当时的链路大致是这样：</p>
+<ol>
+<li>4h周期扫描产生信号</li>
+<li>延迟2小时后做一次复验</li>
+<li>RSI超卖过滤</li>
+<li>风控与仓位检查</li>
+<li>下单</li>
+</ol>
+<h3 id="_4">先排除"看起来最像主因"的环节</h3>
+<p>直觉上，做空信号最容易卡在超卖过滤上——价格已经跌了很多，RSI很低，再去做空就是追空，很多策略会拦掉。</p>
+<p>但统计结果打脸：<strong>RSI &lt; 35 的超卖过滤只拦掉了 10.5%</strong>。剩下89.5%的信号都通过了这一关。这个环节不是主因，可以直接排除。</p>
+<p>这就是为什么要逐段统计，而不是盯着一个可疑环节反复看。10.5%的过滤率解释不了100%的零开仓。</p>
+<pre class="codehilite"><code class="language-python">def stage_filter_stats(df: pd.DataFrame) -&gt; dict:
+    &quot;&quot;&quot;
+    统计各环节过滤率。假设 df 已带好各环节的布尔标记列。
+    &quot;&quot;&quot;
+    stages = [&quot;signal&quot;, &quot;recheck_pass&quot;, &quot;rsi_pass&quot;, &quot;risk_pass&quot;]
+    stats = {}
+    base = df[df[&quot;signal&quot;]].copy()
+    n_signal = len(base)
+    stats[&quot;signal_count&quot;] = n_signal
+
+    for col in stages[1:]:
+        passed = int(base[col].sum())
+        stats[f&quot;{col}_pass&quot;] = passed
+        stats[f&quot;{col}_filter_rate&quot;] = 1 - passed / n_signal if n_signal else 0.0
+
+    return stats
+</code></pre>
+
+<h3 id="_5">真正的问题一：周期错配</h3>
+<p>链路里最隐蔽的一环是复验。</p>
+<p>信号是在 <strong>4h 周期</strong>上产生的，但延迟2小时后的复验，用的是 <strong>15m 周期的 EMA8/EMA21</strong>。</p>
+<p>这是典型的周期错配。4h 的 EMA8 反映的是约32小时的趋势，而 15m 的 EMA8 只反映2小时的价格波动。15m 均线在2小时的窗口里极其不稳定，一个正常的回抽就能让 EMA8 短暂上穿 EMA21，复验直接判不通过。</p>
+<p>换句话说：<strong>信号在4h尺度上是成立的，但复验用15m尺度去确认，等于用放大镜看噪声。</strong> 复验大概率不通过，信号在第二关就被大量拦截。</p>
+<p>修复很直接：复验周期必须与信号周期统一，都用4h。同一个尺度的确认才有意义。</p>
+<h3 id="none-false">真正的问题二：None 被当成 False 静默丢弃</h3>
+<p>第二个问题更致命，因为它<strong>不留痕迹</strong>。</p>
+<p>复验函数在网络异常时返回 <code>None</code>（表示"无法确认"），但调用方是这样处理的：</p>
+<pre class="codehilite"><code class="language-python"># 错误写法：None 和 False 一起被当作&quot;不成立&quot;
+def recheck_signal(symbol: str) -&gt; bool | None:
+    try:
+        df = fetch_kline(symbol, period=&quot;4h&quot;, limit=300)
+        if df is None or df.empty:
+            return None
+        ema8 = compute_ema(df[&quot;close&quot;], 8).iloc[-1]
+        ema21 = compute_ema(df[&quot;close&quot;], 21).iloc[-1]
+        return bool(ema8 &lt; ema21)
+    except Exception:
+        return None  # 网络/数据异常，无法确认
+
+def process_signal(symbol: str):
+    ok = recheck_signal(symbol)
+    if not ok:          # None 和 False 都进这里
+        return          # 静默丢弃，无日志
+    place_order(symbol)
+</code></pre>
+
+<p><code>not None</code> 是 <code>True</code>，所以网络一抖动、数据一缺失，信号就被当成"复验不通过"直接丢掉，而且<strong>一行日志都没有</strong>。几个月零开仓，日志里干干净净，因为根本没有记录。</p>
+<p>这里要区分两种语义：</p>
+<ul>
+<li><code>False</code>：明确确认不成立，应该拦截</li>
+<li><code>None</code>：无法确认（网络、数据、超时），不应该当作不成立，应该记录并重试或告警</li>
+</ul>
+<p>修复后的写法：</p>
+<pre class="codehilite"><code class="language-python">import logging
+
+logger = logging.getLogger(&quot;signal_chain&quot;)
+
+def process_signal_fixed(symbol: str):
+    ok = recheck_signal(symbol)
+
+    if ok is None:
+        # 无法确认：不拦截，记录并进入重试/告警
+        logger.warning(&quot;recheck_unconfirmed symbol=%s action=retry&quot;, symbol)
+        enqueue_retry(symbol)
+        return
+
+    if ok is False:
+        # 明确不成立：拦截，但要留日志
+        logger.info(&quot;recheck_rejected symbol=%s&quot;, symbol)
+        return
+
+    # 明确成立：继续后续链路
+    logger.info(&quot;recheck_passed symbol=%s&quot;, symbol)
+    place_order(symbol)
+</code></pre>
+
+<p>两个修复合起来：复验周期统一为4h，<code>None</code> 不再静默丢弃、只拦截 <code>False</code>。改完之后，信号开始正常走到下单环节。</p>
+<h2 id="_6">三、这次排查沉淀下来的方法论</h2>
+<p>回头看，这个问题本身不难修，难的是<strong>定位</strong>。把方法固化下来，比修一个bug更有价值。</p>
+<h3 id="1">1. 先量化"信号供给"，再查"消费链路"</h3>
+<p>零开仓有两种可能：没有信号，或有信号但被吃掉。用离线数据先算出理论信号密度，直接把问题范围砍掉一半。35%的满足率一出来，方向就锁死在链路上了。</p>
+<h3 id="2">2. 每个环节的过滤率都要单独统计</h3>
+<p>不要盯着一个可疑环节反复看。RSI超卖过滤看起来最像主因，实际只拦10.5%。把链路每一段的过滤率打成一张表，主因自然浮出来——周期错配和None丢弃，都是靠这张表才被看见的。</p>
+<h3 id="3">3. 静默丢弃是排查的天敌</h3>
+<p>任何"拦截"动作都必须留日志，并且要区分"明确拦截"和"无法确认"。前者是策略行为，后者是故障信号。把两者混在一起处理，故障就被伪装成了策略的正常拒绝。</p>
+<h3 id="4">4. 周期一致性是硬约束</h3>
+<p>信号在哪个周期产生，确认就应该在哪个周期做。跨周期复验不是不可以，但必须是有意设计，而不是随手写了个15m的均线。</p>
+<hr />
+<p>这次排查的核心不是某个函数写错了，而是<strong>没有把信号链路当成一个可观测的系统来对待</strong>。信号供给、各环节过滤率、None的语义，这三样只要有一样是可观测的，几个月的零开仓都不会发生。</p>
+<p>把信号密度统计和链路过滤率统计做成常规监控，比事后排查划算得多。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">模拟盘</span><span class="tag-badge">信号链路</span><span class="tag-badge">排查</span><span class="tag-badge">周期错配</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
