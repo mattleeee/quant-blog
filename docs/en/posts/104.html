@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Short Leg Was -37.9%, So I Cut the Strategy in Half - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Long-Short Decomposition: When the Short Leg Is the Reason Your Strategy Fails the Test The backtest looked fine at a gl...">
+    <meta name="keywords" content="long-short decomposition,symmetry,trend following">
+    <meta property="og:title" content="My Short Leg Was -37.9%, So I Cut the Strategy in Half">
+    <meta property="og:description" content="Long-Short Decomposition: When the Short Leg Is the Reason Your Strategy Fails the Test The backtest looked fine at a gl...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/104.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>My Short Leg Was -37.9%, So I Cut the Strategy in Half</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-17</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>The backtest looked fine at a glance. EMA 20/50, dual-direction trend following, 7 majors, 4 years. Total return +265.8%. Then the t-statistic came back at 1.61 with p = 0.107. Positive, but not significant. A result you cannot defend in front of anyone who knows what a t-stat means.</p>
+<p>The usual reaction is to go hunting for parameter tweaks: faster EMA, slower EMA, ATR stops, regime filters. All of that is premature. Before touching parameters, decompose the P&amp;L by direction. It costs twenty lines of code and it usually tells you more than a week of grid search.</p>
+<p>In this case it told the whole story:</p>
+<table>
+<thead>
+<tr>
+<th>Leg</th>
+<th>Return</th>
+<th>Trades</th>
+<th>t-stat</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Long-only</td>
+<td>+295.7%</td>
+<td>298</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Short-only</td>
+<td>-37.9%</td>
+<td>140</td>
+<td>-1.61</td>
+</tr>
+<tr>
+<td>Combined</td>
+<td>+265.8%</td>
+<td>438</td>
+<td>1.61</td>
+</tr>
+</tbody>
+</table>
+<p>The short leg did not just underperform. It carried the same magnitude of t-statistic as the combined system, with the opposite sign, and it dragged the aggregate from something you could argue about into the noise floor. The short book was not dead weight. It was actively destroying the evidence that the long book worked.</p>
+<h2 id="why-decompose-by-direction-first">Why Decompose by Direction First</h2>
+<p>A dual-direction system is two strategies stapled together with a shared parameter set. The entry logic is symmetric on paper — golden cross long, death cross short — but the return distributions on either side of zero are not symmetric at all. Aggregating them hides that asymmetry behind a single equity curve.</p>
+<p>Decomposition is the cheapest diagnostic you have. If one leg has a positive expectancy and the other has a negative one, the combined t-stat is a blend of two different processes and means very little. You are not testing "does trend following work." You are testing "does trend following work, averaged over two markets with different structural properties, weighted by trade count." That is a question nobody asked.</p>
+<p>The fix is not to re-weight or re-optimize. It is to measure each leg on its own, then decide what the evidence actually supports.</p>
+<h3 id="implementation-same-engine-filter-by-sign">Implementation: Same Engine, Filter by Sign</h3>
+<p>The key discipline is that you do not write a second backtester for the long-only variant. You run the exact same engine, record every trade with its direction, and slice the trade log afterward. This guarantees the two legs are directly comparable — same fills, same costs, same sizing.</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass
+import numpy as np
+import pandas as pd
+
+@dataclass
+class Trade:
+    symbol: str
+    direction: int      # +1 long, -1 short
+    entry_time: pd.Timestamp
+    exit_time: pd.Timestamp
+    entry_px: float
+    exit_px: float
+    size: float         # notional at entry
+
+def trade_pnl(t: Trade, fee_bps: float = 5.0) -&gt; float:
+    gross = t.direction * (t.exit_px - t.entry_px) / t.entry_px
+    fees = 2 * fee_bps / 1e4
+    return t.size * (gross - fees)
+
+def run_engine(prices: dict[str, pd.DataFrame],
+               fast: int = 20, slow: int = 50) -&gt; list[Trade]:
+    &quot;&quot;&quot;Dual-direction EMA crossover. One position per symbol at a time.&quot;&quot;&quot;
+    trades = []
+    for sym, df in prices.items():
+        ef = df[&quot;close&quot;].ewm(span=fast, adjust=False).mean()
+        es = df[&quot;close&quot;].ewm(span=slow, adjust=False).mean()
+        state = 0
+        entry_px = entry_t = None
+        for ts, f, s, px in zip(df.index, ef, es, df[&quot;close&quot;]):
+            sig = 1 if f &gt; s else -1
+            if state == 0:
+                state, entry_px, entry_t = sig, px, ts
+            elif sig != state:
+                trades.append(Trade(sym, state, entry_t, ts,
+                                    entry_px, px, size=1.0))
+                state, entry_px, entry_t = sig, px, ts
+    return trades
+</code></pre>
+
+<p>Now the decomposition itself. This is the part worth institutionalizing — put it in a shared module so every strategy report includes it by default.</p>
+<pre class="codehilite"><code class="language-python">def leg_stats(trades: list[Trade]) -&gt; pd.DataFrame:
+    rows = []
+    for leg, sign in [(&quot;long&quot;, 1), (&quot;short&quot;, -1)]:
+        pnls = [trade_pnl(t) for t in trades if t.direction == sign]
+        if len(pnls) &lt; 2:
+            continue
+        arr = np.array(pnls)
+        tstat = arr.mean() / (arr.std(ddof=1) / np.sqrt(len(arr)))
+        rows.append({&quot;leg&quot;: leg, &quot;n&quot;: len(arr),
+                     &quot;total&quot;: arr.sum(), &quot;mean&quot;: arr.mean(),
+                     &quot;t&quot;: tstat})
+    allp = np.array([trade_pnl(t) for t in trades])
+    rows.append({&quot;leg&quot;: &quot;combined&quot;, &quot;n&quot;: len(allp),
+                 &quot;total&quot;: allp.sum(), &quot;mean&quot;: allp.mean(),
+                 &quot;t&quot;: allp.mean() / (allp.std(ddof=1) / np.sqrt(len(allp)))})
+    return pd.DataFrame(rows).set_index(&quot;leg&quot;)
+</code></pre>
+
+<p>Two notes on the statistics. First, per-trade t-stats are not the same as a daily-returns t-stat on the equity curve; they answer slightly different questions. Per-trade is fine for a diagnostic like this, but if you want to publish a number, compute the t-stat on the daily P&amp;L series of each leg and let the trade-level view stay a screening tool. Second, if trades overlap across symbols, the independence assumption behind the t-stat is violated. For 7 majors running the same signal, correlation is high enough that the effective sample is smaller than 438. That makes the combined p = 0.107 optimistic, not pessimistic — another reason the original result never deserved the benefit of the doubt.</p>
+<p>For completeness, the long-only variant is not a new engine. It is the same loop with the short branch suppressed:</p>
+<pre class="codehilite"><code class="language-python">def run_long_only(prices, fast=20, slow=50):
+    trades = []
+    for sym, df in prices.items():
+        ef = df[&quot;close&quot;].ewm(span=fast, adjust=False).mean()
+        es = df[&quot;close&quot;].ewm(span=slow, adjust=False).mean()
+        in_pos, entry_px, entry_t = False, None, None
+        for ts, f, s, px in zip(df.index, ef, es, df[&quot;close&quot;]):
+            if not in_pos and f &gt; s:          # golden cross enters
+                in_pos, entry_px, entry_t = True, px, ts
+            elif in_pos and f &lt; s:            # death cross exits, no reverse
+                trades.append(Trade(sym, 1, entry_t, ts, entry_px, px, 1.0))
+                in_pos = False
+    return trades
+</code></pre>
+
+<p>Golden cross enters, death cross exits, flat in between. No reverse, no short. The trade count drops from 438 to 298 — exactly the long leg of the dual-direction run, which is the check that your filter is doing what you think it is.</p>
+<h2 id="why-shorting-a-trend-follower-is-structurally-hard-here">Why Shorting a Trend Follower Is Structurally Hard Here</h2>
+<p>The short leg was not unlucky. It was fighting three structural forces at once, and none of them show up in a parameter sweep.</p>
+<p><strong>Upward skew in the underlying.</strong> Crypto majors over a four-year window spent most of their time in a positive drift regime. A trend follower's short entries cluster right after a death cross — that is, after a decline has already happened. In a market with positive drift, the expected value of being short immediately after a drawdown is negative even if the signal has some genuine momentum content. You are systematically selling after the move and buying back into the mean reversion.</p>
+<p><strong>Wick-heavy pops.</strong> Crypto has no circuit breakers and thin books on the way up. Short positions get stopped or squeezed by single-bar wicks that leave no trace on a close-to-close backtest if your fills assume the close. The asymmetry is brutal: a long position caught in a wick-down is a drawdown, a short position caught in a wick-up is often a liquidation event at a price worse than any bar's close. Backtests systematically flatter shorts because they fill at benign prices.</p>
+<p><strong>Negative carry.</strong> Funding on perpetuals is positive in bullish regimes, which means shorts pay to hold. Over four years that is a persistent bleed on top of the directional loss. If your backtest does not model funding, your short leg looks better than it is. If it does, the -37.9% is the honest number and it likely understates the real-world drag.</p>
+<p>Put together: the short side of a symmetric crossover is short a positively skewed, wick-prone, negative-carry asset class using a signal that enters late. That is not a parameter problem. No combination of 15/60 or 25/80 fixes the structure. This is why the correct response to a failing leg is usually deletion, not repair — the search space for "repair" is mostly overfitting in disguise.</p>
+<h2 id="the-discipline-of-shipping-only-what-passes">The Discipline of Shipping Only What Passes</h2>
+<p>Deleting the short leg raised the return to +295.7% on 298 trades. It did not raise the t-statistic into significance. Long-only is still positive-but-not-significant, and pretending otherwise would be the same mistake in a new costume.</p>
+<p>So the label on the dashboard changed. The strategy is not promoted to live. It is downgraded to <strong>observation tier</strong>: a paper-trading observer that runs the long-only logic, logs every signal, and reports the same statistics on a rolling basis until the evidence accumulates. The dashboard text says exactly that — no green badge, no "live" tag, just the numbers and the tier.</p>
+<p>The rule that makes this work is mechanical, not judgment-based:</p>
+<pre class="codehilite"><code class="language-python">def tier(t_stat: float, n: int, min_n: int = 200) -&gt; str:
+    if n &lt; min_n:
+        return &quot;observation&quot;          # not enough evidence either way
+    if abs(t_stat) &gt;= 2.0:
+        return &quot;live-eligible&quot;
+    if t_stat &gt; 0:
+        return &quot;observation&quot;          # positive but unproven
+    return &quot;retired&quot;
+
+def dashboard_row(leg: str, stats: pd.Series) -&gt; dict:
+    return {
+        &quot;leg&quot;: leg,
+        &quot;n&quot;: int(stats[&quot;n&quot;]),
+        &quot;total_pct&quot;: round(100 * stats[&quot;total&quot;], 1),
+        &quot;t&quot;: round(float(stats[&quot;t&quot;]), 2),
+        &quot;tier&quot;: tier(float(stats[&quot;t&quot;]), int(stats[&quot;n&quot;])),
+        &quot;note&quot;: &quot;positive but not significant&quot; if stats[&quot;t&quot;] &lt; 2 and stats[&quot;t&quot;] &gt; 0 else &quot;&quot;,
+    }
+</code></pre>
+
+<p>Three properties matter here. The threshold is pre-registered, so you cannot move the goalposts after seeing the result. The tier is a pure function of the stats, so the dashboard cannot disagree with the data. And "observation" is a real state with real work attached — the observer keeps logging, and the strategy can only graduate by accumulating evidence, not by someone deciding it feels ready.</p>
+<p>Parking the short leg as a paper observer rather than deleting it entirely is the second half of the discipline. You keep the measurement running at zero cost. If the regime shifts — funding flips persistently negative, or the market develops sustained downtrends — the short leg's stats will show it, and you will have four more years of honest data instead of a hunch. What you do not do is force it live because the long book needed a hedge, or because a symmetric strategy looks more elegant in a slide.</p>
+<h2 id="what-actually-changed">What Actually Changed</h2>
+<p>The final state: one engine, two legs measured separately, one leg deleted from live consideration, the survivor labeled honestly as unproven and parked in observation tier. The headline number went from +265.8% with a misleading aggregate t-stat to +295.7% with a clear statement that it is still not significant.</p>
+<p>That is a worse-looking result than the original backtest and a much better one to build on. The decomposition did not find alpha. It found the reason the alpha was invisible, and then it refused to pretend the remainder was more than it was.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-17 08:46:11</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LIT</td>
+<td>高质量标的做多</td>
+<td>$2.951</td>
+<td>$3.1458</td>
+<td>$2.8536</td>
+<td>1:2.0</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">long-short decomposition</span><span class="tag-badge">symmetry</span><span class="tag-badge">trend following</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
