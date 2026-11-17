@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>My Short Leg Was -37.9%, So I Cut the Strategy in Half</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/104.html</link>
+            <description>Long-Short Decomposition: When the Short Leg Is the Reason Your Strategy Fails the Test The backtest looked fine at a glance....</description>
+            <pubDate>2026-11-17</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Three-Layer Strategy Validation and the Blind Spot That Bit Me</title>
             <link>https://www.hkcode.dpdns.org/en/posts/103.html</link>
             <description>Three-Layer Strategy Validation and the Blind Spot That Bit Me My validation stack had three layers, and all three were green. DSR came out at 1.000....</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/31.html</link>
             <description>The Resonance Scanner: Seven Filters and the One That Mattered A scanner is a conjunction....</description>
             <pubDate>2026-10-29</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>A/B Testing Trading Rules: The 52 Rejected Trades That Changed My Mind</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/30.html</link>
-            <description>The Question a Filter Should Answer A pullback filter sits in front of an entry signal and decides which setups are allowed through....</description>
-            <pubDate>2026-10-28</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
