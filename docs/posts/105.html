@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>死叉事件漏检死锁：为什么满仓之后就再也不开新仓了 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="问题现象
+
+先描述一个真实踩过的坑。趋势跟随模拟盘，平仓逻辑写得很直白：
+
+ 检测到 EMA 死叉交叉事件，当根 K 线就平多。
+
+回测跑得漂漂亮亮，实盘挂上去头几天也正常。然后某一天开始,系统不再开任何新仓。...">
+    <meta name="keywords" content="状态机,死锁,事件驱动,平仓逻辑">
+    <meta property="og:title" content="死叉事件漏检死锁：为什么满仓之后就再也不开新仓了">
+    <meta property="og:description" content="问题现象
+
+先描述一个真实踩过的坑。趋势跟随模拟盘，平仓逻辑写得很直白：
+
+ 检测到 EMA 死叉交叉事件，当根 K 线就平多。
+
+回测跑得漂漂亮亮，实盘挂上去头几天也正常。然后某一天开始,系统不再开任何新仓。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/105.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>死叉事件漏检死锁：为什么满仓之后就再也不开新仓了</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-18</span>
+                <span class="category"><span class="tag-badge">量化风控</span></span>
+            </div>
+            <div class="post-content">
+<p>先描述一个真实踩过的坑。趋势跟随模拟盘，平仓逻辑写得很直白：</p>
+<blockquote>
+<p>检测到 EMA 死叉交叉事件，当根 K 线就平多。</p>
+</blockquote>
+<p>回测跑得漂漂亮亮，实盘挂上去头几天也正常。然后某一天开始,系统不再开任何新仓。查日志,没有报错,没有异常,持仓检查、信号计算、下单流程全部显示"正常"。账户里就静静躺着 3 个仓位——正好是仓位上限——然后永远不再动。</p>
+<p>这就是典型的<strong>事件驱动死锁</strong>。下面拆开讲。</p>
+<h2 id="_1">根因：事件会漏，状态不会</h2>
+<h3 id="_2">交叉是一个瞬时事件</h3>
+<p>EMA 死叉不是一种"状态"，而是两条线在某一根 K 线上发生的<strong>穿越动作</strong>。用代码表达通常是这样的判定：</p>
+<pre class="codehilite"><code class="language-python">def is_dead_cross(ema_fast_prev, ema_slow_prev, ema_fast_now, ema_slow_now):
+    # 上一根快线还在慢线上方，这一根跌到下方 —— 穿越发生
+    return ema_fast_prev &gt;= ema_slow_prev and ema_fast_now &lt; ema_slow_now
+</code></pre>
+
+<p>注意这个判定依赖<strong>相邻两根</strong>的 EMA 相对位置。它只在穿越发生的那一根 K 线上为 <code>True</code>，之后所有 K 线上，只要快线一直待在慢线下方，这个函数永远返回 <code>False</code>——因为"上一根快线在慢线上方"这个前提再也不会成立。</p>
+<h3 id="_3">漏检是怎么发生的</h3>
+<p>K 线接口偶发失败在实盘里太常见了。这个系统的容错设计是：连续 3 次失败才判定行情下线并强平。问题在于——<strong>间歇性失败会把失败计数清零</strong>。</p>
+<p>于是出现了这样的时间线：</p>
+<ol>
+<li>死叉在 T 根 K 线发生。</li>
+<li>T 根这一轮任务,行情接口恰好失败,任务没拿到这根 K 线,平仓检查没跑成。</li>
+<li>下一轮任务成功,失败计数清零,但 T 根已经过去了。</li>
+<li>T+1 根开始,EMA 已经稳定空头排列,<code>is_dead_cross</code> 永远返回 <code>False</code>。</li>
+<li>持仓永久卡死。</li>
+</ol>
+<p>失败计数清零这个设计本身没错（它防的是"偶发失败误强平"），但它和"事件驱动平仓"组合在一起，就制造了一个<strong>事件窗口被跳过</strong>的漏洞。</p>
+<h3 id="_4">死锁的闭环</h3>
+<p>单个仓位卡死还不够致命。真正让它变成"系统停摆"的是仓位上限：</p>
+<ul>
+<li>仓位上限 = 3。</li>
+<li>3 个仓位依次因为漏检死叉而卡死。</li>
+<li>新开仓前检查 <code>len(positions) &lt; max_positions</code>，返回 <code>False</code>。</li>
+<li>系统不再开新仓。</li>
+<li>而且<strong>没有任何报错</strong>——因为从代码视角看，一切逻辑都按设计执行了：没有死叉事件，所以不平仓；仓位满了，所以不开仓。日志"一切正常"。</li>
+</ul>
+<p>这就是死锁：每个模块单独看都对，组合起来系统进入一个无法自行退出的状态。</p>
+<h2 id="vs">事件 vs 状态：两种平仓判定</h2>
+<p>把两种写法并排放在一起，问题一目了然。</p>
+<h3 id="_5">事件驱动（有缺陷）</h3>
+<pre class="codehilite"><code class="language-python">class EventDrivenExit:
+    &quot;&quot;&quot;只在交叉发生的那一根 K 线触发平仓&quot;&quot;&quot;
+
+    def __init__(self):
+        self.prev_fast = None
+        self.prev_slow = None
+
+    def should_exit(self, ema_fast: float, ema_slow: float) -&gt; bool:
+        triggered = False
+        if self.prev_fast is not None:
+            # 上一根快线 &gt;= 慢线, 这一根快线 &lt; 慢线 =&gt; 死叉
+            if self.prev_fast &gt;= self.prev_slow and ema_fast &lt; ema_slow:
+                triggered = True
+        self.prev_fast = ema_fast
+        self.prev_slow = ema_slow
+        return triggered
+</code></pre>
+
+<p>缺陷：<code>triggered</code> 只在这一根为 <code>True</code>。一旦这根被跳过（接口失败、任务未执行、进程重启丢了 <code>prev_fast</code>），就永久错过。</p>
+<h3 id="_6">状态兜底（鲁棒）</h3>
+<pre class="codehilite"><code class="language-python">class StateBasedExit:
+    &quot;&quot;&quot;持仓检查时直接判断当前 EMA 状态&quot;&quot;&quot;
+
+    def should_exit(self, ema_fast: float, ema_slow: float) -&gt; bool:
+        # 快线在慢线下方 =&gt; 当前处于空头排列 =&gt; 应平多
+        return ema_fast &lt; ema_slow
+</code></pre>
+
+<p>交叉事件只是<strong>最早的触发点</strong>，而"快线在慢线下方"是一个<strong>持续成立的状态</strong>。只要当前状态满足平仓条件，无论之前漏检了多少根，下一次持仓检查都能兜住。</p>
+<h3 id="_7">两者在逐根回测中的等价性</h3>
+<p>关键结论：<strong>在逐根回测中，状态兜底与事件检测结果完全一致</strong>。原因很简单——回测逐根推进，每根 K 线都会执行一次检查。事件检测在死叉那一根返回 <code>True</code> 并平仓；状态兜底在死叉那一根也返回 <code>True</code>（因为快线已经跌到慢线下方）并平仓。两者平仓点相同，回测曲线一模一样。</p>
+<p>差异只出现在<strong>实盘</strong>：实盘会漏根，状态兜底能在漏根之后补上，事件检测不能。</p>
+<p>这也解释了为什么这个 bug 在回测里发现不了——回测的"逐根不漏"假设掩盖了事件的脆弱性。<strong>回测等价性不是缺陷，恰恰是修复的安全保证</strong>：改成状态兜底不会改变历史回测结果，只提高实盘鲁棒性。</p>
+<h2 id="_8">修复方案</h2>
+<h3 id="_9">方案一：直接改成状态判定（推荐）</h3>
+<p>对于"死叉平多"这种<strong>单向、单调</strong>的平仓条件，最干净的修复就是直接用状态判定，删掉事件逻辑：</p>
+<pre class="codehilite"><code class="language-python">class PositionManager:
+    def __init__(self, max_positions: int = 3):
+        self.positions = []
+        self.max_positions = max_positions
+
+    def check_exit(self, pos, ema_fast: float, ema_slow: float) -&gt; bool:
+        # 状态兜底: 多头持仓, 快线在慢线下方即平
+        if pos.side == &quot;long&quot; and ema_fast &lt; ema_slow:
+            return True
+        return False
+
+    def can_open(self) -&gt; bool:
+        return len(self.positions) &lt; self.max_positions
+</code></pre>
+
+<p>每一轮持仓检查都重新评估当前状态，漏检多少根都能补上。</p>
+<h3 id="_10">方案二：事件 + 状态双保险</h3>
+<p>如果业务上确实需要保留"事件触发"的语义（比如事件触发时要做额外动作，或者平仓条件不是单调的），可以保留事件检测作为<strong>最快触发</strong>，同时加状态兜底作为<strong>保底</strong>：</p>
+<pre class="codehilite"><code class="language-python">class HybridExit:
+    def __init__(self):
+        self.prev_fast = None
+        self.prev_slow = None
+
+    def should_exit(self, ema_fast: float, ema_slow: float) -&gt; bool:
+        # 1) 事件触发(最快, 但当根漏检就没了)
+        event_hit = False
+        if self.prev_fast is not None:
+            if self.prev_fast &gt;= self.prev_slow and ema_fast &lt; ema_slow:
+                event_hit = True
+        self.prev_fast = ema_fast
+        self.prev_slow = ema_slow
+
+        # 2) 状态兜底(漏检也能补)
+        state_hit = ema_fast &lt; ema_slow
+
+        return event_hit or state_hit
+</code></pre>
+
+<p>注意：当平仓条件是单调的（一旦进入空头排列就不再回头），<code>event_hit or state_hit</code> 里的 <code>event_hit</code> 其实是冗余的——<code>state_hit</code> 已经覆盖。保留它更多是为了日志可读性，能区分"是事件触发还是状态兜底触发"。</p>
+<h3 id="_11">方案三：加死锁监控</h3>
+<p>修复逻辑之外，建议加一个独立于交易逻辑的<strong>健康检查</strong>，专门盯这种"静默死锁"：</p>
+<pre class="codehilite"><code class="language-python">def health_check(pm: PositionManager, ema_fast: float, ema_slow: float):
+    &quot;&quot;&quot;独立巡检: 发现应平未平、仓位满且无新信号, 主动告警&quot;&quot;&quot;
+    stuck = []
+    for pos in pm.positions:
+        if pos.side == &quot;long&quot; and ema_fast &lt; ema_slow:
+            stuck.append(pos)
+    if stuck:
+        # 这里应打 ERROR 日志 / 发告警, 而不是静默
+        raise RuntimeError(
+            f&quot;检测到 {len(stuck)} 个应平未平仓位, 疑似事件漏检死锁&quot;
+        )
+</code></pre>
+
+<p>这个巡检的价值在于：它不依赖交易主流程的"正常"判断，而是<strong>独立用状态重新核对一遍</strong>。主流程说"没死叉事件所以不平仓"，巡检说"当前明明是空头排列，为什么还拿着多单"——两个视角一对照，死锁立刻暴露。</p>
+<h2 id="_12">测试方法</h2>
+<p>改完之后怎么验证？三个层次的测试。</p>
+<h3 id="1">1. 逐根等价性测试</h3>
+<p>证明状态兜底不改变回测结果：</p>
+<pre class="codehilite"><code class="language-python">def test_equivalence():
+    &quot;&quot;&quot;同一段行情, 事件检测与状态兜底的平仓点必须一致&quot;&quot;&quot;
+    import random
+    random.seed(42)
+
+    # 构造一段有多次交叉的 EMA 序列
+    fast, slow = 100.0, 100.0
+    series = []
+    for _ in range(500):
+        fast += random.uniform(-1.5, 1.5)
+        slow += random.uniform(-1.0, 1.0)
+        series.append((fast, slow))
+
+    event_exit = EventDrivenExit()
+    exits_event = []
+    for i, (f, s) in enumerate(series):
+        if event_exit.should_exit(f, s):
+            exits_event.append(i)
+
+    state_exit = StateBasedExit()
+    exits_state = []
+    for i, (f, s) in enumerate(series):
+        if state_exit.should_exit(f, s):
+            exits_state.append(i)
+
+    # 逐根回测里, 两者应给出相同的首次平仓点
+    assert exits_event[0] == exits_state[0], &quot;首次平仓点不一致&quot;
+</code></pre>
+
+<h3 id="2">2. 漏检注入测试</h3>
+<p>模拟接口失败跳过若干根，验证状态兜底能补上：</p>
+<pre class="codehilite"><code class="language-python">def test_missed_bar_recovery():
+    &quot;&quot;&quot;注入漏检: 事件检测会卡死, 状态兜底能补平&quot;&quot;&quot;
+    # 死叉发生在第 10 根
+    series = [(100.0, 100.0)] * 9 + [(99.0, 100.5)] + [(98.0, 101.0)] * 10
+
+    # 场景A: 事件检测, 第10根被跳过
+    ev = EventDrivenExit()
+    event_exited = False
+    for i, (f, s) in enumerate(series):
+        if i == 10:          # 模拟漏检
+            continue
+        if ev.should_exit(f, s):
+            event_exited = True
+    assert not event_exited, &quot;事件检测在漏检后应卡死(复现bug)&quot;
+
+    # 场景B: 状态兜底, 第10根被跳过
+    st = StateBasedExit()
+    state_exited = False
+    for i, (f, s) in enumerate(series):
+        if i == 10:
+            continue
+        if st.should_exit(f, s):
+            state_exited = True
+            break
+    assert state_exited, &quot;状态兜底应在漏检后仍能平仓&quot;
+</code></pre>
+
+<h3 id="3">3. 死锁回归测试</h3>
+<p>验证"仓位满 + 应平未平"能被巡检捕获：</p>
+<pre class="codehilite"><code class="language-python">def test_deadlock_detected():
+    pm = PositionManager(max_positions=3)
+    pm.positions = [
+        type(&quot;P&quot;, (), {&quot;side&quot;: &quot;long&quot;})() for _ in range(3)
+    ]
+    # 空头排列: 快线 &lt; 慢线
+    try:
+        health_check(pm, ema_fast=98.0, ema_slow=101.0)
+        assert False, &quot;应抛异常&quot;
+    except RuntimeError as e:
+        assert &quot;应平未平&quot; in str(e)
+</code></pre>
+
+<h2 id="_13">经验总结</h2>
+<ol>
+<li><strong>事件可以被错过，状态不会。</strong> 凡是"穿越/触发/首次"这类瞬时语义，都要问一句：漏了怎么办？如果答案是"永远补不回来"，就该加状态兜底。</li>
+<li><strong>死锁往往是静默的。</strong> 每个模块单独看都"正常"，组合起来系统停摆，日志还一片祥和。健康巡检要用独立视角重新核对状态。</li>
+<li><strong>回测等价性是修复的安全网。</strong> 逐根回测里状态兜底与事件检测等价，说明这个修复不改历史结果，只是让实盘更抗漏。改之前先写等价性测试，改完心里有底。</li>
+<li><strong>容错设计要防组合漏洞。</strong> 失败计数清零单独看是合理的，但和事件驱动平仓组合就制造了窗口跳过。设计容错时要把"漏检"和"依赖漏检结果的逻辑"放在一起审视。</li>
+</ol>
+<p>事件驱动不是不能用，但要用在对漏检不敏感的地方。平仓这种"必须发生"的动作，交给状态判定更稳。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">状态机</span><span class="tag-badge">死锁</span><span class="tag-badge">事件驱动</span><span class="tag-badge">平仓逻辑</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
