@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Paper Trader That Stopped Trading: Debugging a Silent Filter Chain - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A short-trading paper account sat idle for four months. Zero trades....">
+    <meta name="keywords" content="signal funnel,silent failure,period mismatch,debugging">
+    <meta property="og:title" content="The Paper Trader That Stopped Trading: Debugging a Silent Filter Chain">
+    <meta property="og:description" content="A short-trading paper account sat idle for four months. Zero trades....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/105.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>The Paper Trader That Stopped Trading: Debugging a Silent Filter Chain</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-18</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A short-trading paper account sat idle for four months. Zero trades. The first explanation everyone reaches for is "no setups" or "the conditions are too strict," and it's a comfortable explanation because it requires no work to accept. It was also wrong.</p>
+<p>I replayed the scanner offline: 24 coins from the decline list, four months, 720 4h candles each. The hard entry conditions—<code>EMA8 &lt; EMA21</code> and <code>price &lt; EMA200</code>—held on about 35% of evaluated bars. That works out to roughly one qualified short signal per day. The signal supply was healthy the entire time. The problem was downstream: the chain that consumes signals was dropping almost all of them before they could become orders.</p>
+<p>This post is about how I found the two breakages, why both were invisible in production logs, and the instrumentation I added so the next silent failure announces itself.</p>
+<h2 id="the-funnel-model">The Funnel Model</h2>
+<p>A signal funnel is the sequence of stages a raw condition passes through before it becomes an order:</p>
+<pre class="codehilite"><code>bar close -&gt; hard conditions -&gt; soft filters -&gt; delayed confirmation -&gt; risk sizing -&gt; order
+</code></pre>
+
+<p>The useful property of a funnel is that you can measure each stage independently. If 100 signals enter a stage and 3 exit, either that stage is doing its job or it's broken—but you can't tell which until you count. My mistake was treating the funnel as a black box and reasoning about it from the outside ("the account isn't trading, so setups must be rare").</p>
+<p>The replay harness made each stage countable. The core of it is deliberately boring:</p>
+<pre class="codehilite"><code class="language-python">from dataclasses import dataclass, field
+
+@dataclass
+class FunnelStats:
+    evaluated: int = 0
+    hard_pass: int = 0
+    soft_pass: dict = field(default_factory=dict)
+    confirm_pass: int = 0
+    confirm_none: int = 0
+    confirm_false: int = 0
+
+    def report(self):
+        print(f&quot;bars evaluated:      {self.evaluated}&quot;)
+        print(f&quot;hard conditions:     {self.hard_pass} &quot;
+              f&quot;({self.hard_pass / max(self.evaluated, 1):.1%})&quot;)
+        for name, (passed, total) in self.soft_pass.items():
+            print(f&quot;  soft filter {name:&lt;10} {passed}/{total} &quot;
+                  f&quot;(removed {1 - passed / max(total, 1):.1%})&quot;)
+        print(f&quot;confirmation pass:   {self.confirm_pass}&quot;)
+        print(f&quot;confirmation None:   {self.confirm_none}&quot;)
+        print(f&quot;confirmation False:  {self.confirm_false}&quot;)
+</code></pre>
+
+<p>Run this over historical bars and the funnel stops being a story you tell yourself and becomes a column of numbers.</p>
+<h2 id="culprit-1-the-timeframe-mismatch">Culprit 1: The Timeframe Mismatch</h2>
+<p>The signal was generated on the 4h timeframe. The design then called for a "delayed confirmation" two hours later: before acting, re-check the trend condition. Sensible idea in principle—it guards against acting on a bar that immediately reverses.</p>
+<p>But the confirmation helper re-checked the condition on <strong>15m EMA8/EMA21</strong>, not 4h. On a 15-minute chart, a fast and slow EMA cross each other constantly. The 4h condition <code>EMA8 &lt; EMA21</code> might hold for days; the 15m version of the same condition flips every few hours. So signals that were valid on the timeframe that generated them were being re-validated on a timeframe with entirely different dynamics, and most failed.</p>
+<p>The replay quantified it: of bars that passed the hard conditions, the overwhelming majority died at the confirmation stage. The confirmation wasn't confirming anything—it was a second, unrelated filter with a much higher rejection rate, masquerading as a safety check.</p>
+<p>The fix is to make the confirmation timeframe explicit and tied to the signal's timeframe, not hardcoded somewhere in a helper:</p>
+<pre class="codehilite"><code class="language-python">def confirm_trend(signal, candles_by_tf, tf):
+    &quot;&quot;&quot;Re-check the trend condition on the SAME timeframe that produced the signal.&quot;&quot;&quot;
+    candles = candles_by_tf[tf]
+    ema_fast = ema(candles[&quot;close&quot;], 8)
+    ema_slow = ema(candles[&quot;close&quot;], 21)
+    return bool(ema_fast[-1] &lt; ema_slow[-1])
+
+# The signal carries its own timeframe; confirmation must use it.
+tf = signal.timeframe          # &quot;4h&quot;
+result = confirm_trend(signal, candles_by_tf, tf)
+</code></pre>
+
+<p>If a confirmation genuinely needs a different timeframe, that's fine—but it should be a deliberate, documented decision with its own pass-rate measured, not an accident of which helper got called.</p>
+<h2 id="culprit-2-none-treated-as-false">Culprit 2: None Treated as False</h2>
+<p>The second bug was worse because it was silent. The confirmation helper does I/O—it fetches candles. On a network error it returned <code>None</code>. The caller did this:</p>
+<pre class="codehilite"><code class="language-python">if not confirm_trend(...):
+    stats.rejected += 1
+    return  # discard signal
+</code></pre>
+
+<p><code>not None</code> is <code>True</code>. So a failed fetch was indistinguishable from a failed confirmation. Every network hiccup quietly deleted a signal, and nothing was logged. In a paper environment with occasional flaky connectivity, this alone can account for a large share of the missing trades—and it's invisible, because from the outside "no signal" and "signal discarded after failed fetch" look identical.</p>
+<p>The principle I settled on: <strong>only an explicit <code>False</code> blocks a signal.</strong> <code>None</code> means "couldn't verify," and the correct behavior for an unverifiable confirmation is to let the signal through (or, if you prefer, to queue it for retry)—never to treat it as a rejection. A filter that can't run is not a filter that said no.</p>
+<pre class="codehilite"><code class="language-python">def gate(signal, confirm_fn):
+    result = confirm_fn(signal)
+    if result is False:
+        log.info(&quot;signal %s rejected: confirmation False&quot;, signal.id)
+        return &quot;rejected&quot;
+    if result is None:
+        log.warning(&quot;signal %s: confirmation unavailable, passing through&quot;, signal.id)
+        return &quot;passed_unverified&quot;
+    return &quot;passed&quot;
+</code></pre>
+
+<p>Two changes matter here. First, the three-valued logic: <code>True</code> / <code>False</code> / <code>None</code> are distinct outcomes. Second, the <code>log.warning</code> on <code>None</code>—every unverified pass is recorded, so a spike in network errors shows up as a spike in warnings rather than as a mysterious absence of trades.</p>
+<h2 id="the-exonerated-filter">The Exonerated Filter</h2>
+<p>While instrumenting, I also measured the RSI filter, which everyone suspected. <code>RSI &lt; 35</code> as an oversold condition removed only <strong>10.5%</strong> of otherwise-qualified signals. It was doing almost nothing—neither helping nor hurting. That number is worth having: it means the RSI filter was never the reason for the drought, and I could stop tuning it. Without per-stage counts, it would have stayed a prime suspect and absorbed hours of pointless parameter tweaking.</p>
+<p>This is the general lesson: when a funnel produces nothing, measure every stage before changing any of them. The stage you're most tempted to loosen is often not the one that's blocking.</p>
+<h2 id="rules-for-filter-chains">Rules for Filter Chains</h2>
+<p>From this episode I now apply four rules to any signal pipeline:</p>
+<ol>
+<li><strong>Every filter branch logs.</strong> A branch that discards a signal without a log line is a bug waiting to be discovered by an empty trade log. No silent <code>return</code>.</li>
+<li><strong>Distinguish "no" from "don't know."</strong> Use three-valued results (<code>True</code>/<code>False</code>/<code>None</code>) and handle <code>None</code> explicitly. Never let a falsy default absorb an error.</li>
+<li><strong>Match timeframes deliberately.</strong> A confirmation must run on the signal's timeframe unless a different one is chosen on purpose, with its pass rate measured.</li>
+<li><strong>Count at every stage.</strong> Persist per-stage counts (evaluated, passed, rejected-by-reason, errored) and alert when a stage's pass rate moves outside its historical band. A stage that suddenly passes 0% is as alarming as one that passes 100%.</li>
+</ol>
+<p>The instrumentation itself is small—a counter dict and a few log lines—but it converts the funnel from an opaque "it just doesn't trade" into a sequence of measurable gates. When the account went quiet, the counters would have shown the drop at the confirmation stage within a day, and the <code>None</code> warnings would have pointed straight at the network handling.</p>
+<h2 id="what-changed-in-practice">What Changed in Practice</h2>
+<p>After unifying the confirmation timeframe to 4h and treating <code>None</code> as pass-through-with-warning, the funnel began consuming the signals it was always receiving. The hard-condition supply never changed—roughly one qualified signal per day across the decline list—but the signals now reached the order stage instead of dying in a helper function.</p>
+<p>The broader point isn't about this particular strategy. It's that a trading system's failure mode is usually not "the market stopped offering setups." It's a filter chain that broke somewhere in the middle and told no one. Build the funnel so that every gate reports what it did, and the next silent failure will be loud.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-18 08:46:22</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SOXL</td>
+<td>高质量标的做多</td>
+<td>$54.25</td>
+<td>$58.0475</td>
+<td>$52.3513</td>
+<td>1:2.0</td>
+</tr>
+<tr>
+<td>MUU</td>
+<td>高质量标的做多</td>
+<td>$15.52</td>
+<td>$16.5443</td>
+<td>$15.0078</td>
+<td>1:2.0</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">signal funnel</span><span class="tag-badge">silent failure</span><span class="tag-badge">period mismatch</span><span class="tag-badge">debugging</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
