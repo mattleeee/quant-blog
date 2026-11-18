@@ -31,6 +31,22 @@
             <h2>最新文章</h2>
             
         <article class="post-card">
+            <h2><a href="/posts/105.html">死叉事件漏检死锁：为什么满仓之后就再也不开新仓了</a></h2>
+            <div class="post-meta">
+                <span class="date">2026-11-18</span>
+                <span class="tag-badge">量化风控</span>
+            </div>
+            <p class="excerpt">问题现象
+
+先描述一个真实踩过的坑。趋势跟随模拟盘，平仓逻辑写得很直白：
+
+ 检测到 EMA 死叉交叉事件，当根 K 线就平多。
+
+回测跑得漂漂亮亮，实盘挂上去头几天也正常。然后某一天开始,系统不再开任何新仓。查日志,没有报错,没有异常,持仓检查、信号计算、下单流程全部显示&quot;正常&quot;。...</p>
+            <div class="post-tags"><span class="tag-badge">状态机</span><span class="tag-badge">死锁</span><span class="tag-badge">事件驱动</span></div>
+            <a href="/posts/105.html" class="read-more">阅读更多</a>
+        </article>
+        <article class="post-card">
             <h2><a href="/posts/104.html">模拟盘几个月不开仓的排查：35%信号达标率下的零开仓悖论</a></h2>
             <div class="post-meta">
                 <span class="date">2026-11-17</span>
