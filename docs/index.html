@@ -31,6 +31,20 @@
             <h2>最新文章</h2>
             
         <article class="post-card">
+            <h2><a href="/posts/106.html">防定时任务重叠双开：一个O_EXCL运行锁的设计与自愈</a></h2>
+            <div class="post-meta">
+                <span class="date">2026-11-19</span>
+                <span class="tag-badge">量化风控</span>
+            </div>
+            <p class="excerpt">问题是怎么暴露出来的
+
+模拟盘跑在一个 Windows 服务器上，靠计划任务调度，间隔 15 分钟，一轮执行 1030 秒。任务内部有超时保护，正常情况下上一轮早就结束了，下一轮才启动，看起来不会撞车。
+
+但&quot;看起来不会&quot;和&quot;不会&quot;是两回事。...</p>
+            <div class="post-tags"><span class="tag-badge">运行锁</span><span class="tag-badge">计划任务</span><span class="tag-badge">Windows</span></div>
+            <a href="/posts/106.html" class="read-more">阅读更多</a>
+        </article>
+        <article class="post-card">
             <h2><a href="/posts/105.html">死叉事件漏检死锁：为什么满仓之后就再也不开新仓了</a></h2>
             <div class="post-meta">
                 <span class="date">2026-11-18</span>
