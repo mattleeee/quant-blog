@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>防定时任务重叠双开：一个O_EXCL运行锁的设计与自愈 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="问题是怎么暴露出来的
+
+模拟盘跑在一个 Windows 服务器上，靠计划任务调度，间隔 15 分钟，一轮执行 1030 秒。任务内部有超时保护，正常情况下上一轮早就结束了，下一轮才启动，看起来不会撞车。...">
+    <meta name="keywords" content="运行锁,计划任务,Windows,并发">
+    <meta property="og:title" content="防定时任务重叠双开：一个O_EXCL运行锁的设计与自愈">
+    <meta property="og:description" content="问题是怎么暴露出来的
+
+模拟盘跑在一个 Windows 服务器上，靠计划任务调度，间隔 15 分钟，一轮执行 1030 秒。任务内部有超时保护，正常情况下上一轮早就结束了，下一轮才启动，看起来不会撞车。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/106.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>防定时任务重叠双开：一个O_EXCL运行锁的设计与自愈</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-19</span>
+                <span class="category"><span class="tag-badge">量化风控</span></span>
+            </div>
+            <div class="post-content">
+<p>模拟盘跑在一个 Windows 服务器上，靠计划任务调度，间隔 15 分钟，一轮执行 10-30 秒。任务内部有超时保护，正常情况下上一轮早就结束了，下一轮才启动，看起来不会撞车。</p>
+<p>但"看起来不会"和"不会"是两回事。</p>
+<p>有一次网络抖动，行情接口卡死，单轮任务卡了整整 10 分钟。计划任务不管这些，15 分钟一到照样拉起下一个进程。于是出现了一个短暂的重叠窗口：进程 A 还没退出，进程 B 已经启动，两个进程同时读写同一个 <code>state.json</code>。</p>
+<p>这里的坑在于，<code>state.json</code> 的写入本身是"原子替换"的——先写临时文件再 <code>os.replace</code>，单进程视角下没问题。但原子替换只保证"单次写入不会写坏文件"，不保证"两个进程交替写不会互相覆盖"。实际发生的事是：</p>
+<ol>
+<li>进程 A 读到持仓 <code>{X: 100}</code>，准备改成 <code>{X: 80}</code>；</li>
+<li>进程 B 也读到 <code>{X: 100}</code>，准备改成 <code>{X: 120}</code>；</li>
+<li>A 先落盘 <code>{X: 80}</code>，B 后落盘 <code>{X: 120}</code>；</li>
+<li>A 的那笔减仓凭空消失了。</li>
+</ol>
+<p>原子替换解决的是"文件损坏"，解决不了"逻辑覆盖"。这类 bug 最恶心的地方是它不报错、不崩溃，只是账目悄悄对不上，等你发现的时候已经过去好几天。</p>
+<p>根因很清楚：<strong>同一时刻只允许一个实例运行</strong>，这个约束之前是靠"任务跑得快"这个经验假设维持的，没有任何硬性机制。一旦单轮耗时超过调度间隔，假设就崩了。</p>
+<h2 id="check-then-create">为什么不能用 check-then-create</h2>
+<p>第一反应通常是：启动时看看有没有锁文件，没有就创建。</p>
+<pre class="codehilite"><code class="language-python">if not os.path.exists(LOCK_PATH):
+    with open(LOCK_PATH, &quot;w&quot;) as f:
+        f.write(str(os.getpid()))
+    run()
+</code></pre>
+
+<p>这个写法在单线程、低并发下"基本能用"，但它有一个致命缺陷：<code>exists</code> 检查和 <code>open</code> 创建是两个独立操作，中间存在时间窗口。两个进程几乎同时启动时，完全可能都通过 <code>exists</code> 检查（此时都返回 False），然后都去创建文件，双双认为自己抢到了锁。</p>
+<p>这就是经典的 check-then-create 竞态。并发窗口越窄，问题越难复现，但线上偏偏就是会撞上——尤其是计划任务在整点、整刻这种时刻，多个触发源同时唤醒的概率并不低。</p>
+<p>正确的做法是让"检查 + 创建"变成一个<strong>原子操作</strong>。POSIX 和 Windows 都提供了这个语义：<code>O_CREAT | O_EXCL</code>。当文件已存在时，<code>open</code> 直接抛 <code>FileExistsError</code>，不会覆盖，也不会出现两个进程都成功的中间态。这是内核层面保证的原子性，不依赖任何用户态判断。</p>
+<h2 id="_1">锁的设计</h2>
+<h3 id="_2">核心机制</h3>
+<ul>
+<li>抢锁：<code>os.open(path, O_CREAT | O_EXCL | O_WRONLY)</code>，成功则写入当前 PID，失败（<code>FileExistsError</code>）说明已有实例在跑，本轮直接退出。</li>
+<li>释放：正常结束时删除锁文件。</li>
+<li>自愈：进程被强杀（任务管理器结束、机器重启、蓝屏）时来不及删锁，锁文件会残留。用锁文件的 mtime 判断锁龄，超过阈值（这里定 2 小时）视为残留，自动接管。</li>
+</ul>
+<p>为什么是 2 小时？单轮正常 10-30 秒，极端卡死 10 分钟，2 小时给了足够的安全余量，又能保证残留锁不会把任务永久卡死。这个值应该明显大于"任何合理单轮耗时"，同时小于"你能容忍任务停摆多久"。</p>
+<h3 id="mtime">一个容易忽略的细节：mtime 的更新</h3>
+<p>锁文件创建后 mtime 就固定了。如果进程活得好好的、只是跑得久，锁龄会一直增长，理论上可能被误判为残留。对于 10-30 秒的任务这不成问题，但如果你的任务可能跑很久，应该在运行期间周期性 <code>os.utime</code> 刷新 mtime，把它当作心跳。本文场景单轮最多 10 分钟，远小于 2 小时阈值，不需要心跳，但代码里留了这个口子的说明。</p>
+<h2 id="_3">完整实现</h2>
+<pre class="codehilite"><code class="language-python">import os
+import time
+import errno
+
+LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), &quot;task.lock&quot;)
+STALE_SECONDS = 2 * 60 * 60  # 2 小时
+
+
+def acquire(lock_path: str = LOCK_PATH, stale_seconds: int = STALE_SECONDS) -&gt; bool:
+    &quot;&quot;&quot;
+    尝试获取运行锁。
+    返回 True 表示抢锁成功，可以继续执行；
+    返回 False 表示已有实例在跑（或抢锁失败），本轮应直接退出。
+    &quot;&quot;&quot;
+    for attempt in range(2):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode(&quot;ascii&quot;))
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            # 锁已存在，判断是否为残留
+            try:
+                mtime = os.path.getmtime(lock_path)
+            except FileNotFoundError:
+                # 竞态：刚好在这瞬间被别的进程删了，重试一次
+                continue
+
+            age = time.time() - mtime
+            if age &lt;= stale_seconds:
+                # 锁是新的，说明确实有实例在跑
+                return False
+
+            # 锁龄超阈值，视为残留，尝试接管
+            # 先删再重试创建，删除本身也可能和别人竞争，所以走重试循环
+            try:
+                os.remove(lock_path)
+            except FileNotFoundError:
+                pass
+            # 第二轮循环重新尝试 O_EXCL 创建
+            continue
+
+    return False
+
+
+def release(lock_path: str = LOCK_PATH) -&gt; None:
+    &quot;&quot;&quot;释放运行锁。只删自己创建的锁更严谨，这里用 PID 校验。&quot;&quot;&quot;
+    try:
+        with open(lock_path, &quot;r&quot;) as f:
+            pid_in_lock = f.read().strip()
+    except FileNotFoundError:
+        return
+
+    if pid_in_lock != str(os.getpid()):
+        # 锁不是自己的（可能是残留被别的实例接管后又释放），不误删
+        return
+
+    try:
+        os.remove(lock_path)
+    except FileNotFoundError:
+        pass
+</code></pre>
+
+<p>几个实现上的取舍说明：</p>
+<p><strong>重试循环用 <code>range(2)</code> 而不是 <code>while True</code>。</strong> 残留锁清理需要"删掉 + 重新创建"两步，这两步之间又可能被别的进程插队，所以需要重试。但重试次数必须有上限，否则在极端竞争下会死循环。两轮足够覆盖"正常抢锁"和"清理残留后重抢"两种路径，第三轮还失败说明环境异常，直接放弃更安全。</p>
+<p><strong><code>release</code> 校验 PID。</strong> 如果进程 A 的锁被判为残留、进程 B 接管了，之后 A 才慢悠悠地走到 <code>release</code>，直接删文件会把 B 的锁删掉。校验 PID 能避免这种误删。当然 PID 会复用，但在这个时间尺度上概率极低，且配合 mtime 判断已经足够。</p>
+<p><strong><code>FileNotFoundError</code> 的兜底。</strong> 检查 mtime 和删除锁之间，锁可能被别的进程删掉了，所有相关操作都要能容忍文件不存在。</p>
+<h2 id="_4">单测：两个必须覆盖的场景</h2>
+<p>锁这种东西，不写测试基本等于没写。至少覆盖两条：重复获取必须失败、残留锁必须自愈。</p>
+<pre class="codehilite"><code class="language-python">import os
+import time
+import tempfile
+import unittest
+
+from lock import acquire, release
+
+
+class TestRunLock(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.lock_path = os.path.join(self.tmpdir, &quot;task.lock&quot;)
+
+    def tearDown(self):
+        if os.path.exists(self.lock_path):
+            os.remove(self.lock_path)
+        os.rmdir(self.tmpdir)
+
+    def test_acquire_twice_fails(self):
+        &quot;&quot;&quot;第一次抢锁成功，第二次必须失败&quot;&quot;&quot;
+        self.assertTrue(acquire(self.lock_path))
+        self.assertFalse(acquire(self.lock_path))
+        # 锁文件内容应为当前 PID
+        with open(self.lock_path) as f:
+            self.assertEqual(f.read().strip(), str(os.getpid()))
+
+    def test_release_allows_reacquire(self):
+        &quot;&quot;&quot;释放后可以重新获取&quot;&quot;&quot;
+        self.assertTrue(acquire(self.lock_path))
+        release(self.lock_path)
+        self.assertFalse(os.path.exists(self.lock_path))
+        self.assertTrue(acquire(self.lock_path))
+
+    def test_stale_lock_taken_over(self):
+        &quot;&quot;&quot;残留锁（mtime 超阈值）必须被自动接管&quot;&quot;&quot;
+        # 手工造一个旧锁文件
+        with open(self.lock_path, &quot;w&quot;) as f:
+            f.write(&quot;99999&quot;)
+        old_time = time.time() - 3 * 60 * 60  # 3 小时前
+        os.utime(self.lock_path, (old_time, old_time))
+
+        self.assertTrue(acquire(self.lock_path))
+        with open(self.lock_path) as f:
+            self.assertEqual(f.read().strip(), str(os.getpid()))
+
+    def test_fresh_lock_not_taken_over(self):
+        &quot;&quot;&quot;新锁不能被误判为残留&quot;&quot;&quot;
+        with open(self.lock_path, &quot;w&quot;) as f:
+            f.write(&quot;99999&quot;)
+        # mtime 就是现在，锁龄 0
+        self.assertFalse(acquire(self.lock_path))
+
+    def test_release_does_not_delete_foreign_lock(self):
+        &quot;&quot;&quot;release 不应删除不属于自己的锁&quot;&quot;&quot;
+        with open(self.lock_path, &quot;w&quot;) as f:
+            f.write(&quot;12345&quot;)  # 别人的 PID
+        release(self.lock_path)
+        self.assertTrue(os.path.exists(self.lock_path))
+
+
+if __name__ == &quot;__main__&quot;:
+    unittest.main()
+</code></pre>
+
+<p><code>test_stale_lock_taken_over</code> 是关键用例。它通过 <code>os.utime</code> 把 mtime 改到 3 小时前，模拟"进程被强杀、锁没释放"的场景，验证自愈逻辑真的能接管，而不是被残留锁永久卡死。<code>test_fresh_lock_not_taken_over</code> 是它的反面，防止自愈逻辑过度激进、把正在运行的实例的锁抢走。</p>
+<h2 id="_5">接入主流程</h2>
+<p>主流程里，锁的获取和释放用 <code>try/finally</code> 包住，确保异常路径也能释放：</p>
+<pre class="codehilite"><code class="language-python">def main():
+    if not acquire():
+        print(&quot;已有实例在运行，本轮跳过&quot;)
+        return
+
+    try:
+        run_task()  # 实际的交易模拟逻辑
+    finally:
+        release()
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+
+<p>注意"抢锁失败就退出本轮"这个策略——不是排队等待，不是重试到成功，而是直接放弃这一轮。对计划任务来说这是对的：下一轮 15 分钟后照常启动，跳过一轮的代价远小于两个进程并发写坏状态的代价。如果是需要"每轮必跑"的场景，才需要考虑排队，但那是另一套设计。</p>
+<h2 id="_6">几个实战中的补充点</h2>
+<p><strong>锁文件路径要稳定。</strong> 用脚本所在目录或固定的数据目录，别用 <code>tempfile</code> 之类的临时路径，否则不同工作目录下启动的进程会各自建锁，等于没锁。</p>
+<p><strong>计划任务的"如果任务已在运行则"设置不能替代运行锁。</strong> Windows 计划任务有这个选项，但它判断的是任务实例状态，对"进程被强杀后任务状态未及时更新"、"多台机器共享存储"这类场景并不可靠。运行锁是应用层自己掌握的硬约束，不依赖调度器的实现细节。</p>
+<p><strong>锁的粒度要匹配共享资源的粒度。</strong> 这里锁的是 <code>state.json</code> 这一个共享状态，所以一把全局锁就够。如果将来拆出多个独立的状态文件，可以考虑按文件加锁，但不要为了"并发"过早拆分——单实例串行跑 10-30 秒的任务，根本没有并发的必要。</p>
+<p><strong>日志里记录锁的获取结果。</strong> 抢锁失败时打一行日志（带上锁文件里记录的 PID 和锁龄），排查"某轮为什么没跑"时非常有用。没有日志的话，跳过一轮和任务根本没被调度，从外部看是一样的。</p>
+<h2 id="_7">小结</h2>
+<p>这个方案的核心就一句话：<strong>用 <code>O_CREAT | O_EXCL</code> 的原子性替代 check-then-create 的竞态窗口，用 mtime 锁龄解决强杀后的残留问题。</strong> 代码不到 60 行，但把"两个进程同时写坏状态"这个隐蔽的、不报错的、事后极难排查的问题从根上堵死了。</p>
+<p>量化系统里很多事故不是策略逻辑错，而是这类工程细节没兜住。原子替换、运行锁、超时保护，这些看起来"跟交易无关"的东西，恰恰是保证账目对得上的地基。地基不牢，策略再精妙也是空中楼阁。</p>
+<p>更多内容请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">运行锁</span><span class="tag-badge">计划任务</span><span class="tag-badge">Windows</span><span class="tag-badge">并发</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
