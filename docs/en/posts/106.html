@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zombie Positions: When Event-Only Exits Lock a Portfolio Shut - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A trend-following paper trader sat idle for six weeks. The logs were clean: every scheduled run completed, every positio...">
+    <meta name="keywords" content="state machine,missed events,exit logic,robustness">
+    <meta property="og:title" content="Zombie Positions: When Event-Only Exits Lock a Portfolio Shut">
+    <meta property="og:description" content="A trend-following paper trader sat idle for six weeks. The logs were clean: every scheduled run completed, every positio...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/106.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Zombie Positions: When Event-Only Exits Lock a Portfolio Shut</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-19</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A trend-following paper trader sat idle for six weeks. The logs were clean: every scheduled run completed, every position check returned "hold," no errors. The portfolio was full—three positions at the cap—and no new entries could open. The reason: all three positions were zombies. Each had been opened on a bullish EMA crossover and was supposed to close "on the bar where the death cross is detected." One scheduled run fetched candles and failed once. The death cross happened on that bar. The EMAs settled into a stable bearish alignment, and the death-cross event never fired again. The positions lived forever.</p>
+<p>This is not a rare edge case. It is a structural bug in any strategy whose exits are defined purely as events. The general lesson is short: <strong>events can be missed; states cannot.</strong></p>
+<h2 id="the-setup">The Setup</h2>
+<p>The strategy is a plain EMA crossover trend follower. Entry: fast EMA crosses above slow EMA. Exit: fast EMA crosses below slow EMA, and you close the long on the bar where that crossover is detected. A three-position cap limits exposure. Position checks run on a schedule, each check fetching recent candles, recomputing indicators, and evaluating the exit condition.</p>
+<p>The exit logic, stripped down, looks like this:</p>
+<pre class="codehilite"><code class="language-python">def should_exit_event_only(position, candles, fast_period=20, slow_period=50):
+    &quot;&quot;&quot;Exit only when a death cross is detected on the latest bars.&quot;&quot;&quot;
+    closes = [c.close for c in candles]
+    fast = ema(closes, fast_period)
+    slow = ema(closes, slow_period)
+
+    # Compare the last two bars: a cross is fast going from &gt;= slow to &lt; slow
+    prev_fast, prev_slow = fast[-2], slow[-2]
+    curr_fast, curr_slow = fast[-1], slow[-1]
+
+    crossed_down = prev_fast &gt;= prev_slow and curr_fast &lt; curr_slow
+    return crossed_down
+</code></pre>
+
+<p>This is the code that looks correct in review. It is also the code that deadlocked the portfolio.</p>
+<h2 id="why-the-event-never-fires-again">Why the Event Never Fires Again</h2>
+<p>A crossover is not a condition. It is a <em>transition</em>—a property of the boundary between two adjacent bars. The predicate <code>prev_fast &gt;= prev_slow and curr_fast &lt; curr_slow</code> is true on exactly one bar per crossing. Miss that bar, and the predicate is false on every subsequent bar, forever, because the EMAs are now stably ordered with fast below slow.</p>
+<p>The failure mode has three ingredients, and all three are common:</p>
+<ol>
+<li><strong>A one-shot trigger.</strong> The exit condition is true for a single bar. There is no persistence.</li>
+<li><strong>A missed evaluation.</strong> A fetch failure, a restart, a timezone bug, a holiday gap, a scheduler hiccup—any of these can skip the bar where the trigger was live. In the incident above, one failed candle fetch was enough.</li>
+<li><strong>No reconciliation.</strong> Nothing in the system compares the <em>desired</em> state (flat) against the <em>actual</em> state (long). The position check asks "did an exit event occur?" rather than "should this position still exist?"</li>
+</ol>
+<p>Once the cross is behind you, the position is unreachable by the exit logic. It is a zombie: alive in the book, invisible to the strategy, and consuming one of three slots. Three zombies and the pool is locked. Entries are rejected by the cap, and every rejection is logged as routine. Nothing in the logs says "stuck"—because from the code's point of view, nothing is wrong.</p>
+<p>The nastiest part is the silence. Event-only exits fail <em>open</em>: the absence of an event is indistinguishable from the absence of a reason to exit. A crash gets noticed. A zombie does not.</p>
+<h2 id="the-fix-pair-every-event-with-a-state-fallback">The Fix: Pair Every Event With a State Fallback</h2>
+<p>The exit rule should be restated in terms of state, with the event as an optimization:</p>
+<blockquote>
+<p>Close the long when the fast EMA is below the slow EMA. The death-cross event is just the earliest bar on which that state becomes true.</p>
+</blockquote>
+<p>That single reframing fixes the deadlock. The state "fast below slow" persists for as long as the bearish alignment holds, so it cannot be missed by a skipped evaluation. The event remains useful—it fires one bar earlier than a naive state check on the crossing bar—but it is no longer the <em>only</em> path out.</p>
+<p>Here is the before/after for the exit block.</p>
+<p><strong>Before (event-only):</strong></p>
+<pre class="codehilite"><code class="language-python">def should_exit_event_only(position, candles, fast_period=20, slow_period=50):
+    closes = [c.close for c in candles]
+    fast = ema(closes, fast_period)
+    slow = ema(closes, slow_period)
+
+    prev_fast, prev_slow = fast[-2], slow[-2]
+    curr_fast, curr_slow = fast[-1], slow[-1]
+
+    return prev_fast &gt;= prev_slow and curr_fast &lt; curr_slow
+</code></pre>
+
+<p><strong>After (event + state fallback):</strong></p>
+<pre class="codehilite"><code class="language-python">def should_exit(position, candles, fast_period=20, slow_period=50):
+    &quot;&quot;&quot;Exit on the death-cross event, or on the persistent bearish state.
+
+    The event is the earliest trigger; the state check guarantees we
+    cannot get stuck if the event bar was never evaluated.
+    &quot;&quot;&quot;
+    closes = [c.close for c in candles]
+    fast = ema(closes, fast_period)
+    slow = ema(closes, slow_period)
+
+    prev_fast, prev_slow = fast[-2], slow[-2]
+    curr_fast, curr_slow = fast[-1], slow[-1]
+
+    # Event: the earliest possible trigger, fires on the crossing bar.
+    crossed_down = prev_fast &gt;= prev_slow and curr_fast &lt; curr_slow
+
+    # State: persistent fallback. True on every bar of bearish alignment.
+    bearish_state = curr_fast &lt; curr_slow
+
+    return crossed_down or bearish_state
+</code></pre>
+
+<p>The <code>or bearish_state</code> term is the whole fix. On the crossing bar, <code>crossed_down</code> is true and the position closes—identical to before. On any later bar where the alignment is still bearish, <code>bearish_state</code> is true and the position closes. On a bar where the fast EMA is above the slow EMA, both terms are false and the position is held. The exit is now a function of the current state, not of having witnessed a transition.</p>
+<p>Note what the fallback does <em>not</em> do: it does not change when a correctly evaluated position exits. If every bar is evaluated, the event fires first, and the state term is redundant on that bar. The fallback only matters when a bar was missed—which is exactly the live-trading case it exists to cover.</p>
+<h2 id="why-this-doesnt-drift-the-backtest">Why This Doesn't Drift the Backtest</h2>
+<p>The obvious objection: adding a state condition changes the exit rule, so backtests will diverge from the old results. They won't, in bar-by-bar replay—and it's worth being precise about why.</p>
+<p>In a bar-by-bar replay, every bar is evaluated in order. On the bar where the cross occurs, <code>crossed_down</code> is true, so the position closes on that bar. The <code>bearish_state</code> term is also true on that bar, but it changes nothing: the exit already happened. On the next bar, the position is already flat, so the state check is never consulted. The two versions produce identical trade sequences and identical PnL.</p>
+<p>The state fallback is therefore <strong>backtest-neutral and live-positive</strong>. It adds robustness only in the regime where the backtest's assumption—that every bar is observed—breaks down. That is a rare and valuable property: you can deploy the fix without re-validating every historical result, because the historical results are unchanged by construction.</p>
+<p>There is one caveat worth stating plainly: this equivalence holds only if your backtest is genuinely bar-by-bar and evaluates the exit on every bar. If your backtest skips bars (for example, it only samples at signal times, or it uses a coarser resampling for speed), then the backtest itself has the same blind spot as production, and you should fix the harness before trusting the equivalence. The property is "no drift under complete evaluation," not "no drift under any evaluation."</p>
+<h2 id="generalizing-the-pattern">Generalizing the Pattern</h2>
+<p>The event/state pairing is not specific to EMA crossovers. It applies to any exit defined as a transition:</p>
+<ul>
+<li><strong>Indicator crosses</strong> (EMA, MACD, price vs. moving average): exit on the cross event, fall back to "indicator on the wrong side."</li>
+<li><strong>Threshold breaches</strong> (drawdown limits, volatility cutoffs): exit on the breach event, fall back to "threshold currently exceeded."</li>
+<li><strong>Time-based exits</strong>: exit on the scheduled bar, fall back to "holding time exceeds limit." A missed scheduler tick should not extend a position indefinitely.</li>
+<li><strong>Signal flips</strong> from an external model: exit on the flip event, fall back to "current signal disagrees with position direction."</li>
+</ul>
+<p>The shape of the fix is always the same. Identify the <em>state</em> that the event is a transition into, and make that state an exit condition in its own right. The event becomes the fast path; the state becomes the guarantee.</p>
+<p>A useful discipline is to write every exit rule in two forms and check that they agree:</p>
+<pre class="codehilite"><code class="language-python">def exit_rule(position, candles):
+    event = exit_event_fired(candles)
+    state = exit_state_holds(position, candles)
+    # The event should imply the state on the bar it fires.
+    assert not event or state, &quot;event fired without state holding&quot;
+    return event or state
+</code></pre>
+
+<p>That assertion is cheap and catches the class of bug where an event is defined more narrowly than the state it is supposed to represent—which is precisely how event-only exits get written in the first place.</p>
+<h2 id="a-note-on-the-position-check">A Note on the Position Check</h2>
+<p>The deadlock also exposed a second gap: nothing reconciled the book against the strategy's intent. A periodic sweep that asks "for each open position, does the current state still justify it?" would have caught the zombies on the first run after the missed bar, regardless of the exit logic. The state fallback makes that sweep unnecessary for this particular rule, but the sweep is still worth having as a backstop for rules you haven't yet refactored. Defense in depth: fix the exit logic, and add a reconciliation check that would notice if the fix ever regresses.</p>
+<p>The core lesson stands on its own, though. An exit that depends on witnessing a moment is an exit that can be skipped. An exit that depends on a state is one that cannot. When you write exit logic, ask: <em>if this evaluation never runs on the bar where the condition first becomes true, does the position still close?</em> If the answer is no, you have a zombie waiting to happen—and the fix is to make the state, not the event, the thing the code checks.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-19 08:46:17</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MOCA</td>
+<td>弱做多</td>
+<td>$0.0067</td>
+<td>$0.007</td>
+<td>$0.0066</td>
+<td>1:6.7</td>
+</tr>
+</tbody>
+</table>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BREV</td>
+<td>庄家做空</td>
+<td>$0.0831</td>
+<td>$0.0775</td>
+<td>$0.086</td>
+<td>1:1.9</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">state machine</span><span class="tag-badge">missed events</span><span class="tag-badge">exit logic</span><span class="tag-badge">robustness</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
