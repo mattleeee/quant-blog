@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>用9000根真实K线做回放测试：让交易代码本体当被测对象 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="模拟盘的交易代码平时在生产环境每小时跑一次。一个完整的开平仓周期,从出信号到平仓,往往要等好几天甚至好几周。这意味着一个方向判断写反、一个状态机跳转漏了分支,你可能要等两三周才能在日志里看到症状——黄花菜都凉了。...">
+    <meta name="keywords" content="回放测试,mock,交易系统,测试">
+    <meta property="og:title" content="用9000根真实K线做回放测试：让交易代码本体当被测对象">
+    <meta property="og:description" content="模拟盘的交易代码平时在生产环境每小时跑一次。一个完整的开平仓周期,从出信号到平仓,往往要等好几天甚至好几周。这意味着一个方向判断写反、一个状态机跳转漏了分支,你可能要等两三周才能在日志里看到症状——黄花菜都凉了。...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/107.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>用9000根真实K线做回放测试：让交易代码本体当被测对象</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-20</span>
+                <span class="category"><span class="tag-badge">工程实践</span></span>
+            </div>
+            <div class="post-content">
+<p>模拟盘的交易代码平时在生产环境每小时跑一次。一个完整的开平仓周期,从出信号到平仓,往往要等好几天甚至好几周。这意味着一个方向判断写反、一个状态机跳转漏了分支,你可能要等两三周才能在日志里看到症状——黄花菜都凉了。</p>
+<p>我们这次做的回放测试(replay test)解决的就是这个问题:把 9009 根 BTC 4h 历史 K 线载入内存,monkey-patch 掉全部网络函数,然后从第 90 根推进到最后一根,每根调一次 <code>run()</code>。三个月的真实历史在一分钟内快进跑完。</p>
+<p>更关键的是,这次回放抓出了一个隐藏很久的 bug:回测引擎的前视偏差(look-ahead bias)。同一套策略逻辑,回测跑出来 +1702%,回放却只有微亏。差异的根源不在策略,而在被测对象——我们这次测的是<strong>生产代码本体</strong>,不是重写的回测脚本。</p>
+<h2 id="_1">为什么不能重写一个回测脚本来测</h2>
+<p>这是整篇文章最重要的一句话:<strong>重写的回测永远测不出生产代码的 bug</strong>。</p>
+<p>很多团队的做法是:策略逻辑上线跑实盘/模拟盘,另外维护一套独立的回测脚本用来验证。问题在于,这两套代码是两份实现。回测脚本里 EMA 算对了、信号方向判对了、风控阈值写对了,不代表生产代码里也一样。你测的是回测脚本,不是那个每小时真正跑一次的 <code>run()</code>。</p>
+<p>回放测试的思路反过来:被测对象就是生产代码本身。我们不重写任何策略逻辑,只是把它运行所需的外部依赖(网络请求、状态存储)替换成内存里的确定性实现,然后用历史数据驱动它。这样,生产代码里任何一行逻辑错误——信号方向、状态跳转、风控判断——都会在回放中暴露。</p>
+<h2 id="_2">被测对象的形态</h2>
+<p>假设生产代码长这样(简化后的骨架),核心是一个状态机加开平仓和风控:</p>
+<pre class="codehilite"><code class="language-python">class TradingBot:
+    def __init__(self, client, store):
+        self.client = client      # 网络层: 拉K线、拉价格
+        self.store = store        # 状态层: 读写 state / trades
+        self.state = store.load_state()
+
+    def run(self):
+        # 1. 拉历史窗口,算指标
+        klines = self.client.fetch_klines(limit=90)
+        closes = [k[&quot;close&quot;] for k in klines]
+        ema_fast = self._ema(closes, 12)
+        ema_slow = self._ema(closes, 26)
+
+        # 2. 当前价
+        price = self.client.fetch_price()
+
+        # 3. 信号判断
+        cross_up = ema_fast[-2] &lt;= ema_slow[-2] and ema_fast[-1] &gt; ema_slow[-1]
+        cross_down = ema_fast[-2] &gt;= ema_slow[-2] and ema_fast[-1] &lt; ema_slow[-1]
+
+        # 4. 状态机: 开平仓 + 风控
+        if self.state[&quot;position&quot;] == 0 and cross_up:
+            self._open_long(price)
+        elif self.state[&quot;position&quot;] &gt; 0 and cross_down:
+            self._close_position(price)
+        # ... 风控检查等
+
+        self.store.save_state(self.state)
+</code></pre>
+
+<p>生产环境里,<code>client</code> 是真实的 HTTP 客户端,<code>store</code> 是数据库或文件。回放测试要做的,就是把这两个换成内存实现,其余代码一行不动。</p>
+<h2 id="monkey-patch">Monkey-patch:把网络和存储换成内存</h2>
+<p>核心手法是 monkey-patch。我们不修改生产代码,而是在测试初始化时替换掉 <code>client</code> 和 <code>store</code> 的方法。</p>
+<h3 id="_3">构造历史窗口切片</h3>
+<p><code>fetch_klines(limit=90)</code> 在生产中返回最近 90 根 K 线。回放时,我们维护一个游标 <code>idx</code>,每次返回 <code>klines[idx-90:idx]</code>。这样生产代码看到的永远是"当前时刻往前 90 根",和真实运行时完全一致——它无法偷看未来。</p>
+<pre class="codehilite"><code class="language-python">class ReplayClient:
+    def __init__(self, klines):
+        self.klines = klines
+        self.idx = 0
+
+    def set_cursor(self, idx):
+        self.idx = idx
+
+    def fetch_klines(self, limit=90):
+        start = max(0, self.idx - limit)
+        # 返回切片,末尾对齐到当前游标
+        return self.klines[start:self.idx]
+
+    def fetch_price(self):
+        # 当前价 = 当根收盘价
+        return self.klines[self.idx - 1][&quot;close&quot;]
+</code></pre>
+
+<p>注意 <code>fetch_price</code> 返回的是当根收盘价,而不是下一根的开盘价。这决定了回放中成交价的假设,必须和生产逻辑的预期一致,否则会引入另一类偏差。</p>
+<h3 id="_4">内存状态存储</h3>
+<p>状态和成交记录同样替换成内存字典:</p>
+<pre class="codehilite"><code class="language-python">class MemoryStore:
+    def __init__(self):
+        self._state = {&quot;position&quot;: 0, &quot;entry_price&quot;: 0.0}
+        self._trades = []
+
+    def load_state(self):
+        return dict(self._state)
+
+    def save_state(self, state):
+        self._state = dict(state)
+
+    def append_trade(self, trade):
+        self._trades.append(trade)
+
+    def get_trades(self):
+        return list(self._trades)
+</code></pre>
+
+<h3 id="_5">组装回放引擎</h3>
+<p>把两者注入生产代码,然后逐根推进:</p>
+<pre class="codehilite"><code class="language-python">def run_replay(klines, warmup=90):
+    client = ReplayClient(klines)
+    store = MemoryStore()
+    bot = TradingBot(client, store)   # 生产代码本体
+
+    for idx in range(warmup, len(klines) + 1):
+        client.set_cursor(idx)
+        bot.run()
+
+    return store.get_trades()
+</code></pre>
+
+<p><code>warmup=90</code> 是因为策略需要 90 根 K 线才能算出稳定的 EMA。从第 90 根开始推进到最后一根,9009 根数据对应约 8900 次 <code>run()</code> 调用。三个月的 4h K 线,一分钟内跑完。</p>
+<h2 id="ema">方向校验:断言每笔开仓与重算的 EMA 交叉一致</h2>
+<p>回放跑通不代表逻辑正确。如果生产代码里 <code>cross_up</code> 和 <code>cross_down</code> 写反了,或者开仓方向搞错了,回放照样能跑完,只是结果不对。所以我们需要一个独立的校验层:<strong>在测试里重新计算一遍 EMA 交叉,逐笔断言开仓方向和信号一致</strong>。</p>
+<p>校验逻辑独立于生产代码,用 pandas 或纯 Python 重算,作为"标准答案":</p>
+<pre class="codehilite"><code class="language-python">def compute_crosses(klines, fast=12, slow=26):
+    closes = [k[&quot;close&quot;] for k in klines]
+    ema_f = _ema_series(closes, fast)
+    ema_s = _ema_series(closes, slow)
+    crosses = []
+    for i in range(1, len(closes)):
+        if ema_f[i-1] &lt;= ema_s[i-1] and ema_f[i] &gt; ema_s[i]:
+            crosses.append((i, &quot;up&quot;))
+        elif ema_f[i-1] &gt;= ema_s[i-1] and ema_f[i] &lt; ema_s[i]:
+            crosses.append((i, &quot;down&quot;))
+    return crosses
+</code></pre>
+
+<p>然后逐笔比对:</p>
+<pre class="codehilite"><code class="language-python">def assert_directions(klines, trades):
+    expected = compute_crosses(klines)
+    expected_up = {i for i, d in expected if d == &quot;up&quot;}
+
+    for t in trades:
+        if t[&quot;action&quot;] != &quot;open&quot;:
+            continue
+        idx = t[&quot;bar_index&quot;]
+        direction = t[&quot;direction&quot;]  # &quot;long&quot; / &quot;short&quot;
+        if direction == &quot;long&quot;:
+            assert idx in expected_up, (
+                f&quot;第 {idx} 根开多,但重算 EMA 在该根不是金叉&quot;
+            )
+        # short 同理校验死叉
+</code></pre>
+
+<p>这段断言在这次回放里直接命中了问题:生产代码在若干根 K 线上开了方向与 EMA 交叉不一致的仓。进一步追查发现,是回测引擎在取窗口时用了 <code>klines[idx:idx+90]</code> 而不是 <code>klines[idx-90:idx]</code>,把未来数据喂给了指标计算——典型的前视偏差。回测里它"预知"了未来走势,所以跑出 +1702%;回放中它只能看到过去,于是微亏。</p>
+<p><strong>这就是为什么被测对象必须是生产代码本体。</strong> 如果这套逻辑藏在独立回测脚本里,你永远不知道生产环境的 <code>run()</code> 到底看到了什么数据。</p>
+<h2 id="_6">回放的边界与取舍</h2>
+<p>回放测试不是万能的,有几个点必须说清楚:</p>
+<ul>
+<li><strong>成交价假设</strong>:我们用当根收盘价成交,真实滑点和手续费不建模。回放用来抓逻辑 bug,不是用来精确评估收益。</li>
+<li><strong>状态初始值</strong>:<code>MemoryStore</code> 的初始状态要和生产一致,否则第一笔信号可能因为状态机初始分支不同而偏离。</li>
+<li><strong>时间语义</strong>:生产代码如果依赖 <code>datetime.now()</code>,回放中要一并 patch 成"当根 K 线的时间",否则跨日、跨周期的风控逻辑会失真。</li>
+</ul>
+<p>这三点处理不好,回放会引入新的偏差,反而误导判断。</p>
+<h2 id="_7">小结</h2>
+<p>回放测试的价值在于:<strong>用真实历史数据、以生产代码为被测对象、在一分钟内跑完三个月的逻辑</strong>。9009 根 K 线、8900 次 <code>run()</code>、一次 monkey-patch,换来的是对状态机、开平仓方向、风控分支的完整覆盖——这些东西在生产环境要等好几周才能攒够样本。</p>
+<p>这次它抓出的前视偏差,回测 +1702% 与回放微亏的巨大反差,恰恰证明了:测生产代码本体,和测一个漂亮的重写回测脚本,是两件事。</p>
+<p>更多量化交易与自动化实战的技术细节,请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">回放测试</span><span class="tag-badge">mock</span><span class="tag-badge">交易系统</span><span class="tag-badge">测试</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
