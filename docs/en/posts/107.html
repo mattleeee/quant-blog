@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Overlap-Proof Cron: File Locks with O_EXCL and Stale-Lock Self-Healing - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Windows Task Scheduler has no concept of mutual exclusion between runs....">
+    <meta name="keywords" content="file lock,O_EXCL,scheduled tasks,concurrency">
+    <meta property="og:title" content="Overlap-Proof Cron: File Locks with O_EXCL and Stale-Lock Self-Healing">
+    <meta property="og:description" content="Windows Task Scheduler has no concept of mutual exclusion between runs....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/107.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Overlap-Proof Cron: File Locks with O_EXCL and Stale-Lock Self-Healing</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-20</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>Windows Task Scheduler has no concept of mutual exclusion between runs. If you tell it to fire a job every 15 minutes, it will do exactly that, whether or not the previous instance is still alive. For a job that normally finishes in 10-30 seconds, this rarely matters. But when a stuck network call stretches a round to the timeout cap, two processes end up writing the same <code>state.json</code> concurrently, and each one silently overwrites the other's positions. The result is a corrupted state file and positions that vanish or double.</p>
+<p>The fix is a lock file created with <code>O_EXCL</code>, plus a staleness rule so that a killed process can't wedge the scheduler forever. This post walks through the implementation, the failure modes, and a small test suite.</p>
+<h2 id="why-a-lock-file-at-all">Why a lock file at all</h2>
+<p>The scheduler fires rounds on a fixed cadence. The job itself has no idea another instance is running. You have three broad options:</p>
+<ol>
+<li><strong>Let the scheduler serialize.</strong> Windows Task Scheduler has a "Do not start a new instance" setting, but it only applies within the same task definition and is easy to misconfigure across task folders, service accounts, or manual runs. It also does nothing if someone triggers the script by hand.</li>
+<li><strong>Use an in-process lock.</strong> Useless here: the two contenders are separate processes.</li>
+<li><strong>Use an OS-level lock file.</strong> This works regardless of who started the process.</li>
+</ol>
+<p>The lock file approach is the most portable and the easiest to reason about, provided you get two details right: atomic creation and stale-lock recovery.</p>
+<h2 id="atomic-creation-with-o_excl">Atomic creation with O_EXCL</h2>
+<p>The naive version of a lock is:</p>
+<pre class="codehilite"><code class="language-python">if not os.path.exists(lock_path):
+    open(lock_path, &quot;w&quot;).close()
+    run_job()
+</code></pre>
+
+<p>This is a check-then-act race. Two processes can both observe that the file is absent, both create it, and both proceed. Under a 15-minute cadence the window is tiny, but "tiny" is not "zero", and the failure mode (concurrent writes to <code>state.json</code>) is exactly the one you're trying to prevent.</p>
+<p><code>O_EXCL</code> closes the race at the kernel level. <code>os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)</code> is a single atomic operation: it creates the file only if it does not already exist, and fails with <code>FileExistsError</code> otherwise. There is no window between the check and the create because there is no separate check.</p>
+<pre class="codehilite"><code class="language-python">import os
+
+def try_acquire(lock_path: str, pid: int) -&gt; bool:
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, str(pid).encode(&quot;ascii&quot;))
+    finally:
+        os.close(fd)
+    return True
+</code></pre>
+
+<p>Writing the PID is not strictly required for correctness, but it is invaluable when you're staring at a stuck lock at 2 a.m. and want to know whether the owning process is still alive.</p>
+<h2 id="the-stale-lock-problem">The stale-lock problem</h2>
+<p><code>O_EXCL</code> gives you atomicity, but it also gives you a lock that never releases itself if the process dies. A <code>taskkill</code>, a crash, a power event, or a <code>TerminateProcess</code> from the scheduler all leave the lock file behind. The next scheduled round sees <code>FileExistsError</code>, exits, and the round after that does the same. The job is now permanently blocked, and nothing in the logs says why.</p>
+<p>You need a rule for deciding when an existing lock is abandoned. The lock file's modification time is the natural arbiter. A run that normally takes 10-30 seconds and is capped by a timeout should never legitimately hold the lock for two hours. So:</p>
+<ul>
+<li>If the lock is younger than the staleness threshold, treat it as live and skip this round.</li>
+<li>If the lock is older than the threshold, treat it as abandoned, remove it, and try to acquire again.</li>
+</ul>
+<p>The threshold has to be comfortably larger than the worst-case legitimate runtime. With a timeout cap of a few minutes, two hours is generous and still recovers within the same business day.</p>
+<p>There is a subtle race in the takeover path: two processes can both decide the lock is stale, both unlink it, and both create a new one. The second <code>unlink</code> may fail with <code>FileNotFoundError</code> (fine), but the second <code>O_EXCL</code> create can still succeed after the first process has already created its own. To narrow this, do the takeover as a two-step: unlink, then attempt <code>O_EXCL</code>. If the <code>O_EXCL</code> fails, another process won the takeover and you should back off. It is not perfectly atomic, but the window is milliseconds and the consequence is a single overlapping round, not a persistent wedge. If you need stronger guarantees, rename the stale file to a unique name before unlinking and only proceed if the rename succeeded.</p>
+<h2 id="the-full-implementation">The full implementation</h2>
+<pre class="codehilite"><code class="language-python">import os
+import time
+import logging
+
+log = logging.getLogger(__name__)
+
+LOCK_PATH = r&quot;C:\trading\state.lock&quot;
+STALE_SECONDS = 2 * 60 * 60  # 2 hours
+
+
+def _lock_age_seconds(lock_path: str) -&gt; float:
+    try:
+        return time.time() - os.path.getmtime(lock_path)
+    except FileNotFoundError:
+        return float(&quot;inf&quot;)  # vanished; treat as stale so we retry
+
+
+def acquire_lock(lock_path: str = LOCK_PATH,
+                 stale_seconds: int = STALE_SECONDS) -&gt; bool:
+    &quot;&quot;&quot;Return True if this process owns the lock, False if another run holds it.&quot;&quot;&quot;
+    pid = os.getpid()
+
+    # Fast path: atomic exclusive create.
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        pass
+    else:
+        try:
+            os.write(fd, str(pid).encode(&quot;ascii&quot;))
+        finally:
+            os.close(fd)
+        return True
+
+    # Lock exists. Is it stale?
+    age = _lock_age_seconds(lock_path)
+    if age &lt; stale_seconds:
+        log.warning(&quot;Lock held by another run (age %.1fs); skipping.&quot;, age)
+        return False
+
+    log.warning(&quot;Stale lock detected (age %.1fs); attempting takeover.&quot;, age)
+    try:
+        os.unlink(lock_path)
+    except FileNotFoundError:
+        pass  # someone else already removed it
+
+    # Second attempt; may still lose the race to another process.
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        log.warning(&quot;Lost stale-lock takeover race; skipping.&quot;)
+        return False
+    try:
+        os.write(fd, str(pid).encode(&quot;ascii&quot;))
+    finally:
+        os.close(fd)
+    return True
+
+
+def release_lock(lock_path: str = LOCK_PATH) -&gt; None:
+    try:
+        os.unlink(lock_path)
+    except FileNotFoundError:
+        pass
+</code></pre>
+
+<p>Usage in the job entry point:</p>
+<pre class="codehilite"><code class="language-python">def main() -&gt; int:
+    if not acquire_lock():
+        return 0  # nothing to do; next scheduled round will pick it up
+    try:
+        run_trading_round()
+    finally:
+        release_lock()
+    return 0
+</code></pre>
+
+<p>The <code>try/finally</code> matters. If <code>run_trading_round()</code> raises, the lock must still be released, or the next round pays the staleness penalty for no reason.</p>
+<h2 id="lock-failure-must-not-block-the-business-path">Lock failure must not block the business path</h2>
+<p>There is a design decision hiding in the <code>return 0</code> above. When the lock is held, the process exits cleanly without doing work. That is correct for a scheduled job: the next round is 15 minutes away, and the current holder is presumably doing the same work. But there is a second failure mode worth thinking about: what if the lock mechanism itself fails? A permissions change on the directory, an antivirus quarantine, a full disk that prevents file creation—these can all make <code>os.open</code> raise something other than <code>FileExistsError</code>.</p>
+<p>The rule should be: if you cannot determine lock state due to an unexpected error, do not block the business path. Log loudly, then proceed. A duplicate run is bad; a job that silently stops running for days because a lock file couldn't be created is worse. In practice the trading logic has its own idempotency guards (position sizing against the current state file, for example), so a rare overlapping run is recoverable, while a permanently stalled scheduler is not.</p>
+<pre class="codehilite"><code class="language-python">def acquire_lock_or_proceed(lock_path: str = LOCK_PATH) -&gt; bool:
+    &quot;&quot;&quot;Returns True if this run should proceed. Never raises.&quot;&quot;&quot;
+    try:
+        return acquire_lock(lock_path)
+    except OSError:
+        log.exception(&quot;Lock subsystem failed; proceeding without lock.&quot;)
+        return True
+</code></pre>
+
+<p>Use this wrapper at the top of <code>main()</code>. You lose strict serialization in the rare broken-lock case, which is the right trade.</p>
+<h2 id="why-not-flock">Why not flock?</h2>
+<p>Python's <code>fcntl.flock</code> is the idiomatic choice on POSIX, and it has a real advantage: the kernel releases the lock automatically when the owning process dies, so stale-lock recovery is free. On Windows, <code>fcntl</code> does not exist, and the portable substitutes are uneven:</p>
+<ul>
+<li><code>msvcrt.locking</code> works on file descriptors but has awkward semantics around byte ranges and blocking modes, and it does not release cleanly across all process-death scenarios.</li>
+<li><code>portalocker</code> wraps the platform differences reasonably well, but adds a dependency and its Windows backend still relies on <code>msvcrt</code> or <code>LockFileEx</code> via ctypes.</li>
+<li>Third-party file-locking libraries vary in how they behave when the process is killed by the scheduler versus terminated by the user.</li>
+</ul>
+<p><code>O_EXCL</code> sidesteps all of this. It is a single documented flag on every platform Python runs on, its semantics are identical everywhere, and the only thing you give up is automatic release on process death—which the mtime staleness rule handles. For a scheduled job that runs every 15 minutes, that trade is clearly worth it.</p>
+<h2 id="testing-the-lock">Testing the lock</h2>
+<p>Three tests cover the behavior that matters. They run against a temporary directory and don't touch the real lock path.</p>
+<pre class="codehilite"><code class="language-python">import os
+import time
+import pytest
+
+from lock import acquire_lock, release_lock
+
+
+@pytest.fixture
+def lock_path(tmp_path):
+    return str(tmp_path / &quot;state.lock&quot;)
+
+
+def test_second_acquire_fails(lock_path):
+    assert acquire_lock(lock_path) is True
+    assert acquire_lock(lock_path) is False
+    release_lock(lock_path)
+
+
+def test_release_then_acquire_succeeds(lock_path):
+    assert acquire_lock(lock_path) is True
+    release_lock(lock_path)
+    assert acquire_lock(lock_path) is True
+    release_lock(lock_path)
+
+
+def test_stale_lock_self_heals(lock_path):
+    # Simulate a crashed process: lock file exists, mtime is old.
+    with open(lock_path, &quot;w&quot;) as f:
+        f.write(&quot;99999&quot;)
+    old = time.time() - 3 * 60 * 60  # 3 hours
+    os.utime(lock_path, (old, old))
+
+    assert acquire_lock(lock_path, stale_seconds=2 * 60 * 60) is True
+    release_lock(lock_path)
+</code></pre>
+
+<p>The third test is the one that catches regressions in the takeover logic. It is easy to write a stale check that reads the file's mtime before checking existence, or that uses <code>os.path.getmtime</code> without handling the <code>FileNotFoundError</code> when another process unlinks in between. The test forces the stale path and verifies that acquisition succeeds.</p>
+<p>A fourth test worth having, though not strictly required: assert that a fresh lock is <em>not</em> taken over. Set the mtime to now and confirm <code>acquire_lock</code> returns <code>False</code>. That guards against a threshold bug that turns every lock into a stale lock.</p>
+<h2 id="operational-notes">Operational notes</h2>
+<ul>
+<li>Put the lock file on the same volume as the state file. Network paths reintroduce the race you just eliminated, because <code>O_EXCL</code> semantics on SMB shares are not always what you expect.</li>
+<li>Log the PID and age whenever you skip a round. When the job silently stops doing work, that log line is the first thing you'll look for.</li>
+<li>Keep the staleness threshold in configuration, not in code, so you can tighten it if the timeout cap changes.</li>
+<li>The lock file should never be read by anything except the lock logic. Treat it as opaque.</li>
+</ul>
+<p>The pattern generalizes: any scheduled job that mutates shared state and can occasionally overrun its interval needs exactly this. <code>O_EXCL</code> gives you the atomicity, the mtime rule gives you self-healing, and the fallback-to-proceed rule keeps a broken lock subsystem from becoming a broken scheduler.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">file lock</span><span class="tag-badge">O_EXCL</span><span class="tag-badge">scheduled tasks</span><span class="tag-badge">concurrency</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
