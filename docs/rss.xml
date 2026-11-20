@@ -7,6 +7,13 @@
         <language>zh-CN</language>
         
         <item>
+            <title>用9000根真实K线做回放测试：让交易代码本体当被测对象</title>
+            <link>https://www.hkcode.dpdns.org/posts/107.html</link>
+            <description>模拟盘的交易代码平时在生产环境每小时跑一次。一个完整的开平仓周期,从出信号到平仓,往往要等好几天甚至好几周。这意味着一个方向判断写反、一个状态机跳转漏了分支,你可能要等两三周才能在日志里看到症状——黄花菜都凉了。...</description>
+            <pubDate>2026-11-20</pubDate>
+            <category>工程实践</category>
+        </item>
+        <item>
             <title>防定时任务重叠双开：一个O_EXCL运行锁的设计与自愈</title>
             <link>https://www.hkcode.dpdns.org/posts/106.html</link>
             <description>问题是怎么暴露出来的
@@ -168,13 +175,6 @@
             <link>https://www.hkcode.dpdns.org/posts/48.html</link>
             <description>Python日志系统设计：分级输出与文件轮转 日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。这篇文章拆解一套可直接落地的日志系统设计：分级输出、文件轮转、格式规范、异常捕获，以及长期运行程序的日志管理策略...</description>
             <pubDate>2026-10-18</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>JSON配置文件管理：原子读写与异常恢复</title>
-            <link>https://www.hkcode.dpdns.org/posts/47.html</link>
-            <description>JSON配置文件管理：原子读写与异常恢复 量化系统里，配置文件承载着策略参数、账户映射、风控阈值这类关键数据。一个写坏的 JSON 文件，轻则让程序启动失败，重则让策略用错误的参数跑一整天。这篇文章分享一套我在实盘项目里用了两年多的配置管理方案，核心解决四件事：原子写入、异常恢复、版本管理、热加载。 为什么直接 jso...</description>
-            <pubDate>2026-10-17</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
