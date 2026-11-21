@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>山寨币&#x27;庄家吸筹&#x27;策略的量化证伪：从直觉到参数网格到跨周期 - 代码与量化</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="一、起点：一个听起来很顺的直觉
+
+山寨币是庄家市，这是很多人的共识。由此衍生出一套非常顺滑的操作直觉：
+
+ 底部横盘、缩量后温和放量，是庄家在吸筹；
+ 跟着吸筹信号买入，拿 2~3 天就走；
+ 止盈比止损设成 2:1，就算庄家插针洗盘，亏也...">
+    <meta name="keywords" content="山寨币,策略证伪,参数网格,回测">
+    <meta property="og:title" content="山寨币&#x27;庄家吸筹&#x27;策略的量化证伪：从直觉到参数网格到跨周期">
+    <meta property="og:description" content="一、起点：一个听起来很顺的直觉
+
+山寨币是庄家市，这是很多人的共识。由此衍生出一套非常顺滑的操作直觉：
+
+ 底部横盘、缩量后温和放量，是庄家在吸筹；
+ 跟着吸筹信号买入，拿 2~3 天就走；
+ 止盈比止损设成 2:1，就算庄家插针洗盘，亏也...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="代码与量化">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/posts/108.html">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/" class="logo">代码与量化</a>
+            <div class="nav-links">
+                <a href="/">首页</a>
+                <a href="/categories.html">分类</a>
+                <a href="/about.html">关于</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>山寨币&#x27;庄家吸筹&#x27;策略的量化证伪：从直觉到参数网格到跨周期</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-21</span>
+                <span class="category"><span class="tag-badge">量化回测</span></span>
+            </div>
+            <div class="post-content">
+<p>山寨币是庄家市，这是很多人的共识。由此衍生出一套非常顺滑的操作直觉：</p>
+<ul>
+<li>底部横盘、缩量后温和放量，是庄家在吸筹；</li>
+<li>跟着吸筹信号买入，拿 2~3 天就走；</li>
+<li>止盈比止损设成 2:1，就算庄家插针洗盘，亏也亏不多；</li>
+<li>位置低、有庄、盈亏比占优，长期应该正期望。</li>
+</ul>
+<p>这个逻辑每一环单看都成立，合起来更像“稳赚”。问题在于：<strong>直觉里“底部横盘放量”这几个字，从来没有被精确定义过</strong>。不定义就无法回测，不回测就永远停留在“我觉得”。</p>
+<p>这篇文章记录的是把上述直觉翻译成可回测规则、跑参数网格、再做跨周期复验的完整过程。结论先放这里：<strong>在量价数据上，这个框架不成立</strong>。下面是它怎么被证伪的。</p>
+<h2 id="_1">二、把直觉翻译成可回测规则</h2>
+<h3 id="21">2.1 信号定义</h3>
+<p>回测的第一步是把模糊描述变成可计算的布尔条件。逐条映射：</p>
+<table>
+<thead>
+<tr>
+<th>直觉描述</th>
+<th>量化规则</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>位置低</td>
+<td>收盘价位于过去 30 天区间（high-low）的下半部</td>
+</tr>
+<tr>
+<td>波动收敛</td>
+<td>ATR/price 相比 40 根之前收窄</td>
+</tr>
+<tr>
+<td>温和放量</td>
+<td>成交量在 1.5~5 倍均量之间</td>
+</tr>
+<tr>
+<td>阳线启动</td>
+<td>当根涨幅 2%~8%</td>
+</tr>
+</tbody>
+</table>
+<p>出场规则：TP +6% / SL -3% / 持有 3 根 K 线超时平仓。</p>
+<h3 id="22">2.2 数据与样本</h3>
+<ul>
+<li>标的：20 个山寨币</li>
+<li>周期：4h</li>
+<li>区间：200 天</li>
+<li>单笔按信号出现即入场，同一标的持仓期间不重复开仓</li>
+</ul>
+<h3 id="23">2.3 回测代码结构</h3>
+<p>不依赖任何回测框架，用 pandas 直接算，逻辑透明、便于改参数：</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+
+def add_indicators(df: pd.DataFrame, vol_win=20, atr_win=14) -&gt; pd.DataFrame:
+    df = df.copy()
+    # 30天区间（4h，一天6根，30天=180根）
+    df[&quot;hh30&quot;] = df[&quot;high&quot;].rolling(180).max()
+    df[&quot;ll30&quot;] = df[&quot;low&quot;].rolling(180).min()
+    df[&quot;pos&quot;] = (df[&quot;close&quot;] - df[&quot;ll30&quot;]) / (df[&quot;hh30&quot;] - df[&quot;ll30&quot;] + 1e-12)
+
+    # ATR
+    tr = pd.concat([
+        df[&quot;high&quot;] - df[&quot;low&quot;],
+        (df[&quot;high&quot;] - df[&quot;close&quot;].shift()).abs(),
+        (df[&quot;low&quot;] - df[&quot;close&quot;].shift()).abs(),
+    ], axis=1).max(axis=1)
+    df[&quot;atr&quot;] = tr.rolling(atr_win).mean()
+    df[&quot;atr_ratio&quot;] = df[&quot;atr&quot;] / df[&quot;close&quot;]
+
+    # 均量
+    df[&quot;vol_ma&quot;] = df[&quot;volume&quot;].rolling(vol_win).mean()
+    df[&quot;vol_mult&quot;] = df[&quot;volume&quot;] / (df[&quot;vol_ma&quot;] + 1e-12)
+
+    # 涨幅
+    df[&quot;ret&quot;] = df[&quot;close&quot;] / df[&quot;close&quot;].shift() - 1
+    return df
+
+
+def gen_signal(df: pd.DataFrame, pos_max=0.5, atr_shrink=0.9,
+               vol_lo=1.5, vol_hi=5.0, ret_lo=0.02, ret_hi=0.08) -&gt; pd.Series:
+    cond = (
+        (df[&quot;pos&quot;] &lt; pos_max) &amp;
+        (df[&quot;atr_ratio&quot;] &lt; df[&quot;atr_ratio&quot;].shift(40) * atr_shrink) &amp;
+        (df[&quot;vol_mult&quot;].between(vol_lo, vol_hi)) &amp;
+        (df[&quot;ret&quot;].between(ret_lo, ret_hi))
+    )
+    return cond.fillna(False)
+
+
+def backtest(df: pd.DataFrame, signal: pd.Series, tp=0.06, sl=0.03,
+             hold_max=3) -&gt; pd.DataFrame:
+    &quot;&quot;&quot;逐根模拟，返回每笔交易记录。&quot;&quot;&quot;
+    trades = []
+    i = 0
+    n = len(df)
+    idx = df.index
+    while i &lt; n - 1:
+        if not signal.iloc[i]:
+            i += 1
+            continue
+        entry = df[&quot;close&quot;].iloc[i]
+        tp_px, sl_px = entry * (1 + tp), entry * (1 - sl)
+        exit_px, exit_reason, bars = None, None, 0
+        for j in range(i + 1, min(i + 1 + hold_max, n)):
+            bars = j - i
+            hi, lo = df[&quot;high&quot;].iloc[j], df[&quot;low&quot;].iloc[j]
+            # 保守假设：同根先触发 SL
+            if lo &lt;= sl_px:
+                exit_px, exit_reason = sl_px, &quot;SL&quot;
+                break
+            if hi &gt;= tp_px:
+                exit_px, exit_reason = tp_px, &quot;TP&quot;
+                break
+        if exit_px is None:
+            j = min(i + hold_max, n - 1)
+            exit_px, exit_reason, bars = df[&quot;close&quot;].iloc[j], &quot;TIME&quot;, j - i
+        trades.append({
+            &quot;entry_time&quot;: idx[i], &quot;exit_time&quot;: idx[min(i + bars, n - 1)],
+            &quot;entry&quot;: entry, &quot;exit&quot;: exit_px, &quot;reason&quot;: exit_reason,
+            &quot;bars&quot;: bars, &quot;ret&quot;: exit_px / entry - 1,
+        })
+        i += bars + 1  # 持仓期跳过
+    return pd.DataFrame(trades)
+</code></pre>
+
+<h3 id="24">2.4 基准结果：就差一口气</h3>
+<p>20 个标的、200 天 4h 数据，基准参数（TP6/SL3/持有3根）跑出来：</p>
+<ul>
+<li>总交易：<strong>160 笔</strong></li>
+<li>每笔期望：<strong>-0.24%</strong></li>
+<li>胜率：<strong>32.5%</strong></li>
+<li>出场分布：<strong>SL 107 次 vs TP 48 次</strong>（其余超时平仓）</li>
+</ul>
+<p>保本胜率线是 33.3%（因为 2:1 盈亏比，胜率 p 满足 p·2 − (1−p)·1 = 0）。实际 32.5%，<strong>差 0.8 个百分点</strong>。</p>
+<p>这个数字非常“有迷惑性”——它看起来像“再优化一点点就正了”。很多策略就是死在这种“就差一口气”的错觉上，然后被反复调参直到过拟合。所以下一步不是庆祝接近保本，而是<strong>主动做参数网格，看这口气能不能真的补上</strong>。</p>
+<h2 id="_2">三、参数网格：把“差一口气”拆开看</h2>
+<h3 id="31">3.1 网格设计</h3>
+<p>围绕两个维度做组合：</p>
+<ol>
+<li><strong>TP/SL 组合</strong>：从 6/3 出发，扩到 12/6，共 8 组变体（保持约 2:1 的比例，同时改变绝对幅度）；</li>
+<li><strong>位置过滤收紧</strong>：<code>pos_max</code> 从 0.5 降到 0.4、0.3；</li>
+<li><strong>持仓时间</strong>：2 / 3 / 4 根。</li>
+</ol>
+<pre class="codehilite"><code class="language-python">from itertools import product
+
+results = []
+for tp, sl in [(0.06,0.03),(0.07,0.035),(0.08,0.04),(0.09,0.045),
+               (0.10,0.05),(0.11,0.055),(0.12,0.06),(0.08,0.03)]:
+    for pos_max in [0.5, 0.4, 0.3]:
+        for hold_max in [2, 3, 4]:
+            all_trades = []
+            for sym, df in data.items():
+                d = add_indicators(df)
+                sig = gen_signal(d, pos_max=pos_max)
+                t = backtest(d, sig, tp=tp, sl=sl, hold_max=hold_max)
+                t[&quot;symbol&quot;] = sym
+                all_trades.append(t)
+            tr = pd.concat(all_trades, ignore_index=True)
+            if len(tr) &lt; 30:
+                continue
+            mean_ret = tr[&quot;ret&quot;].mean()
+            t_stat = mean_ret / (tr[&quot;ret&quot;].std(ddof=1) / np.sqrt(len(tr)))
+            results.append({
+                &quot;tp&quot;: tp, &quot;sl&quot;: sl, &quot;pos_max&quot;: pos_max, &quot;hold_max&quot;: hold_max,
+                &quot;n&quot;: len(tr), &quot;mean_ret&quot;: mean_ret,
+                &quot;win_rate&quot;: (tr[&quot;ret&quot;] &gt; 0).mean(), &quot;t&quot;: t_stat,
+            })
+
+res = pd.DataFrame(results).sort_values(&quot;mean_ret&quot;, ascending=False)
+print(res.head(10))
+</code></pre>
+
+<h3 id="32">3.2 最好的变体，以及它为什么不算数</h3>
+<p>网格里表现最好的一组是 <strong>TP8/SL4</strong>：</p>
+<ul>
+<li>每笔期望：<strong>+0.4%</strong></li>
+<li>但 <strong>t = 0.88</strong>，远低于显著性门槛（约 2）；</li>
+<li>更致命的是<strong>前后半段收益 -8% / +70%</strong>：整个正期望几乎全部来自后半段行情，前半段是亏的。</li>
+</ul>
+<p>这意味着它不是一个“稳定的小优势”，而是<strong>“某段行情恰好配合了这个形态”</strong>。样本内挑出来的最好参数 + 严重依赖单一行情阶段 + t 值不显著，三条同时成立，基本可以判定为过拟合而非 edge。</p>
+<p>参数网格在这里的作用不是“找到好参数”，而是<strong>证明“差一口气”不是参数没调好，而是框架本身没有优势</strong>——160 笔的基准已经是负的，网格里能翻正的都站不住统计检验。</p>
+<h2 id="1h">四、跨周期复验：换到 1h 全线为负</h2>
+<p>参数网格还有一个隐患：所有结论都建立在 4h 这一个周期上。如果信号真有量价逻辑，换周期应该至少方向一致。于是把同一套规则搬到 1h 数据上复验（区间与标的对齐，指标窗口按根数同比缩放）。</p>
+<p>结果：<strong>1h 上所有变体全部为负</strong>，没有一组翻正。</p>
+<p>这个结果比 4h 的 -0.24% 更有信息量：它说明 4h 上那个“接近保本”的数字，很可能只是特定采样频率下的噪声，而不是被周期掩盖的真实信号。<strong>一个在多个周期上方向不一致的形态，不配被称为策略。</strong></p>
+<h2 id="_3">五、为什么“低位放量阳线”会失效</h2>
+<p>回到信号本身。这个形态在阴跌市里的真实含义，和直觉正好相反：</p>
+<ul>
+<li><strong>低位</strong>：阴跌市里“低位”是常态，30 天区间下半部筛出来的大量样本，本身就是下跌趋势中的反弹点；</li>
+<li><strong>温和放量 + 阳线</strong>：在下跌趋势里，这更常见的是<strong>出货前的假启动</strong>——拉一根阳线吸引跟风盘，然后继续下；</li>
+<li><strong>2:1 盈亏比</strong>：在假启动占多数的样本里，SL 被触发 107 次、TP 只有 48 次，盈亏比的优势被胜率劣势吃干净。</li>
+</ul>
+<p>换句话说，<strong>“低位放量阳线”不是吸筹的充分条件，甚至不是必要条件</strong>。它只是一个在上涨市里看起来很像吸筹、在下跌市里系统性偏向出货的形态。而山寨币样本期里，阴跌占了相当比例。</p>
+<p>这也是为什么基准胜率卡在 32.5%：它不是“运气差一点”，而是<strong>形态本身的期望分布就落在保本线之下</strong>。</p>
+<h2 id="_4">六、真正的收获：盘感里不可量化的部分</h2>
+<p>这次证伪最有价值的副产品，是搞清了一件事：</p>
+<blockquote>
+<p>散户口中的“庄家吸筹”，很大一部分是<strong>对特定标的、特定庄家行为模式的熟悉</strong>——知道这个币的庄家习惯怎么洗、习惯拉几根、习惯在什么时间点动手。这部分经验高度依赖个体观察，<strong>恰恰是 K 线重构不出来的</strong>。</p>
+</blockquote>
+<p>量价数据能编码“位置、波动、量比、涨幅”，但编码不了“这个庄家上次是怎么骗我的”。把可编码的部分抽出来做回测，得到的只是一个<strong>去掉了核心信息的近似形态</strong>，它失效是合理的。</p>
+<p>所以结论不是“庄家吸筹不存在”，而是：<strong>“低位放量阳线”这个可量化的代理变量，不足以承载“吸筹”这个判断</strong>。要验证真正的吸筹逻辑，需要订单流、挂单簿、链上转账、地址行为等更高维的数据，而不是 OHLCV 的形态组合。</p>
+<h2 id="_5">七、证伪也是产出</h2>
+<p>最后算一笔账：</p>
+<ul>
+<li>这次证伪花掉的是：几小时写代码 + 跑网格 + 跨周期复验；</li>
+<li>它避免的是：拿真金白银按这个直觉去交易 160 笔、每笔期望 -0.24%、还要叠加手续费和滑点的学费。</li>
+</ul>
+<p><strong>负结果的价值在于它可复用</strong>：以后再看到“低位放量就是吸筹”的说法，可以直接引用这次 160 笔、-0.24%、32.5% 胜率、1h 全线为负的数据，而不是重新凭感觉判断一遍。</p>
+<p>附上本文用到的完整代码结构，方便复现和改造：</p>
+<pre class="codehilite"><code class="language-python"># 完整流程骨架
+# 1. 数据加载：data = {symbol: df[['open','high','low','close','volume']]}
+# 2. 指标：d = add_indicators(df)
+# 3. 信号：sig = gen_signal(d, pos_max=..., atr_shrink=..., vol_lo=..., vol_hi=...)
+# 4. 回测：tr = backtest(d, sig, tp=..., sl=..., hold_max=...)
+# 5. 网格：遍历 tp/sl/pos_max/hold_max，统计 mean_ret / win_rate / t
+# 6. 复验：换周期（4h -&gt; 1h）重跑步骤 2~5，检查方向一致性
+# 7. 分段检验：按时间切前后半段，看收益是否依赖单一行情
+</code></pre>
+
+<p>判断一个形态值不值得继续投入，看三条就够：<strong>样本内期望是否显著为正、t 值是否过线、跨周期方向是否一致</strong>。三条缺一条，就应该按证伪处理，而不是继续调参。</p>
+<p>更多量化回测的负结果复盘与参数网格实战，请关注本站。</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">山寨币</span><span class="tag-badge">策略证伪</span><span class="tag-badge">参数网格</span><span class="tag-badge">回测</span></div>
+            <div class="post-footer">
+                <span>作者: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 代码与量化. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // 阅读进度条
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // 返回顶部按钮
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
