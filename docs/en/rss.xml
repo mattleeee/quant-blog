@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Replay Testing a Live Trading Loop with 9,000 Real Candles</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/108.html</link>
+            <description>Replay testing a live trading loop means running the production code path against historical data with the clock and network replaced by deterministic stand-ins...</description>
+            <pubDate>2026-11-21</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Overlap-Proof Cron: File Locks with O_EXCL and Stale-Lock Self-Healing</title>
             <link>https://www.hkcode.dpdns.org/en/posts/107.html</link>
             <description>Windows Task Scheduler has no concept of mutual exclusion between runs....</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/35.html</link>
             <description>The Problem with &quot;Just Skip the Weak Ones&quot; Every signal generator eventually produces marginal setups....</description>
             <pubDate>2026-11-02</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Adaptive Stop-Loss Thresholds Instead of Hardcoded Percentages</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/34.html</link>
-            <description>A fixed -3% stop does not mean the same thing on every instrument....</description>
-            <pubDate>2026-11-01</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
