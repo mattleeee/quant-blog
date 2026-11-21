@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Replay Testing a Live Trading Loop with 9,000 Real Candles - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Replay testing a live trading loop means running the production code path against historical data with the clock and net...">
+    <meta name="keywords" content="replay testing,monkey patching,production code,testing">
+    <meta property="og:title" content="Replay Testing a Live Trading Loop with 9,000 Real Candles">
+    <meta property="og:description" content="Replay testing a live trading loop means running the production code path against historical data with the clock and net...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/108.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Replay Testing a Live Trading Loop with 9,000 Real Candles</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-21</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Replay testing a live trading loop means running the production code path against historical data with the clock and network replaced by deterministic stand-ins. The goal is not a prettier backtest. It is to execute the same <code>run()</code> function that trades live, one bar at a time, and assert that its decisions match an independently computed reference.</p>
+<p>This is the harness that caught a +1702% "perfect" backtest. Replaying the production loop over the same period only broke even. The disagreement between the two was the signal: the backtest was lookahead-biased, and the production code was not.</p>
+<h2 id="why-replay-the-production-loop">Why Replay the Production Loop</h2>
+<p>Backtests usually live in their own file. They reimplement signal logic, position sizing, and exits, often subtly differently from the live code. When the backtest looks great, you have learned something about the backtest, not about the system. A rewrite can never find bugs in code it doesn't execute.</p>
+<p>Replay testing inverts this. The object under test is the production loop itself. You keep the real <code>run()</code> function, the real state machine, the real order logic. You replace only the boundaries: the network calls, the clock, and persistence. Then you drive it forward bar by bar and check every decision against a reference implementation computed separately.</p>
+<p>The payoff is speed and fidelity at the same time. Three months of 4h candles replay in about a minute, because nothing waits on a network or a wall clock.</p>
+<h2 id="the-substitution-layer">The Substitution Layer</h2>
+<p>The production code touches the outside world through a small set of functions. Enumerate them first; everything else is internal. In this system the boundaries were:</p>
+<ul>
+<li><code>fetch_klines(symbol, interval, limit)</code> — returns OHLCV history.</li>
+<li><code>fetch_price(symbol)</code> — returns the current price.</li>
+<li><code>load_state()</code> / <code>save_state(state)</code> — persistence.</li>
+<li><code>load_trades()</code> / <code>save_trades(trades)</code> — trade log persistence.</li>
+<li><code>now()</code> — the clock.</li>
+</ul>
+<p>Monkey-patching these is the whole trick. No dependency injection refactor, no interface layer, no changes to production code. You patch the module attributes the production code resolves at call time, run the replay, and restore them afterward.</p>
+<pre class="codehilite"><code class="language-python">import contextlib
+from unittest import mock
+
+
+@contextlib.contextmanager
+def patched_market(replay):
+    &quot;&quot;&quot;Swap every network/clock/persistence boundary for the replay's fakes.&quot;&quot;&quot;
+    with mock.patch(&quot;trader.market.fetch_klines&quot;, replay.fetch_klines), \
+         mock.patch(&quot;trader.market.fetch_price&quot;, replay.fetch_price), \
+         mock.patch(&quot;trader.store.load_state&quot;, replay.load_state), \
+         mock.patch(&quot;trader.store.save_state&quot;, replay.save_state), \
+         mock.patch(&quot;trader.store.load_trades&quot;, replay.load_trades), \
+         mock.patch(&quot;trader.store.save_trades&quot;, replay.save_trades), \
+         mock.patch(&quot;trader.clock.now&quot;, replay.now):
+        yield
+</code></pre>
+
+<p>Two details matter. Patch where the name is looked up, not where it is defined. If <code>trader.loop</code> does <code>from trader.market import fetch_klines</code>, you must patch <code>trader.loop.fetch_klines</code>. Second, restore on exit — the context manager handles that, and you should never run a replay without it.</p>
+<h2 id="the-replay-object">The Replay Object</h2>
+<p>The replay holds the full candle series in memory and a cursor. Every faked function reads from the cursor, never from the future.</p>
+<pre class="codehilite"><code class="language-python">class Replay:
+    def __init__(self, candles, start=90):
+        self.candles = candles          # list of dicts: ts, o, h, l, c, v
+        self.cursor = start             # index of the current bar
+        self.state = {}
+        self.trades = []
+
+    # --- network fakes ---
+    def fetch_klines(self, symbol, interval, limit):
+        # Rolling historical window ending at the current bar, inclusive.
+        lo = max(0, self.cursor - limit + 1)
+        return self.candles[lo:self.cursor + 1]
+
+    def fetch_price(self, symbol):
+        # Current bar's close. Never the next bar's open.
+        return self.candles[self.cursor][&quot;c&quot;]
+
+    # --- persistence fakes ---
+    def load_state(self):
+        return dict(self.state)
+
+    def save_state(self, state):
+        self.state = dict(state)
+
+    def load_trades(self):
+        return list(self.trades)
+
+    def save_trades(self, trades):
+        self.trades = list(trades)
+
+    # --- clock fake ---
+    def now(self):
+        return self.candles[self.cursor][&quot;ts&quot;]
+</code></pre>
+
+<p>The single most important line is <code>fetch_price</code>. It returns the current bar's close. A live loop polling mid-bar sees a price that is still forming; on a closed-bar strategy the equivalent is the just-closed bar's close. Returning the next bar's open here is exactly how lookahead bias enters a harness. If your strategy reads the current bar's high or low, stop — those are not known until the bar closes, and the replay must not expose them.</p>
+<p>The rolling window in <code>fetch_klines</code> mimics a real exchange call: bounded by <code>limit</code>, anchored at the cursor, containing only bars that have already closed. The production code cannot see bar 500 while the cursor sits at 400.</p>
+<h2 id="driving-the-loop">Driving the Loop</h2>
+<p>Load 9,009 real BTC 4h candles, start at bar 90 (enough warmup for the EMA windows), and advance one bar at a time.</p>
+<pre class="codehilite"><code class="language-python">def replay_run(candles, start=90):
+    replay = Replay(candles, start=start)
+    opens = []
+
+    with patched_market(replay):
+        trader = Loop()                 # production object, unmodified
+        for i in range(start, len(candles)):
+            replay.cursor = i
+            before = len(replay.trades)
+            trader.run()                # the live entry point
+            if len(replay.trades) &gt; before:
+                opens.append((i, replay.trades[-1]))
+
+    return replay, opens
+</code></pre>
+
+<p><code>trader.run()</code> is the production function. It calls <code>fetch_klines</code>, computes indicators, checks entry conditions, calls <code>fetch_price</code>, and persists state and trades through the patched functions. Nothing inside it knows it is being replayed. That is the point.</p>
+<p>9,009 candles minus 90 warmup bars is 8,919 invocations of <code>run()</code>. Each one does a bounded amount of work over a window of a few hundred bars. Total runtime lands around a minute on a laptop — no sleeps, no HTTP, no retries.</p>
+<h2 id="the-independent-reference">The Independent Reference</h2>
+<p>The replay tells you what the production loop did. It does not tell you whether that was correct. For that you need a reference computed by separate code that shares no logic with the loop under test.</p>
+<p>Here the reference is an EMA cross: fast EMA crossing above slow EMA is a long signal. Compute both EMAs over the full series once, then derive the exact bars where a cross occurs.</p>
+<pre class="codehilite"><code class="language-python">def ema(values, period):
+    k = 2.0 / (period + 1)
+    out = [None] * len(values)
+    acc = None
+    for i, v in enumerate(values):
+        if i &lt; period - 1:
+            continue
+        if acc is None:
+            acc = sum(values[i - period + 1:i + 1]) / period
+        else:
+            acc = v * k + acc * (1 - k)
+        out[i] = acc
+    return out
+
+
+def reference_crosses(candles, fast=12, slow=26):
+    closes = [c[&quot;c&quot;] for c in candles]
+    f = ema(closes, fast)
+    s = ema(closes, slow)
+    crosses = []
+    for i in range(1, len(candles)):
+        if None in (f[i], s[i], f[i - 1], s[i - 1]):
+            continue
+        if f[i - 1] &lt;= s[i - 1] and f[i] &gt; s[i]:
+            crosses.append((&quot;long&quot;, i))
+    return crosses
+</code></pre>
+
+<p>This is deliberately simple and written independently. It does not import the strategy module. If both the reference and the production loop used the same helper, a bug in that helper would cancel out and the assertion would pass on broken code.</p>
+<h2 id="asserting-direction-and-timing">Asserting Direction and Timing</h2>
+<p>Every open the production loop produces must correspond to a reference cross at the same bar, in the same direction. Timing matters as much as direction: an open one bar late means the loop is reading a stale window; one bar early means it is reading the future.</p>
+<pre class="codehilite"><code class="language-python">def assert_opens_match(opens, crosses):
+    ref = {i: direction for direction, i in crosses}
+    got = {i: t[&quot;direction&quot;] for i, t in opens}
+
+    missing = set(ref) - set(got)
+    extra = set(got) - set(ref)
+    wrong = {i for i in set(ref) &amp; set(got) if ref[i] != got[i]}
+
+    assert not missing, f&quot;missed opens at bars {sorted(missing)}&quot;
+    assert not extra, f&quot;phantom opens at bars {sorted(extra)}&quot;
+    assert not wrong, f&quot;wrong direction at bars {sorted(wrong)}&quot;
+</code></pre>
+
+<p>Three failure modes, three assertions. <code>missing</code> catches signals the loop dropped — usually a warmup or window-length bug. <code>extra</code> catches opens with no reference basis — the classic lookahead signature, where the loop reacts to information the reference never had. <code>wrong</code> catches inverted comparisons or a flipped sign in the cross logic.</p>
+<p>Run it end to end:</p>
+<pre class="codehilite"><code class="language-python">candles = load_candles(&quot;BTCUSDT_4h.json&quot;)   # 9,009 bars
+replay, opens = replay_run(candles)
+crosses = reference_crosses(candles)
+assert_opens_match(opens, crosses)
+print(f&quot;{len(opens)} opens matched {len(crosses)} reference crosses&quot;)
+</code></pre>
+
+<h2 id="what-the-harness-exposed">What the Harness Exposed</h2>
+<p>The original backtest reported +1702% and zero losing periods. The replay of the production loop, over the same 9,009 candles, broke even. The assertion step explained why: the backtest produced opens that the reference did not, and those extra opens clustered on bars where the next candle was favorable.</p>
+<p>The backtest had been computing the EMA over a slice that included the current bar's close and then entering at that same close — a decision made with the bar's final value before the bar was final. The production loop, fed by <code>fetch_klines</code> bounded at the cursor and <code>fetch_price</code> returning the current close, could not do that. It entered on the next bar. The disagreement between backtest and replay was the tell, and the reference assertion localized it to specific bars.</p>
+<p>None of this required changing production code. The loop was correct; the backtest was not. That is the argument for replaying the production loop: the code that runs in production is the only code whose behavior you actually care about, and a rewrite can never find bugs in code it doesn't execute.</p>
+<h2 id="practical-notes">Practical Notes</h2>
+<p>Keep the warmup constant explicit and assert the candle count before starting. A truncated file silently shifts every index. Patch by lookup site, not definition site. Make <code>fetch_price</code> return the current bar's close and nothing later. Write the reference with no imports from the strategy package. And when the assertion fails, print the bar index and both values — the bar number is what lets you open the chart and see the lookahead with your own eyes.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-21 08:46:09</p>
+</blockquote>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>INX</td>
+<td>扫荡做空</td>
+<td>$0.0031</td>
+<td>$0.003</td>
+<td>$0.0032</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">replay testing</span><span class="tag-badge">monkey patching</span><span class="tag-badge">production code</span><span class="tag-badge">testing</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
