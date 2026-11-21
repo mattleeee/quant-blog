@@ -7,6 +7,20 @@
         <language>zh-CN</language>
         
         <item>
+            <title>山寨币&#x27;庄家吸筹&#x27;策略的量化证伪：从直觉到参数网格到跨周期</title>
+            <link>https://www.hkcode.dpdns.org/posts/108.html</link>
+            <description>一、起点：一个听起来很顺的直觉
+
+山寨币是庄家市，这是很多人的共识。由此衍生出一套非常顺滑的操作直觉：
+
+ 底部横盘、缩量后温和放量，是庄家在吸筹；
+ 跟着吸筹信号买入，拿 2~3 天就走；
+ 止盈比止损设成 2:1，就算庄家插针洗盘，亏也亏不多；
+ 位置低、有庄、盈亏比占优，长期应该正期望。...</description>
+            <pubDate>2026-11-21</pubDate>
+            <category>量化回测</category>
+        </item>
+        <item>
             <title>用9000根真实K线做回放测试：让交易代码本体当被测对象</title>
             <link>https://www.hkcode.dpdns.org/posts/107.html</link>
             <description>模拟盘的交易代码平时在生产环境每小时跑一次。一个完整的开平仓周期,从出信号到平仓,往往要等好几天甚至好几周。这意味着一个方向判断写反、一个状态机跳转漏了分支,你可能要等两三周才能在日志里看到症状——黄花菜都凉了。...</description>
@@ -168,13 +182,6 @@
             <link>https://www.hkcode.dpdns.org/posts/49.html</link>
             <description>自动化系统监控面板：用Python搭建简单的健康看板 跑量化策略的系统，最怕的不是策略亏钱，而是策略悄悄挂了你还不知道。数据源断了、API 超时了、定时任务没跑、缓存写爆了——这些问题不会主动报警，只会让你在复盘时发现“咦，昨天怎么没信号”。 这篇文章搭一个轻量级的健康看板，不依赖 Prometheus + Grafa...</description>
             <pubDate>2026-10-19</pubDate>
-            <category>系统运维</category>
-        </item>
-        <item>
-            <title>Python日志系统设计：分级输出与文件轮转</title>
-            <link>https://www.hkcode.dpdns.org/posts/48.html</link>
-            <description>Python日志系统设计：分级输出与文件轮转 日志是长期运行程序的基础设施。量化交易系统、爬虫、定时任务，只要程序跑起来超过几分钟，就必须有一套可靠的日志方案。print 只能救急，logging 才是正解。这篇文章拆解一套可直接落地的日志系统设计：分级输出、文件轮转、格式规范、异常捕获，以及长期运行程序的日志管理策略...</description>
-            <pubDate>2026-10-18</pubDate>
             <category>系统运维</category>
         </item>
     </channel>
