@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>From Whale-Accumulation Folklore to a Falsified Strategy in 24 Hours - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="The Setup: A Folk Theory Worth Testing Small-cap altcoins are dealer markets....">
+    <meta name="keywords" content="altcoin,falsification,parameter grid,negative result">
+    <meta property="og:title" content="From Whale-Accumulation Folklore to a Falsified Strategy in 24 Hours">
+    <meta property="og:description" content="The Setup: A Folk Theory Worth Testing Small-cap altcoins are dealer markets....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/109.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>From Whale-Accumulation Folklore to a Falsified Strategy in 24 Hours</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-22</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>Small-cap altcoins are dealer markets. There is no consolidated tape, no deep book, and often one or two market makers who set the tone. The folk theory that circulates among people who trade them goes roughly like this: before a pump, the dealer quietly accumulates. Price goes flat near the bottom of the recent range. Volatility contracts. Volume ticks up, but not too much — a moderate bump, not a spike. Then a modest green candle appears, and the move starts. Buy the accumulation, hold two or three days, take profit at a 2:1 reward-to-risk ratio, and even if the dealer runs an exit scam or paints a wick, the damage is bounded.</p>
+<p>It is a coherent story. It has a mechanism (dealer inventory), a signature (quiet accumulation), and a risk plan (2:1 with a timeout). The question is whether the signature is actually predictive or whether it is a story told after the fact on charts that already pumped.</p>
+<p>I spent a day formalizing it and testing it. The result was negative, and the negative result was more useful than a marginal positive would have been.</p>
+<h2 id="formalizing-the-folklore">Formalizing the Folklore</h2>
+<p>The first job is turning prose into predicates. Each clause of the folk theory maps to a computable condition:</p>
+<ul>
+<li><strong>"Position in the lower half of the 30-day range"</strong> → close is below the midpoint of the rolling 30-day high/low range.</li>
+<li><strong>"ATR/price contracted vs 40 bars ago"</strong> → current ATR(14) divided by close is smaller than the same ratio 40 bars back, by some margin.</li>
+<li><strong>"Volume 1.5–5x its 20-bar mean"</strong> → a band, not a threshold. The upper bound encodes the folk claim that a volume spike above 5x is distribution, not accumulation.</li>
+<li><strong>"A 2–8% green candle to start"</strong> → the trigger bar is green and its body is in that range.</li>
+</ul>
+<p>Then the trade plan: take profit at +6%, stop loss at -3%, timeout after 3 days. Entry at the close of the trigger bar.</p>
+<p>Here is the signal logic, written to be adapted rather than copied:</p>
+<pre class="codehilite"><code class="language-python">import numpy as np
+import pandas as pd
+
+def build_features(df: pd.DataFrame) -&gt; pd.DataFrame:
+    out = df.copy()
+    close, high, low, vol = out[&quot;close&quot;], out[&quot;high&quot;], out[&quot;low&quot;], out[&quot;volume&quot;]
+
+    # 30-day range position (30 days of 4h bars = 180 bars)
+    roll_high = high.rolling(180).max()
+    roll_low = low.rolling(180).min()
+    out[&quot;range_pos&quot;] = (close - roll_low) / (roll_high - roll_low)
+
+    # ATR(14) as a fraction of price
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+    out[&quot;atr_pct&quot;] = atr / close
+    out[&quot;atr_contracted&quot;] = out[&quot;atr_pct&quot;] &lt; out[&quot;atr_pct&quot;].shift(40) * 0.9
+
+    # Volume band relative to 20-bar mean
+    out[&quot;vol_ratio&quot;] = vol / vol.rolling(20).mean()
+
+    # Trigger candle body
+    out[&quot;body_pct&quot;] = (close - out[&quot;open&quot;]) / out[&quot;open&quot;]
+    return out
+
+def signal(row) -&gt; bool:
+    return (
+        row[&quot;range_pos&quot;] &lt; 0.5
+        and row[&quot;atr_contracted&quot;]
+        and 1.5 &lt;= row[&quot;vol_ratio&quot;] &lt;= 5.0
+        and 0.02 &lt;= row[&quot;body_pct&quot;] &lt;= 0.08
+    )
+</code></pre>
+
+<p>The dataset: 20 small-cap altcoins, 200 days of 4-hour bars. That yields 160 trades under the base parameters. Enough to estimate a mean with some precision, not enough to rescue a weak edge.</p>
+<h2 id="the-base-result">The Base Result</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Trades</td>
+<td>160</td>
+</tr>
+<tr>
+<td>Mean PnL per trade</td>
+<td>-0.24%</td>
+</tr>
+<tr>
+<td>Win rate</td>
+<td>32.5%</td>
+</tr>
+<tr>
+<td>SL exits</td>
+<td>107</td>
+</tr>
+<tr>
+<td>TP exits</td>
+<td>48</td>
+</tr>
+<tr>
+<td>Timeouts</td>
+<td>5</td>
+</tr>
+</tbody>
+</table>
+<p>The breakeven win rate for a +6%/-3% payoff, ignoring fees, is 33.3%. The strategy landed at 32.5% — half a point under the line. That is the worst possible place to be: not obviously broken, not obviously working. It is exactly where a discretionary trader would keep running it for months, attributing the slow bleed to bad luck or bad timing.</p>
+<p>The exit distribution tells the real story. 107 stop-outs against 48 take-profits means the trigger bar was, far more often than not, followed by a move down. The "accumulation" pattern was firing into supply.</p>
+<h2 id="the-parameter-grid-where-honesty-gets-tested">The Parameter Grid: Where Honesty Gets Tested</h2>
+<p>A single negative run invites the obvious objection: maybe the parameters were wrong. So I ran eight variants — TP/SL pairs from 6/3 up to 12/6, a tighter range-position filter (lower quartile instead of lower half), and hold periods of 2, 3, and 4 days.</p>
+<pre class="codehilite"><code class="language-python">from itertools import product
+
+def backtest(df, tp, sl, max_hold, pos_cut=0.5):
+    trades = []
+    i = 0
+    while i &lt; len(df) - 1:
+        row = df.iloc[i]
+        if not signal(row) or row[&quot;range_pos&quot;] &gt;= pos_cut:
+            i += 1
+            continue
+        entry = row[&quot;close&quot;]
+        for j in range(i + 1, min(i + 1 + max_hold, len(df))):
+            bar = df.iloc[j]
+            if bar[&quot;low&quot;] &lt;= entry * (1 - sl):
+                trades.append(-sl)
+                break
+            if bar[&quot;high&quot;] &gt;= entry * (1 + tp):
+                trades.append(tp)
+                break
+        else:
+            trades.append(df.iloc[min(i + max_hold, len(df) - 1)][&quot;close&quot;] / entry - 1)
+        i = j + 1
+    return np.array(trades)
+
+results = {}
+for tp, sl, hold in product([0.06, 0.08, 0.10, 0.12], [0.03, 0.04, 0.05, 0.06], [2, 3, 4]):
+    if abs(tp / sl - 2.0) &gt; 1e-9:
+        continue
+    r = backtest(features, tp, sl, hold * 6)  # 6 bars per day on 4h
+    results[(tp, sl, hold)] = (r.mean(), r.mean() / (r.std() / np.sqrt(len(r))), len(r))
+</code></pre>
+
+<p>The best variant reached +0.4% per trade. On its own that sounds like a rescue. It is not. The t-statistic was 0.88 — nowhere near significance for a sample this size. Worse, splitting the sample in half gave -8% cumulative on the first half and +70% on the second. The entire "edge" lived in one regime window. That is regime dependence wearing a strategy costume.</p>
+<p>This is the moment where most research quietly dies or quietly lies. If you report only the best cell of the grid, you have a +0.4%/trade strategy with a chart that goes up. If you report the grid honestly, you have a distribution of outcomes whose best member is indistinguishable from noise.</p>
+<h2 id="the-cross-timeframe-check">The Cross-Timeframe Check</h2>
+<p>One more test before calling it. If the mechanism is real — dealer accumulation visible in price and volume — it should not be exclusive to the 4-hour timeframe. I recomputed the same features and rules on 1-hour bars.</p>
+<p>Every variant went negative. Not marginally — across the board. A genuine microstructure effect should degrade gracefully across timeframes, because the underlying dealer behavior does not care which candle interval you sample it with. A pattern that exists only at one resolution is usually an artifact of how that resolution aggregates noise.</p>
+<h2 id="what-the-negative-result-actually-says">What the Negative Result Actually Says</h2>
+<p>The most plausible reading of the evidence: what the filter calls "low-base volume candle" in a downtrend is, in this sample, mostly distribution. The dealer is not accumulating quietly; the dealer is selling into retail bids that look like support because the price is flat. The moderate volume bump is the distribution itself, and the 2–8% green candle is the bait. The folk rule inverted the sign of the signal.</p>
+<p>Why does the folklore persist? Because the intuition is not entirely wrong — it is just not encodable in K-lines. Experienced traders in these markets are not reading the pattern; they are reading a <em>specific dealer</em>. They know this market maker's fill behavior, how it quotes, how it behaves when inventory is heavy, whether it has a history of running stops. That knowledge is real and it is predictive. It is also not a function of OHLCV. When you compress it into "flat price plus volume uptick," you keep the vocabulary and throw away the information.</p>
+<p>This is the general failure mode of pattern folklore: the pattern is a compressed description of an expert's situational read, and the compression is lossy in exactly the dimension that mattered.</p>
+<h2 id="practical-takeaways">Practical Takeaways</h2>
+<p>A few things I would carry into the next study:</p>
+<p><strong>Set the breakeven line before you run anything.</strong> For a 2:1 payoff, write down 33.3% and compare against it directly. A win rate of 32.5% is not "close" — it is below the line, and the gap is the finding.</p>
+<p><strong>Report the grid, not the cell.</strong> Eight variants produced a spread from clearly negative to mildly positive. The mean of the grid is the honest estimate of the strategy family, and it was negative. The best cell is a maximum over noisy draws, which is biased upward by construction.</p>
+<p><strong>Split the sample before you believe a t-stat.</strong> A t of 0.88 on the full sample became -8/+70 on halves. Any result that flips sign across a chronological split is a regime bet, and you need to know which regime you are in <em>before</em> the trade, which the backtest cannot tell you.</p>
+<p><strong>Use timeframes as a falsification tool.</strong> If a microstructure story only works on one bar size, treat that as evidence against the mechanism, not as a tuning opportunity.</p>
+<p><strong>Price the value of early falsification.</strong> This test cost a day. Running the strategy live for the months it would have taken to accumulate the same evidence would have cost real capital plus the harder-to-recover cost of believing in it. Half a point under breakeven, compounded across 160 trades, is a slow bleed that looks like variance for a long time.</p>
+<p>The honest summary: 160 trades, -0.24% each, a win rate half a point under breakeven, a parameter grid whose best cell is noise, and a cross-timeframe check that fails everywhere. The folk theory is not falsified as a description of dealer behavior — it is falsified as a rule you can compute from candles. The part that survives is the part that was never in the candles.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-22 08:46:19</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLAUDIA</td>
+<td>短平快做多</td>
+<td>$0.0093</td>
+<td>$0.0095</td>
+<td>$0.009</td>
+<td>1:1.2</td>
+</tr>
+<tr>
+<td>IDOL</td>
+<td>短平快做多</td>
+<td>$0.0282</td>
+<td>$0.029</td>
+<td>$0.0275</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">altcoin</span><span class="tag-badge">falsification</span><span class="tag-badge">parameter grid</span><span class="tag-badge">negative result</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
