@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>From Whale-Accumulation Folklore to a Falsified Strategy in 24 Hours</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/109.html</link>
+            <description>The Setup: A Folk Theory Worth Testing Small-cap altcoins are dealer markets....</description>
+            <pubDate>2026-11-22</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Replay Testing a Live Trading Loop with 9,000 Real Candles</title>
             <link>https://www.hkcode.dpdns.org/en/posts/108.html</link>
             <description>Replay testing a live trading loop means running the production code path against historical data with the clock and network replaced by deterministic stand-ins...</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/36.html</link>
             <description>Why the Monthly Review Is the Only Review That Matters A paper-trading log accumulates trades faster than anyone reviews them....</description>
             <pubDate>2026-11-03</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Weak-Signal Blacklisting: Two-Month Windows and a 70% Win-Rate Gate</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/35.html</link>
-            <description>The Problem with &quot;Just Skip the Weak Ones&quot; Every signal generator eventually produces marginal setups....</description>
-            <pubDate>2026-11-02</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
