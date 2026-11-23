@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Atomic State Files in Python: tmp + os.replace</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/110.html</link>
+            <description>A trading bot wakes up every 15 minutes, loads state.json, reconciles positions, and writes the file back....</description>
+            <pubDate>2026-11-23</pubDate>
+            <category>Python</category>
+        </item>
+        <item>
             <title>From Whale-Accumulation Folklore to a Falsified Strategy in 24 Hours</title>
             <link>https://www.hkcode.dpdns.org/en/posts/109.html</link>
             <description>The Setup: A Folk Theory Worth Testing Small-cap altcoins are dealer markets....</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/37.html</link>
             <description>The Fear &amp; Greed index is a daily composite scaled 0–100, built from volatility, momentum, social signals, dominance and trend components....</description>
             <pubDate>2026-11-04</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Reading Paper-Trading Statistics: Win Rate, Profit Factor and Expectancy</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/36.html</link>
-            <description>Why the Monthly Review Is the Only Review That Matters A paper-trading log accumulates trades faster than anyone reviews them....</description>
-            <pubDate>2026-11-03</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
