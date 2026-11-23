@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atomic State Files in Python: tmp + os.replace - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A trading bot wakes up every 15 minutes, loads state.json, reconciles positions, and writes the file back....">
+    <meta name="keywords" content="atomic write,os.replace,crash safety,JSON">
+    <meta property="og:title" content="Atomic State Files in Python: tmp + os.replace">
+    <meta property="og:description" content="A trading bot wakes up every 15 minutes, loads state.json, reconciles positions, and writes the file back....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/110.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Atomic State Files in Python: tmp + os.replace</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-23</span>
+                <span class="category"><span class="tag-badge">Python</span></span>
+            </div>
+            <div class="post-content">
+<p>A trading bot wakes up every 15 minutes, loads <code>state.json</code>, reconciles positions, and writes the file back. One afternoon the process is killed mid-write — or the host loses power at exactly the wrong millisecond. The next run opens <code>state.json</code>, <code>json.load</code> raises <code>JSONDecodeError</code> on a truncated payload, the bot crashes, and a supervisor restarts it. It crashes again. Meanwhile every position the bot was tracking has effectively become orphaned cash: the exchange still holds the assets, but the bot has no record of entry prices, stop levels, or sizing, so it cannot manage or exit them.</p>
+<p>The root cause is not exotic. <code>open(path, 'w')</code> truncates the file to zero bytes before a single byte of new content is written. Any interruption between truncation and the final <code>write()</code> leaves you with an empty or half-written file. There is a window — small, but hit often enough across thousands of restarts — where the on-disk state is invalid.</p>
+<p>The fix is the standard durable-write pattern: write the complete payload to a sibling temp file in the same directory, flush and <code>fsync</code> it, then atomically rename it over the target with <code>os.replace</code>. Pair that with a loader that quarantines corrupt files instead of crashing forever.</p>
+<h2 id="why-openpath-w-is-unsafe">Why <code>open(path, 'w')</code> is unsafe</h2>
+<p>Three distinct failure modes:</p>
+<ol>
+<li><strong>Truncate-then-write.</strong> The file is emptied the moment you open it for writing. A crash before the write completes leaves an empty file.</li>
+<li><strong>Partial writes.</strong> <code>write()</code> may not flush everything to disk immediately; the OS buffers it. A power cut can persist some pages and not others.</li>
+<li><strong>No atomicity guarantee.</strong> Even a completed <code>write()</code> followed by a crash during metadata update can leave the file in an inconsistent state on some filesystems.</li>
+</ol>
+<p>If you serialize with <code>json.dump(obj, f)</code> directly to the target, you also have a window where the JSON is syntactically invalid — the closing brace isn't there yet. Anything reading concurrently sees garbage.</p>
+<h2 id="the-pattern-temp-file-fsync-osreplace">The pattern: temp file + <code>fsync</code> + <code>os.replace</code></h2>
+<pre class="codehilite"><code class="language-python">import json
+import os
+import tempfile
+
+def write_state(path: str, state: dict) -&gt; None:
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=&quot;.state-&quot;, suffix=&quot;.tmp&quot;, dir=directory
+    )
+    try:
+        with os.fdopen(fd, &quot;w&quot;, encoding=&quot;utf-8&quot;) as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+</code></pre>
+
+<p>Key details, in order of importance:</p>
+<h3 id="the-temp-file-must-live-in-the-same-directory">The temp file must live in the same directory</h3>
+<p><code>os.replace</code> is atomic only within a single filesystem. If you create the temp file in <code>/tmp</code> (often a separate tmpfs or mount) and the state file lives on <code>/var/lib/bot</code>, the rename becomes a copy-then-delete, which is not atomic and can leave a partial target. <code>tempfile.mkstemp(dir=directory)</code> guarantees the temp file is a sibling of the target, so the rename is a pure directory-entry swap on the same device.</p>
+<p>This also matters on Windows: <code>os.replace</code> maps to <code>MoveFileEx</code> with <code>MOVEFILE_REPLACE_EXISTING</code>, which has been atomic for same-volume renames since Python 3.3. Cross-volume it degrades to a copy. Same directory, same volume, always.</p>
+<h3 id="flush-then-fsync"><code>flush()</code> then <code>fsync()</code></h3>
+<p><code>flush()</code> pushes Python's buffer into the OS. <code>fsync()</code> pushes the OS buffer to the storage device. Without <code>fsync</code>, a power loss can leave the temp file's contents in the page cache while the rename (a metadata operation) may or may not have hit disk. The ordering you want is: data durable <em>before</em> the rename is visible.</p>
+<p>On POSIX you'd additionally <code>fsync</code> the directory to make the rename itself durable, but for a state file rewritten every 15 minutes the cost/benefit rarely justifies it. The <code>fsync</code> on the file is the one that prevents the "empty file after power cut" scenario.</p>
+<h3 id="osreplace-not-osrename"><code>os.replace</code>, not <code>os.rename</code></h3>
+<p><code>os.rename</code> fails on Windows if the destination exists. <code>os.replace</code> overwrites atomically on both platforms. Use it unconditionally.</p>
+<h3 id="hide-the-temp-file">Hide the temp file</h3>
+<p>The <code>.state-</code> prefix keeps the temp file out of casual <code>ls</code> output and, more importantly, out of globs like <code>*.json</code> that other parts of your pipeline might use. If your loader scans a directory for state files, a leftover <code>.tmp</code> from a crashed write should not be picked up.</p>
+<h2 id="the-quarantine-loader">The quarantine loader</h2>
+<p>An atomic writer eliminates the <em>common</em> corruption path, but it cannot fix a file that is already corrupt — from a previous version of the code, a manual edit, a bad disk, or a write from some other process. The loader must be defensive: on <code>JSONDecodeError</code>, move the bad file aside with a timestamp, log loudly, and rebuild from defaults rather than crashing on every restart.</p>
+<pre class="codehilite"><code class="language-python">import json
+import logging
+import os
+import time
+
+log = logging.getLogger(__name__)
+
+DEFAULT_STATE = {
+    &quot;version&quot;: 2,
+    &quot;positions&quot;: {},
+    &quot;last_reconcile&quot;: None,
+    &quot;cash_buffer&quot;: 0.0,
+}
+
+def load_state(path: str) -&gt; dict:
+    if not os.path.exists(path):
+        return dict(DEFAULT_STATE)
+
+    try:
+        with open(path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as f:
+            loaded = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        bad_path = f&quot;{path}.{int(time.time())}.bad&quot;
+        log.error(
+            &quot;state file %s is corrupt (%s); quarantining to %s and &quot;
+            &quot;rebuilding from defaults&quot;,
+            path, exc, bad_path,
+        )
+        os.replace(path, bad_path)
+        return dict(DEFAULT_STATE)
+
+    return _merge_defaults(loaded, DEFAULT_STATE)
+
+def _merge_defaults(loaded: dict, defaults: dict) -&gt; dict:
+    merged = dict(defaults)
+    merged.update(loaded)
+    return merged
+</code></pre>
+
+<p>The quarantine step is what turns a fatal error into a recoverable one. The bot starts from a clean default state, logs the event, and continues. An operator can later inspect the <code>.bad</code> file to see what was lost and reconcile manually. Crashing in a restart loop, by contrast, guarantees you never get to that inspection.</p>
+<p>Note that <code>os.replace</code> is used for the quarantine rename too — cheap, atomic, and it means a crash during quarantine leaves either the original or the <code>.bad</code> file, never a half-moved one.</p>
+<h2 id="schema-evolution-the-load-merge-pattern">Schema evolution: the load-merge pattern</h2>
+<p>State files outlive code versions. You add a field, ship the new build, and the first load reads a file written by the old build that doesn't have it. If your code does <code>state["new_field"]</code> you get a <code>KeyError</code> and the same restart loop.</p>
+<p>The <code>_merge_defaults</code> helper above handles the common case — top-level keys missing from the loaded state get backfilled from <code>DEFAULT_STATE</code>. For nested structures, recurse:</p>
+<pre class="codehilite"><code class="language-python">def _merge_defaults(loaded, defaults):
+    if not isinstance(defaults, dict) or not isinstance(loaded, dict):
+        return loaded if loaded is not None else defaults
+    merged = dict(defaults)
+    for key, value in loaded.items():
+        if key in defaults and isinstance(defaults[key], dict):
+            merged[key] = _merge_defaults(value, defaults[key])
+        else:
+            merged[key] = value
+    return merged
+</code></pre>
+
+<p>This gives you forward-compatible reads without a migration step for additive changes. For breaking changes — renaming a field, changing a type — bump <code>version</code> and branch on it in the loader. Keep the default state's <code>version</code> in sync with the code that writes it.</p>
+<h2 id="why-pretty-print">Why pretty-print</h2>
+<p><code>json.dump(..., indent=2, sort_keys=True)</code> costs a few hundred bytes and buys you a great deal during a postmortem. When a position goes sideways at 03:00 and you're <code>cat</code>-ing the state file from a backup, a single-line 40 KB blob is effectively unreadable. Indented, sorted output diffs cleanly against yesterday's state, so <code>diff state.json state.json.bad</code> immediately shows what changed before the corruption.</p>
+<p>Sort keys for the same reason: it makes diffs stable across writes. Without it, dict iteration order (insertion order in modern Python) can shuffle after a load-merge and produce noisy diffs that hide the real change.</p>
+<p>The 15-minute write interval means the extra serialization time is irrelevant. Optimize for the human reading the file at 3 a.m., not for the writer.</p>
+<h2 id="putting-it-together">Putting it together</h2>
+<p>The full cycle:</p>
+<pre class="codehilite"><code class="language-python">state = load_state(STATE_PATH)
+# ... mutate state: update positions, record reconcile time ...
+write_state(STATE_PATH, state)
+</code></pre>
+
+<p>Failure behavior:</p>
+<ul>
+<li><strong>Crash during <code>write_state</code>:</strong> the target file is untouched. The leftover <code>.tmp</code> is harmless and gets overwritten next run (or cleaned up by the <code>except</code> branch if the exception propagates). On next start, <code>load_state</code> reads the previous good state.</li>
+<li><strong>Power cut during <code>fsync</code>:</strong> the target is still the old file. The temp file may contain garbage; it's ignored.</li>
+<li><strong>Power cut between <code>fsync</code> and <code>os.replace</code>:</strong> same — old file intact.</li>
+<li><strong>Power cut during <code>os.replace</code>:</strong> the rename is atomic at the filesystem level; you get either the old or the new file, never a mix.</li>
+<li><strong>Corrupt target from any other cause:</strong> <code>load_state</code> quarantines it and rebuilds from defaults.</li>
+</ul>
+<p>The one thing this pattern does not protect against is a bug that writes <em>valid but wrong</em> state. That's a logic problem, not a durability problem, and the quarantine loader won't help. Version your state, log every transition, and keep the <code>.bad</code> backups around long enough to diagnose.</p>
+<h2 id="a-note-on-directory-durability">A note on directory durability</h2>
+<p>If you want the rename itself to survive a power cut on POSIX, <code>fsync</code> the parent directory after <code>os.replace</code>:</p>
+<pre class="codehilite"><code class="language-python">dir_fd = os.open(directory, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+</code></pre>
+
+<p>This forces the directory entry update to disk. It's cheap on most filesystems and worth adding if your state file is the only record of open positions. On Windows, directory handles can't be opened this way in the same manner, so skip it — <code>os.replace</code> plus the file <code>fsync</code> is the practical ceiling there.</p>
+<p>The pattern is small, boring, and eliminates an entire class of incidents. Every state file your bot writes should go through it.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-23 08:46:19</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BULLA</td>
+<td>短平快做多</td>
+<td>$0.0193</td>
+<td>$0.0199</td>
+<td>$0.0188</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>1 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">atomic write</span><span class="tag-badge">os.replace</span><span class="tag-badge">crash safety</span><span class="tag-badge">JSON</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
