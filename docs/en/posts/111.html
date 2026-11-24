@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Idempotent Signals: One Candle, One Entry, Whatever Happens Afterward - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="A 15-minute scanner is a reasonable choice for most strategies: it reacts quickly, it&#x27;s cheap to run, and it doesn&#x27;t nee...">
+    <meta name="keywords" content="idempotency,signals,deduplication,state machines">
+    <meta property="og:title" content="Idempotent Signals: One Candle, One Entry, Whatever Happens Afterward">
+    <meta property="og:description" content="A 15-minute scanner is a reasonable choice for most strategies: it reacts quickly, it&#x27;s cheap to run, and it doesn&#x27;t nee...">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/111.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Idempotent Signals: One Candle, One Entry, Whatever Happens Afterward</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-24</span>
+                <span class="category"><span class="tag-badge">Quant Trading</span></span>
+            </div>
+            <div class="post-content">
+<p>A 15-minute scanner is a reasonable choice for most strategies: it reacts quickly, it's cheap to run, and it doesn't need a websocket connection that might drop at 3 a.m. The problem is that the scanner runs 96 times a day while the strategy's decision bar is a 4h candle, which closes only 6 times a day. Every 4h candle is therefore observed by 24 consecutive scanner runs. If the scanner's entry logic is "a golden cross just happened on the last closed bar," that condition is true for roughly six hours, and the scanner will happily open a position on every run unless something stops it.</p>
+<p>Most systems stop it by accident: after the first fill, the position exists, the slot is occupied, and the entry path is skipped. That works until the position goes away for a reason other than the strategy changing its mind. A delisting, a 70% catastrophic stop, or a manual flatten frees the slot while the same candle is still the latest closed bar. On the next run the scanner sees the cross again and re-enters the trade it was just stopped out of, at the worst possible moment. The strategy didn't generate a second signal. The scanner simply forgot that it had already consumed the first one.</p>
+<h2 id="the-real-bug-is-missing-state-not-a-missing-check">The real bug is missing state, not a missing check</h2>
+<p>It's tempting to fix this with a cooldown ("don't re-enter within N bars") or a flag ("already traded this candle"). Both are patches on a deeper issue: the entry path has no memory of which signal events it has consumed. A signal here is not "the pair is in a crossed state." A signal is an event: <em>this specific candle closed with a cross on this pair</em>. Events have identities. The identity is the candle's close timestamp, which is stable, unique per pair, and cheap to store.</p>
+<p>Once you frame it that way, the fix is the same one message queues have used for decades: consumers dedupe by event id. Exactly-once consumption of a signal means the entry path checks whether this event id has been seen before, and records it atomically with the order.</p>
+<h2 id="the-state-signal_bar_used">The state: <code>signal_bar_used</code></h2>
+<p>Persist a map from pair to the timestamp of the candle whose cross was consumed:</p>
+<pre class="codehilite"><code class="language-python"># state.json (conceptual)
+{
+  &quot;signal_bar_used&quot;: {
+    &quot;PAIR_A&quot;: 1717027200,
+    &quot;PAIR_B&quot;: 1717027200
+  }
+}
+</code></pre>
+
+<p>Timestamps are candle close times in epoch seconds (or milliseconds — pick one and never mix). The entry rule becomes a single comparison:</p>
+<pre class="codehilite"><code class="language-python">def cross_is_fresh(pair: str, candle_ts: int, state: dict) -&gt; bool:
+    used = state.get(&quot;signal_bar_used&quot;, {}).get(pair)
+    return used != candle_ts
+</code></pre>
+
+<p>If the recorded timestamp equals the current candle's, the event has been consumed. It doesn't matter whether the position still exists, was stopped out, or was closed by a delisting — the event is spent. A new entry requires a <em>new</em> crossing on a <em>later</em> candle, which is what the strategy actually intends.</p>
+<h3 id="write-at-open-time-not-at-signal-time">Write at open time, not at signal time</h3>
+<p>The record must be written when the order is opened, in the same critical section that decides to open it. If you record the signal first and then place the order, a crash between the two leaves you with a consumed signal and no position — you miss the trade. If you place the order first and record afterward, a crash between the two leaves you with a position and an unconsumed signal — you re-enter on the next run. Neither ordering is safe without atomicity.</p>
+<p>The practical approach for a single-process scanner is to serialize the whole entry path behind one lock and write state before releasing it, accepting that a crash mid-order is handled by reconciliation at startup rather than by the signal logic:</p>
+<pre class="codehilite"><code class="language-python">import json, os, tempfile
+from contextlib import contextmanager
+
+STATE_PATH = &quot;state.json&quot;
+
+@contextmanager
+def state_lock():
+    # Single-process scanner: an in-process lock plus atomic file replace
+    # is sufficient. Multi-process setups need a real file lock or a DB.
+    yield
+
+def load_state() -&gt; dict:
+    if not os.path.exists(STATE_PATH):
+        return {&quot;version&quot;: 2, &quot;signal_bar_used&quot;: {}}
+    with open(STATE_PATH) as f:
+        return json.load(f)
+
+def save_state(state: dict) -&gt; None:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(STATE_PATH))
+    with os.fdopen(fd, &quot;w&quot;) as f:
+        json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, STATE_PATH)  # atomic on POSIX
+
+def try_open(pair: str, candle_ts: int, open_position) -&gt; bool:
+    with state_lock():
+        state = load_state()
+        used = state.setdefault(&quot;signal_bar_used&quot;, {})
+        if used.get(pair) == candle_ts:
+            return False  # event already consumed
+        open_position(pair)          # may raise; state untouched on failure
+        used[pair] = candle_ts       # consume the event
+        save_state(state)
+        return True
+</code></pre>
+
+<p>If <code>open_position</code> raises (rejected order, insufficient margin), the state is not written and the signal remains unconsumed — the next run can retry the same event. That's the correct behavior: the event was offered, not consumed. If the process dies after the fill but before <code>save_state</code>, startup reconciliation should detect the open position and backfill <code>signal_bar_used[pair]</code> with the current candle timestamp before the scanner resumes. Keep that reconciliation step small and explicit; it's the only place where the "position exists" heuristic is allowed to touch signal state.</p>
+<h2 id="edge-cases">Edge cases</h2>
+<h3 id="delisting-wipes-the-pairs-state-gracefully">Delisting wipes the pair's state gracefully</h3>
+<p>When a pair is delisted, its entry in <code>signal_bar_used</code> is dead weight, and worse, a stale timestamp could suppress a legitimate first signal if the symbol is ever relisted. Handle removal as part of the delisting routine, not as a background cleanup:</p>
+<pre class="codehilite"><code class="language-python">def on_delist(pair: str) -&gt; None:
+    state = load_state()
+    state.get(&quot;signal_bar_used&quot;, {}).pop(pair, None)
+    save_state(state)
+</code></pre>
+
+<p>Use <code>pop(..., None)</code> so the routine is idempotent itself — running it twice, or running it for a pair that never traded, must not raise. If the delisting arrives as an exchange event that the scanner processes asynchronously, make the removal tolerant of ordering: a delist event for an unknown pair is a no-op, and an entry attempt for a pair that is being delisted should fail at the order layer and leave state untouched.</p>
+<h3 id="schema-migration-when-adding-the-map">Schema migration when adding the map</h3>
+<p>Existing state files won't have <code>signal_bar_used</code>. Don't scatter <code>.get("signal_bar_used", {})</code> through the codebase and hope; migrate once, on load, with a version field:</p>
+<pre class="codehilite"><code class="language-python">def migrate(state: dict) -&gt; dict:
+    version = state.get(&quot;version&quot;, 1)
+    if version &lt; 2:
+        # v1 had no signal dedupe. Seed from currently open positions so
+        # that live trades aren't re-entered on the first run after deploy.
+        state[&quot;signal_bar_used&quot;] = {
+            pair: pos[&quot;entry_candle_ts&quot;]
+            for pair, pos in state.get(&quot;positions&quot;, {}).items()
+        }
+        state[&quot;version&quot;] = 2
+    return state
+</code></pre>
+
+<p>The seeding step matters. If you deploy the new code while a position opened on the current candle is live, an empty map means the first run after deploy sees a fresh cross and opens a second position. Backfilling from open positions closes that window. Write the migrated state back immediately so the migration runs exactly once, and keep the function pure so it's testable.</p>
+<h3 id="the-unit-test-replay-the-same-candle-twice-open-exactly-once">The unit test: replay the same candle twice, open exactly once</h3>
+<p>This is the test that would have caught the original bug, and it's the one to keep forever:</p>
+<pre class="codehilite"><code class="language-python">def test_same_candle_opens_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(&quot;scanner.STATE_PATH&quot;, str(tmp_path / &quot;state.json&quot;))
+    opens = []
+
+    def fake_open(pair):
+        opens.append(pair)
+
+    candle_ts = 1717027200
+    assert scanner.try_open(&quot;PAIR_A&quot;, candle_ts, fake_open) is True
+    assert scanner.try_open(&quot;PAIR_A&quot;, candle_ts, fake_open) is False
+
+    assert opens == [&quot;PAIR_A&quot;]
+    assert scanner.load_state()[&quot;signal_bar_used&quot;][&quot;PAIR_A&quot;] == candle_ts
+</code></pre>
+
+<p>Then extend it with the scenario that motivated all of this — position force-closed, same candle still current:</p>
+<pre class="codehilite"><code class="language-python">def test_no_reentry_after_stopout_on_same_candle(tmp_path, monkeypatch):
+    monkeypatch.setattr(&quot;scanner.STATE_PATH&quot;, str(tmp_path / &quot;state.json&quot;))
+    candle_ts = 1717027200
+
+    scanner.try_open(&quot;PAIR_A&quot;, candle_ts, lambda p: None)
+    force_close(&quot;PAIR_A&quot;, reason=&quot;catastrophic_stop&quot;)   # slot freed
+    assert scanner.try_open(&quot;PAIR_A&quot;, candle_ts, lambda p: None) is False
+
+    # A genuinely new crossing on a later candle is allowed.
+    assert scanner.try_open(&quot;PAIR_A&quot;, candle_ts + 14400, lambda p: None) is True
+</code></pre>
+
+<p>And one for the failed-order case, asserting the event is <em>not</em> consumed when the open raises:</p>
+<pre class="codehilite"><code class="language-python">def test_failed_open_does_not_consume_signal(tmp_path, monkeypatch):
+    monkeypatch.setattr(&quot;scanner.STATE_PATH&quot;, str(tmp_path / &quot;state.json&quot;))
+    candle_ts = 1717027200
+
+    def boom(pair):
+        raise RuntimeError(&quot;order rejected&quot;)
+
+    with pytest.raises(RuntimeError):
+        scanner.try_open(&quot;PAIR_A&quot;, candle_ts, boom)
+    assert &quot;PAIR_A&quot; not in scanner.load_state()[&quot;signal_bar_used&quot;]
+</code></pre>
+
+<h2 id="why-this-framing-pays-off">Why this framing pays off</h2>
+<p>Calling the timestamp <code>signal_bar_used</code> rather than <code>last_trade_candle</code> keeps the semantics honest: it records <em>consumption of an event</em>, not a property of the position. That distinction is what makes the delisting case, the stop-out case, and the restart case all fall out of the same comparison instead of needing three separate guards. It also makes the scanner's behavior auditable — for any pair, the state file tells you exactly which crossing was acted on, and any entry whose candle timestamp differs from that value is explainable.</p>
+<p>The general principle is worth restating because it generalizes past this one scanner: any scheduled consumer of a slower event stream needs an event id and a dedupe record, or it will eventually double-consume during the window when the event is still current and the consumer's side effects have been undone. Candle close timestamps make good event ids for bar-driven strategies. Use them.</p>
+<p>More notes like this ship every week on this site.</p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">idempotency</span><span class="tag-badge">signals</span><span class="tag-badge">deduplication</span><span class="tag-badge">state machines</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
