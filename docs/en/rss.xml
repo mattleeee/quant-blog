@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Idempotent Signals: One Candle, One Entry, Whatever Happens Afterward</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/111.html</link>
+            <description>A 15-minute scanner is a reasonable choice for most strategies: it reacts quickly, it&#x27;s cheap to run, and it doesn&#x27;t need a websocket connection that might drop...</description>
+            <pubDate>2026-11-24</pubDate>
+            <category>Quant Trading</category>
+        </item>
+        <item>
             <title>Atomic State Files in Python: tmp + os.replace</title>
             <link>https://www.hkcode.dpdns.org/en/posts/110.html</link>
             <description>A trading bot wakes up every 15 minutes, loads state.json, reconciles positions, and writes the file back....</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/38.html</link>
             <description>The Anatomy of an Orchestrated Pump A whale-driven altcoin pump is not a random walk with fat tails. It has a schedule....</description>
             <pubDate>2026-11-05</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Market Sentiment as an Input: Integrating the Fear &amp; Greed Index</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/37.html</link>
-            <description>The Fear &amp; Greed index is a daily composite scaled 0–100, built from volatility, momentum, social signals, dominance and trend components....</description>
-            <pubDate>2026-11-04</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
