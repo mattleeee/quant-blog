@@ -7,6 +7,13 @@
         <language>en-us</language>
         
         <item>
+            <title>Shipping Quant Code to a Locked-Down Windows Server with robocopy and schtasks</title>
+            <link>https://www.hkcode.dpdns.org/en/posts/112.html</link>
+            <description>Deploying code to a locked-down Windows server is mostly a problem of working with what is already there....</description>
+            <pubDate>2026-11-25</pubDate>
+            <category>Windows Automation</category>
+        </item>
+        <item>
             <title>Idempotent Signals: One Candle, One Entry, Whatever Happens Afterward</title>
             <link>https://www.hkcode.dpdns.org/en/posts/111.html</link>
             <description>A 15-minute scanner is a reasonable choice for most strategies: it reacts quickly, it&#x27;s cheap to run, and it doesn&#x27;t need a websocket connection that might drop...</description>
@@ -137,13 +144,6 @@
             <link>https://www.hkcode.dpdns.org/en/posts/39.html</link>
             <description>Why the Fifth Rule Is Usually Noise Every discretionary backtest dies the same death. You start with a simple idea — buy the pullback, exit on a failed retest....</description>
             <pubDate>2026-11-06</pubDate>
-            <category>Quant Trading</category>
-        </item>
-        <item>
-            <title>Whale-Pump Altcoins and the Pullback Problem</title>
-            <link>https://www.hkcode.dpdns.org/en/posts/38.html</link>
-            <description>The Anatomy of an Orchestrated Pump A whale-driven altcoin pump is not a random walk with fat tails. It has a schedule....</description>
-            <pubDate>2026-11-05</pubDate>
             <category>Quant Trading</category>
         </item>
     </channel>
