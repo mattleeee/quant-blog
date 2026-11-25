@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shipping Quant Code to a Locked-Down Windows Server with robocopy and schtasks - Code & Quant</title>
+    <meta name="author" content="mattleeee">
+        <meta name="description" content="Deploying code to a locked-down Windows server is mostly a problem of working with what is already there....">
+    <meta name="keywords" content="robocopy,schtasks,deployment,patch distribution">
+    <meta property="og:title" content="Shipping Quant Code to a Locked-Down Windows Server with robocopy and schtasks">
+    <meta property="og:description" content="Deploying code to a locked-down Windows server is mostly a problem of working with what is already there....">
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="Code & Quant">
+    <meta property="og:url" content="https://www.hkcode.dpdns.org/en/posts/112.html">
+    <link rel="stylesheet" href="/en/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css">
+</head>
+<body>
+<div class="reading-progress" id="readingProgress"></div>
+    <header>
+        <nav>
+            <a href="/en/" class="logo">Code & Quant</a>
+            <div class="nav-links">
+                <a href="/en/">Home</a>
+                <a href="/en/categories.html">Categories</a>
+                <a href="/en/about.html">About</a>
+                <a href="/">中文</a>
+            </div>
+        </nav>
+    </header>
+    <main>
+        <div class="article-wrapper">
+        <article class="post">
+            <h1>Shipping Quant Code to a Locked-Down Windows Server with robocopy and schtasks</h1>
+            <div class="post-meta">
+                <span class="date">2026-11-25</span>
+                <span class="category"><span class="tag-badge">Windows Automation</span></span>
+            </div>
+            <div class="post-content">
+<p>Deploying code to a locked-down Windows server is mostly a problem of working with what is already there. On a typical quant box inside a corporate network you get no pip, no git, no CI agent, no outbound access to GitHub, a console that speaks GBK, and an endpoint security suite that treats every new process creation as a suspect. You cannot install a deployment tool, so you build the deployment out of two binaries that ship with Windows: <code>robocopy</code> and <code>schtasks</code>.</p>
+<p>This is the recipe we use to push strategy code, launchers, and scheduled task definitions onto such a machine without ever touching the network path to the outside world.</p>
+<h2 id="the-shape-of-the-problem">The Shape of the Problem</h2>
+<p>The target machine runs paper-trade and live-adjacent jobs against a private Python runtime that sits under the user profile — something like <code>C:\Users\quant\py311\python.exe</code>. There is no system Python, no virtualenv tooling worth the name, and installing anything requires a change ticket. The workspace layout is fixed:</p>
+<pre class="codehilite"><code>workspace/
+  scripts/          # strategy and utility modules
+  launcher/         # bat files that start jobs
+  runtime-data/     # paper-trade state, logs, sqlite files
+  update.bat        # the deploy entrypoint
+</code></pre>
+
+<p>The critical constraint: <code>runtime-data/</code> must never be overwritten by a code deployment. A paper-trade position file or a state sqlite that gets replaced by a stale copy from the dev machine is worse than a failed deploy, because it fails silently and corrupts the record. Everything below is organized around protecting that directory.</p>
+<p>The workflow is deliberately boring. Develop and replay-test on the local machine. Copy changed files into a <code>patch-package/</code> directory that mirrors the production layout exactly — <code>scripts/</code>, <code>launcher/</code>, the launcher bat. Carry the package to the target (a mapped share, a USB stick, whatever the security policy allows). Run <code>update.bat</code> on the target.</p>
+<h2 id="robocopy-forcing-the-overwrite">robocopy: Forcing the Overwrite</h2>
+<p>The naive <code>robocopy</code> invocation fails on these boxes for two reasons. First, clock skew: the target server's clock drifts against the dev machine, so <code>/XO</code> (exclude older) and the default timestamp comparison skip files that actually changed. Second, the runtime state directory gets swept up in a <code>/E</code> copy and clobbered.</p>
+<p>The line we actually use:</p>
+<pre class="codehilite"><code class="language-bat">robocopy &quot;%~dp0patch-package&quot; &quot;%~dp0workspace&quot; /E /IS /IT /XD &quot;%~dp0workspace\runtime-data&quot; /R:2 /W:2 /NP /LOG+:&quot;%~dp0update.log&quot;
+</code></pre>
+
+<p>Walking through the flags:</p>
+<ul>
+<li><code>/E</code> copies subdirectories including empty ones.</li>
+<li><code>/IS</code> includes same files — overwrite even if source and destination look identical by size and timestamp.</li>
+<li><code>/IT</code> includes tweaked files — overwrite files whose attributes differ. Together with <code>/IS</code> this defeats clock skew entirely: the patch package is authoritative, and anything in it lands on the target regardless of what the timestamps claim.</li>
+<li><code>/XD</code> excludes the runtime-data directory by full path. This is the load-bearing flag. Exclusion by name alone (<code>/XD runtime-data</code>) is tempting but risky if a strategy subfolder ever happens to share the name; pin it to the absolute path.</li>
+<li><code>/R:2 /W:2</code> bounds retries so a locked file does not hang the deploy for the default one million retries.</li>
+<li><code>/NP</code> suppresses per-file progress noise, which matters when the output is being captured by a scheduler and read by a human later.</li>
+<li><code>/LOG+</code> appends to a log next to the script, so every deploy leaves an audit trail.</li>
+</ul>
+<h3 id="handling-robocopys-exit-codes">Handling robocopy's Exit Codes</h3>
+<p><code>robocopy</code> returns bitmask exit codes, and this trips up every wrapper script written the first time. Codes 0 through 7 are success variants — 0 means no files copied, 1 means files copied, 2 means extra files present, 3 is 1+2, and so on. Only 8 and above indicate real failure (8 = some files could not be copied, 16 = fatal error). A batch file that checks <code>if errorlevel 1</code> will abort on a perfectly healthy deploy.</p>
+<p>In <code>update.bat</code>:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal
+robocopy &quot;%~dp0patch-package&quot; &quot;%~dp0workspace&quot; /E /IS /IT /XD &quot;%~dp0workspace\runtime-data&quot; /R:2 /W:2 /NP /LOG+:&quot;%~dp0update.log&quot;
+set RC=%ERRORLEVEL%
+if %RC% GEQ 8 (
+    echo UPDATE FAILED rc=%RC%
+    exit /b %RC%
+)
+echo UPDATE OK rc=%RC%
+exit /b 0
+</code></pre>
+
+<p>If you drive the deploy from Python instead — useful when the patch package is assembled programmatically — mirror the same logic:</p>
+<pre class="codehilite"><code class="language-python">import subprocess
+import sys
+from pathlib import Path
+
+def deploy(package_dir: Path, workspace: Path) -&gt; int:
+    runtime_data = workspace / &quot;runtime-data&quot;
+    cmd = [
+        &quot;robocopy&quot;, str(package_dir), str(workspace),
+        &quot;/E&quot;, &quot;/IS&quot;, &quot;/IT&quot;,
+        &quot;/XD&quot;, str(runtime_data),
+        &quot;/R:2&quot;, &quot;/W:2&quot;, &quot;/NP&quot;,
+        &quot;/LOG+:&quot; + str(package_dir.parent / &quot;update.log&quot;),
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    rc = proc.returncode
+    if rc &gt;= 8:
+        print(f&quot;UPDATE FAILED rc={rc}&quot;, file=sys.stderr)
+        return rc
+    print(f&quot;UPDATE OK rc={rc}&quot;)
+    return 0
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(deploy(Path(r&quot;C:\deploy\patch-package&quot;), Path(r&quot;C:\deploy\workspace&quot;)))
+</code></pre>
+
+<p>The <code>&gt;= 8</code> check is the whole point. Everything below it is a successful copy with varying degrees of "there were extra files" or "nothing changed."</p>
+<h2 id="self-discovering-launchers">Self-Discovering Launchers</h2>
+<p>Absolute paths are a maintenance tax. The workspace moves once — a new user profile, a re-imaged box, a different drive letter — and every scheduled task and bat file breaks. The fix is to make the launcher find its own workspace at runtime.</p>
+<p>A launcher bat that scans upward from its own location:</p>
+<pre class="codehilite"><code class="language-bat">@echo off
+setlocal enabledelayedexpansion
+set &quot;HERE=%~dp0&quot;
+set &quot;WS=&quot;
+for %%D in (&quot;%HERE%..&quot; &quot;%HERE%..\..&quot; &quot;%HERE%..\..\..&quot;) do (
+    if exist &quot;%%~fD\scripts&quot; if exist &quot;%%~fD\launcher&quot; (
+        set &quot;WS=%%~fD&quot;
+        goto :found
+    )
+)
+echo WORKSPACE NOT FOUND
+exit /b 1
+:found
+set &quot;PY=%USERPROFILE%\py311\python.exe&quot;
+&quot;%PY%&quot; &quot;%WS%\scripts\run_strategy.py&quot; --config &quot;%WS%\launcher\strategy.ini&quot;
+exit /b %ERRORLEVEL%
+</code></pre>
+
+<p>The equivalent scan in Python, for cases where the launcher is itself Python:</p>
+<pre class="codehilite"><code class="language-python">from pathlib import Path
+
+def find_workspace(start: Path) -&gt; Path:
+    for candidate in [start, *start.parents]:
+        if (candidate / &quot;scripts&quot;).is_dir() and (candidate / &quot;launcher&quot;).is_dir():
+            return candidate
+    raise RuntimeError(f&quot;workspace not found above {start}&quot;)
+
+if __name__ == &quot;__main__&quot;:
+    ws = find_workspace(Path(__file__).resolve().parent)
+    print(ws)
+</code></pre>
+
+<p>Now the scheduled task only needs to point at the launcher bat, and the launcher resolves everything else. Moving the workspace is a file move, not a task-definition edit.</p>
+<h2 id="registering-tasks-with-schtasks">Registering Tasks with schtasks</h2>
+<p>New jobs get registered with <code>schtasks /create</code>. Minimal example, daily at 08:55, running under the current user, pointing at the self-discovering launcher:</p>
+<pre class="codehilite"><code class="language-bat">schtasks /create /tn &quot;Quant\PaperTrade-Open&quot; /tr &quot;\&quot;C:\deploy\workspace\launcher\run_papertrade.bat\&quot;&quot; /sc daily /st 08:55 /ru &quot;%USERNAME%&quot; /f
+</code></pre>
+
+<p>Notes that save time:</p>
+<ul>
+<li><code>/f</code> overwrites an existing task of the same name, which makes the registration step idempotent and safe to re-run as part of an update.</li>
+<li>The <code>/tr</code> value needs inner quotes escaped when the path contains spaces. If you hit quoting trouble, wrap the whole thing in a small <code>cmd /c</code> call or register a VBS wrapper (below) instead of the bat directly.</li>
+<li><code>/ru</code> without <code>/rp</code> runs only when the user is logged on. On a locked-down box that is often exactly what you want — the job inherits the user's environment, including the private Python runtime, without storing a password anywhere.</li>
+<li>Use a task folder prefix (<code>Quant\</code>) so the security suite's process-creation alerts and your own <code>schtasks /query /fo LIST</code> output stay readable.</li>
+</ul>
+<h3 id="hard-timeouts-and-the-silent-vbs-wrapper">Hard Timeouts and the Silent VBS Wrapper</h3>
+<p>Two problems remain. First, a hung strategy process can hold a scheduled task open indefinitely. Second, some endpoint security products flag <code>cmd.exe</code> spawning <code>python.exe</code> on a schedule as suspicious, and a visible console window on a server session is noise nobody wants.</p>
+<p>Both are solved by launching through a VBS wrapper that runs the bat hidden and enforces a timeout:</p>
+<pre class="codehilite"><code class="language-vbscript">' run_hidden.vbs — invoked by schtasks, runs the bat with no window
+Dim shell, rc
+Set shell = CreateObject(&quot;WScript.Shell&quot;)
+rc = shell.Run(&quot;cmd /c &quot;&quot;C:\deploy\workspace\launcher\run_papertrade.bat&quot;&quot;&quot;, 0, True)
+WScript.Quit rc
+</code></pre>
+
+<p>The <code>0</code> hides the window; <code>True</code> waits for completion so the exit code propagates to the scheduler. The hard timeout belongs inside the Python entrypoint, because the VBS layer cannot kill a child it is blocking on:</p>
+<pre class="codehilite"><code class="language-python">import signal
+import sys
+
+class Timeout(Exception):
+    pass
+
+def _alarm(signum, frame):
+    raise Timeout(&quot;strategy exceeded time budget&quot;)
+
+def main() -&gt; int:
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(45 * 60)  # hard 45-minute budget per run
+    try:
+        run_strategy()
+    except Timeout:
+        print(&quot;TIMEOUT: strategy aborted&quot;, file=sys.stderr)
+        return 2
+    finally:
+        signal.alarm(0)
+    return 0
+</code></pre>
+
+<p><code>SIGALRM</code> does not fire while the main thread is blocked in a C extension, so pair it with a watchdog thread that calls <code>os._exit(3)</code> after a slightly longer deadline if the alarm path itself hangs. Belt and braces, but on a box where you cannot attach a debugger, it is the difference between a stuck task and a clean failure.</p>
+<h2 id="the-gotcha-registry">The Gotcha Registry</h2>
+<p>Keep this list somewhere the next person will find it:</p>
+<ol>
+<li><strong>Bat files must be ASCII with CRLF line endings.</strong> The console code page is GBK (936). UTF-8 bat files with non-ASCII comments render as mojibake at best and break parsing at worst. Write bat files in plain ASCII, save with CRLF, and keep comments in English. Python source can be UTF-8, but print statements should stick to ASCII or set <code>PYTHONIOENCODING=gbk</code> in the launcher.</li>
+<li><strong><code>python.exe</code> is a private runtime under the user profile.</strong> Never reference <code>python</code> from <code>PATH</code> in a scheduled task; the resolved binary may be a completely different interpreter or nothing at all. Always use <code>%USERPROFILE%\py311\python.exe</code> or the full path.</li>
+<li><strong>robocopy exit codes 0–7 are success.</strong> Only abort on 8+. This is the single most common cause of "the deploy failed" tickets that turn out to be healthy copies.</li>
+<li><strong><code>/IS /IT</code> before you trust timestamps.</strong> Clock skew between dev and target is normal; treat the patch package as authoritative and force the overwrite.</li>
+<li><strong>Exclude <code>runtime-data</code> by absolute path.</strong> Never let a code update touch paper-trade state.</li>
+<li><strong>Every scheduled task gets a hard timeout.</strong> A hung process holding a task open blocks the next run and confuses the scheduler's history.</li>
+<li><strong>Launch through the VBS wrapper.</strong> Hidden window, propagated exit code, fewer security-suite alerts on the <code>cmd</code> → <code>python</code> chain.</li>
+<li><strong>Log the deploy.</strong> <code>/LOG+</code> on robocopy, and have <code>update.bat</code> echo its final return code. When the security team asks what changed and when, the log answers.</li>
+</ol>
+<h2 id="putting-it-together">Putting It Together</h2>
+<p>The full update cycle on the target is: copy <code>patch-package/</code> next to the workspace, run <code>update.bat</code>, confirm <code>UPDATE OK rc=N</code> in the console and the appended log, then re-register any changed tasks with <code>schtasks /create /f</code>. The self-discovering launchers mean the task definitions never encode a path, and the VBS wrapper plus in-process timeout mean a runaway strategy fails cleanly instead of wedging the scheduler.</p>
+<p>None of this is elegant. It is, however, entirely composed of binaries that are already on the box, which is the only kind of tooling that survives an airtight Windows server.</p>
+<p>More notes like this ship every week on this site.</p>
+<hr />
+<h2 id="daily-picks">Daily Picks</h2>
+<blockquote>
+<p>The following pairs are selected from the multi-timeframe trend scanner (Gate.io futures) and are for technical-analysis study only — not investment advice.
+Data updated: 2026-11-25 08:46:15</p>
+</blockquote>
+<h3 id="long">Long</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ON</td>
+<td>短平快做多</td>
+<td>$0.108</td>
+<td>$0.1113</td>
+<td>$0.1053</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<h3 id="short">Short</h3>
+<table>
+<thead>
+<tr>
+<th>Pair</th>
+<th>Signal</th>
+<th>Price</th>
+<th>Take Profit</th>
+<th>Stop Loss</th>
+<th>R/R</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAGMA</td>
+<td>扫荡做空</td>
+<td>$0.2587</td>
+<td>$0.2479</td>
+<td>$0.2678</td>
+<td>1:1.2</td>
+</tr>
+</tbody>
+</table>
+<p><em>2 picks selected. Scanner runs every 15 minutes.</em></p>
+            </div>
+            <div class="post-tags"><span class="tag-badge">robocopy</span><span class="tag-badge">schtasks</span><span class="tag-badge">deployment</span><span class="tag-badge">patch distribution</span></div>
+            <div class="post-footer">
+                <span>Author: mattleeee</span>
+                <span><a href="https://github.com/mattleeee">GitHub</a></span>
+            </div>
+        </article>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 Code & Quant. Powered by Python &amp; GitHub Pages</p>
+    </footer>
+<button class="back-to-top" id="backToTop" onclick="document.body.scrollIntoView({behavior:'smooth'})">&#8593;</button>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+    <script>
+    // Reading progress bar
+    window.addEventListener('scroll', function() {{
+        var h = document.documentElement;
+        var st = h.scrollTop || document.body.scrollTop;
+        var sh = h.scrollHeight - h.clientHeight;
+        var pct = sh > 0 ? (st / sh) * 100 : 0;
+        var bar = document.getElementById('readingProgress');
+        if (bar) bar.style.width = pct + '%';
+        // Back-to-top button
+        var btn = document.getElementById('backToTop');
+        if (btn) {{
+            if (st > 300) btn.classList.add('show');
+            else btn.classList.remove('show');
+        }}
+    }});
+    </script>
+</body>
+</html>
